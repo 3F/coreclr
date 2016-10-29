@@ -405,6 +405,11 @@ REM ============================================================================
 
 :PerformCoreLibBuild
 
+if defined __SkipCoreLibBuild if defined __SkipBuildPackages (
+    echo %__MsgPrefix%Skipping CoreLib and nuget
+    goto PerformTestBuild
+)
+
 REM setlocal to prepare for vsdevcmd.bat
 setlocal EnableDelayedExpansion EnableExtensions
 
@@ -479,7 +484,12 @@ if NOT errorlevel 0 (
 
 :GenerateNuget
 if /i "%__BuildArch%" =="arm64" goto :SkipNuget
-if /i "%__SkipBuildPackages%" == 1 goto :SkipNuget
+:: if /i "%__SkipBuildPackages%" == "1" goto :SkipNuget
+
+if defined __SkipBuildPackages (
+    echo %__MsgPrefix%Skipping nuget
+    goto SkipNuget
+)
 
 set "__BuildLog=%__LogsDir%\Nuget_%__BuildOS%__%__BuildArch%__%__BuildType%.log"
 set "__BuildWrn=%__LogsDir%\Nuget_%__BuildOS%__%__BuildArch%__%__BuildType%.wrn"
@@ -547,6 +557,8 @@ REM ===
 REM === Test build section
 REM ===
 REM =========================================================================================
+
+:PerformTestBuild
 
 if defined __SkipTestBuild (
     echo %__MsgPrefix%Skipping test build

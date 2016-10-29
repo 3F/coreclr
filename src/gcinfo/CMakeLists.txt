@@ -20,7 +20,9 @@ if(CLR_CMAKE_PLATFORM_UNIX)
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 add_subdirectory(lib)
-add_subdirectory(crossgen)
+if(NOT GFLAG_COMPILE_WIN_SHORT)
+    add_subdirectory(crossgen)
+endif()
 
 _install (FILES gcinfoencoder.cpp
                DESTINATION gcinfo)

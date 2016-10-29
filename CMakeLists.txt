@@ -23,6 +23,8 @@ if(CORECLR_SET_RPATH)
     set(MACOSX_RPATH ON)
 endif(CORECLR_SET_RPATH)
 
+set(GFLAG_COMPILE_WIN_SHORT $ENV{__CMakeCompileWinShort})
+
 OPTION(CMAKE_ENABLE_CODE_COVERAGE "Enable code coverage" OFF)
 
 # Ensure that python is present
@@ -479,12 +481,16 @@ if(CLR_CMAKE_PLATFORM_UNIX)
 endif(CLR_CMAKE_PLATFORM_UNIX)
 
 # Add this subdir. We install the headers for the jit.
-add_subdirectory(src/pal/prebuilt/inc)
+if(NOT GFLAG_COMPILE_WIN_SHORT)
+    add_subdirectory(src/pal/prebuilt/inc)
+endif()
 
 add_subdirectory(src/debug/debug-pal)
 
 if(WIN32)
-  add_subdirectory(src/gc/sample)
+    if(NOT GFLAG_COMPILE_WIN_SHORT)
+        add_subdirectory(src/gc/sample)
+    endif()
 endif()
 
 # Above projects do not build with these compile options
