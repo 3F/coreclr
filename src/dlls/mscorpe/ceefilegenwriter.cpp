@@ -190,6 +190,7 @@ CeeFileGenWriter::CeeFileGenWriter() // ctor is protected
     m_dllSwitch = false;
     m_objSwitch = false;
     m_libraryName = NULL;
+    m_pathToCvtRes = nullptr;
     m_libraryGuid = GUID_NULL;
 
     m_entryPoint = 0;
@@ -493,6 +494,21 @@ HRESULT CeeFileGenWriter::setLibraryGuid(__in LPWSTR libraryGuid)
 {
     return IIDFromString(libraryGuid, &m_libraryGuid);
 } // HRESULT CeeFileGenWriter::setLibraryGuid()
+
+HRESULT CeeFileGenWriter::setPathToCvtRes(__in LPWSTR path)
+{
+    if(m_pathToCvtRes) {
+        delete[] m_pathToCvtRes;
+    }
+
+    int len = lstrlenW(path) + 1;
+    m_pathToCvtRes = (LPWSTR)new (nothrow) WCHAR[len];
+
+    TESTANDRETURN(m_pathToCvtRes != nullptr, E_OUTOFMEMORY);
+    wcscpy_s(m_pathToCvtRes, len, path);
+
+    return S_OK;
+} // HRESULT CeeFileGenWriter::setPathToCvtRes()
 
 HRESULT CeeFileGenWriter::emitLibraryName(IMetaDataEmit *emitter)
 {
@@ -941,6 +957,90 @@ HRESULT CeeFileGenWriter::emitExeMain()
     return S_OK;
 } // HRESULT CeeFileGenWriter::emitExeMain()
 
+/**
+* Gets path to converter of resources .res -> obj COFF-format.
+* https://github.com/3F/DllExport/issues/17
+* https://github.com/3F/coreclr/issues/2
+* @param workdir Path to current directory.
+* @param path User path without leading and trailing white-space chars. Specified from our new /CVRES key etc.
+* @param fname File name of converter. null value is valid for handler by default. 
+* @param ret [out] Final path to converter will be here.
+*/
+void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString* ret)
+{
+    auto retval = [&](LPCWSTR v = nullptr)
+    {
+        ret->Clear();
+        if(v != nullptr) {
+            ret->Append(v);
+        }
+    };
+
+    // already should not contain any leading and trailing white-space chars
+    int len = lstrlenW(path);
+
+    if(fname == nullptr) {
+        fname = L"cvtres.exe";
+    }
+
+    if(path == nullptr || len < 1) {
+        retval(fname); // leave as is for env.PATH
+        return;
+    }
+
+    // check special symbols in path
+
+    int /* : */colon = 0, /* \ */slashL = 0, /* / */slashR = 0;
+    for(int i = 0; i < len; ++i)
+    {
+        if(path[i] == L':') {
+            colon = 1;
+            break;
+        }        
+        if(path[i] == L'\\' && ++slashL > 1) {
+            if(i < 2) {
+                slashL = -1;
+            }
+            break;
+        }        
+        if(path[i] == L'/') {
+            slashR = (i == 0) ? -1 : 1;
+            break;
+        }
+    }
+
+    // rules
+
+    if(colon == 0 && slashL == 0 && slashR == 0) // filename only
+    {
+        if(workdir == nullptr) {
+            retval(path);
+            return;
+        }
+
+        ret->Append(workdir); ret->Append(path);
+        if(FileExists(ret->GetUnicode())) {
+            return;
+        }
+
+        retval(path);
+        return;
+    }
+
+    ret->Append(path);
+
+    if(path[--len] == L'/' || path[len] == L'\\') { // directory
+        ret->Append(fname);
+    }
+
+    if(slashL == -1 || slashR == -1 || colon > 0) { // absolute
+        return;
+    }
+
+    if(workdir != nullptr) {
+        ret->Insert(ret->Begin(), workdir); // workdir + path ^
+    }
+}
 
 HRESULT GetClrSystemDirectory(SString& pbuffer)
 {
@@ -963,15 +1063,19 @@ HRESULT GetClrSystemDirectory(SString& pbuffer)
 }
 
 #ifndef FEATURE_PAL
-BOOL RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEWriter &pewriter)
+BOOL CeeFileGenWriter::RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEWriter &pewriter)
 {
     BOOL fSuccess = FALSE;
 
     PROCESS_INFORMATION pi;
 
-    PathString wszSystemDir;
-    if (FAILED(GetClrSystemDirectory(wszSystemDir)))
-        return FALSE;
+    PathString wszSystemDir, cvtres;
+    if(FAILED(GetClrSystemDirectory(wszSystemDir))) {
+        pathToCvtRes(nullptr, m_pathToCvtRes, nullptr, &cvtres);
+    }
+    else {
+        pathToCvtRes(wszSystemDir.GetUnicode(), m_pathToCvtRes, nullptr, &cvtres);
+    }
 
     WCHAR* wzMachine;
     if(pewriter.isIA64())
@@ -989,16 +1093,16 @@ BOOL RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEW
     LPWSTR ext = PathFindExtension(pszFilename);
     if(*ext == NULL)
     {
-        ssCmdLine.Printf(L"%scvtres.exe /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s.\"",
-                    wszSystemDir.GetUnicode(),
+        ssCmdLine.Printf(L"%s /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s.\"",
+                    cvtres.GetUnicode(),
                     wzMachine,
                     tempResObj,
                     pszFilename);
     }
     else
     {
-        ssCmdLine.Printf(L"%scvtres.exe /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s\"",
-                    wszSystemDir.GetUnicode(),
+        ssCmdLine.Printf(L"%s /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s\"",
+                    cvtres.GetUnicode(),
                     wzMachine,
                     tempResObj,
                     pszFilename);
@@ -1037,7 +1141,7 @@ BOOL RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEW
 
 // Ensure that pszFilename is an object file (not just a binary resource)
 // If we convert, then return obj filename in pszTempFilename
-HRESULT ConvertResource(const WCHAR * pszFilename, __in_ecount(cchTempFilename) WCHAR *pszTempFilename, size_t cchTempFilename, PEWriter &pewriter)
+HRESULT CeeFileGenWriter::ConvertResource(const WCHAR * pszFilename, __in_ecount(cchTempFilename) WCHAR *pszTempFilename, size_t cchTempFilename, PEWriter &pewriter)
 {
     HANDLE hFile = WszCreateFile(pszFilename, GENERIC_READ,
         FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);

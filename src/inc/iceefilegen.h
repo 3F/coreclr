@@ -129,6 +129,8 @@ class ICeeFileGen {
 
     virtual HRESULT SetLibraryGuid (HCEEFILE ceeFile, _In_ LPWSTR LibraryGuid);
 
+    virtual HRESULT SetPathToCvtRes(HCEEFILE ceeFile, _In_ LPWSTR path);
+
     virtual HRESULT DestroyCeeFile(HCEEFILE *ceeFile); // call this to delete a file handle
 
     virtual HRESULT GetSectionCreate (HCEEFILE ceeFile, const char *name, DWORD flags, HCEESECTION *section);

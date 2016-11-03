@@ -35,6 +35,7 @@ class CeeFileGenWriter : public CCeeGen
     LPWSTR m_outputFileName;
     LPWSTR m_resourceFileName;
     LPWSTR m_libraryName;
+    LPWSTR m_pathToCvtRes;
     GUID   m_libraryGuid;
     bool   m_dllSwitch;
 
@@ -120,6 +121,8 @@ public:
     HRESULT setLibraryName(__in LPWSTR libraryName);
     LPWSTR getLibraryName();
 
+    HRESULT setPathToCvtRes(__in LPWSTR path);
+
     HRESULT setDirectoryEntry(CeeSection &section, ULONG entry, ULONG size, ULONG offset=0);
     HRESULT computeSectionOffset(CeeSection &section, __in char *ptr,
                                  unsigned *offset);
@@ -172,6 +175,10 @@ protected:
 public:
     HRESULT addFixup(CeeSection& secFixups, unsigned offset, CeeSectionRelocType reloc, CeeSection * relativeTo = NULL, CeeSectionRelocExtra *extra = 0);
 #endif
+
+private:
+    HRESULT ConvertResource(const WCHAR * pszFilename, __in_ecount(cchTempFilename) WCHAR *pszTempFilename, size_t cchTempFilename, PEWriter &pewriter);
+    BOOL RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEWriter &pewriter);
 };
 
 

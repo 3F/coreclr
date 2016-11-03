@@ -564,6 +564,15 @@ HRESULT ICeeFileGen::SetLibraryGuid (HCEEFILE ceeFile, __in LPWSTR LibraryGuid)
     return(gen->setLibraryGuid(LibraryGuid));
 }
 
+HRESULT ICeeFileGen::SetPathToCvtRes(HCEEFILE ceeFile, _In_ LPWSTR path)
+{
+    TESTANDRETURNPOINTER(ceeFile);
+    TESTANDRETURNPOINTER(path);
+
+    CeeFileGenWriter *gen = reinterpret_cast<CeeFileGenWriter*>(ceeFile);
+    return(gen->setPathToCvtRes(path));
+}
+
 __success(return == S_OK) HRESULT ICeeFileGen::GetLibraryName (HCEEFILE ceeFile, __out LPWSTR *LibraryName)
 {
     TESTANDRETURNPOINTER(ceeFile);

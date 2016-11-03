@@ -784,6 +784,7 @@ public:
     BOOL EmitMethod(Method *pMethod);
     BOOL EmitMethodBody(Method* pMethod, BinStr* pbsOut);
     BOOL EmitClass(Class *pClass);
+    HRESULT DefinePathToCvtRes(__in __nullterminated WCHAR* path);
     HRESULT CreatePEFile(__in __nullterminated WCHAR *pwzOutputFilename);
     HRESULT CreateTLSDirectory();
     HRESULT CreateDebugDirectory();

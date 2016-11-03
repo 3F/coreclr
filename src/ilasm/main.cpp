@@ -89,6 +89,13 @@ char* FullFileName(__in __nullterminated WCHAR* wzFileName, unsigned uCodePage)
     return sz;
 }
 
+//TODO: version
+void printMod()
+{
+    printf("\n[ Special version - https://github.com/3F/coreclr ] v" QUOTE_MACRO(VER_MAJORVERSION.VER_FILEVERSIONMINOR.1));
+    printf("\n:: based on " VER_FILEVERSION_STR);
+}
+
 WCHAR       *pwzInputFiles[1024];
 WCHAR       *pwzDeltaFiles[1024];
 
@@ -115,6 +122,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
     bool        bReportProgress = TRUE;
     BOOL        bNoDebug = TRUE;
     WCHAR*      wzIncludePath = NULL;
+    WCHAR*      wzPathToCvtRes = nullptr;
     int exitcode = 0;
     unsigned    uCodePage;
 
@@ -148,52 +156,56 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 #pragma warning(pop)
 #endif    
     {
-        printf("\nMicrosoft (R) .NET Framework IL Assembler version " VER_FILEVERSION_STR);
-        printf("\n%S\n\n", VER_LEGALCOPYRIGHT_LOGO_STR_L);
+        printf("\nMicrosoft (R) .NET Framework IL Assembler");
+        printf("\n%S", VER_LEGALCOPYRIGHT_LOGO_STR_L);
         goto PrintUsageAndExit;
 
     ErrorExit:
       exitcode = 1;
     PrintUsageAndExit:
+      printMod();
+      printf("\n\n");
+
       printf("\n\nUsage: ilasm [Options] <sourcefile> [Options]");
       printf("\n\nOptions:");
-      printf("\n/NOLOGO         Don't type the logo");
-      printf("\n/QUIET          Don't report assembly progress");
-      printf("\n/NOAUTOINHERIT  Disable inheriting from System.Object by default");
-      printf("\n/DLL            Compile to .dll");
-      printf("\n/EXE            Compile to .exe (default)");
-      printf("\n/PDB            Create the PDB file without enabling debug info tracking");
-      printf("\n/APPCONTAINER   Create an AppContainer exe or dll");
-      printf("\n/DEBUG          Disable JIT optimization, create PDB file, use sequence points from PDB");
-      printf("\n/DEBUG=IMPL     Disable JIT optimization, create PDB file, use implicit sequence points");
-      printf("\n/DEBUG=OPT      Enable JIT optimization, create PDB file, use implicit sequence points");
-      printf("\n/OPTIMIZE       Optimize long instructions to short");
-      printf("\n/FOLD           Fold the identical method bodies into one");
-      printf("\n/CLOCK          Measure and report compilation times");
+      printf("\n/NOLOGO                 Don't type the logo");
+      printf("\n/QUIET                  Don't report assembly progress");
+      printf("\n/NOAUTOINHERIT          Disable inheriting from System.Object by default");
+      printf("\n/DLL                    Compile to .dll");
+      printf("\n/EXE                    Compile to .exe (default)");
+      printf("\n/PDB                    Create the PDB file without enabling debug info tracking");
+      printf("\n/APPCONTAINER           Create an AppContainer exe or dll");
+      printf("\n/DEBUG                  Disable JIT optimization, create PDB file, use sequence points from PDB");
+      printf("\n/DEBUG=IMPL             Disable JIT optimization, create PDB file, use implicit sequence points");
+      printf("\n/DEBUG=OPT              Enable JIT optimization, create PDB file, use implicit sequence points");
+      printf("\n/OPTIMIZE               Optimize long instructions to short");
+      printf("\n/FOLD                   Fold the identical method bodies into one");
+      printf("\n/CLOCK                  Measure and report compilation times");
 //      printf("\n/ERROR          Try to create .exe or .dll file despite errors reported");
 //      printf("\n       Warning! Results are unpredictable, use this option at your own risk!");
       printf("\n/RESOURCE=<res_file>    Link the specified resource file (*.res) \n\t\t\tinto resulting .exe or .dll");
+      printf("\n/CVRES=<path_to_file>   Set path to cvtres tool: /CVR=cvtres.exe /CVR=tool\\cvtres.cmd /CVR=D:\\tool\\");
       printf("\n/OUTPUT=<targetfile>    Compile to file with specified name \n\t\t\t(user must provide extension, if any)");
-      printf("\n/KEY=<keyfile>      Compile with strong signature \n\t\t\t(<keyfile> contains private key)");
-      printf("\n/KEY=@<keysource>   Compile with strong signature \n\t\t\t(<keysource> is the private key source name)");
-      printf("\n/INCLUDE=<path>     Set path to search for #include'd files");
-      printf("\n/SUBSYSTEM=<int>    Set Subsystem value in the NT Optional header");
-      printf("\n/SSVER=<int>.<int>  Set Subsystem version number in the NT Optional header");
-      printf("\n/FLAGS=<int>        Set CLR ImageFlags value in the CLR header");
-      printf("\n/ALIGNMENT=<int>    Set FileAlignment value in the NT Optional header");
-      printf("\n/BASE=<int>     Set ImageBase value in the NT Optional header (max 2GB for 32-bit images)");
-      printf("\n/STACK=<int>    Set SizeOfStackReserve value in the NT Optional header");
+      printf("\n/KEY=<keyfile>          Compile with strong signature \n\t\t\t(<keyfile> contains private key)");
+      printf("\n/KEY=@<keysource>       Compile with strong signature \n\t\t\t(<keysource> is the private key source name)");
+      printf("\n/INCLUDE=<path>         Set path to search for #include'd files");
+      printf("\n/SUBSYSTEM=<int>        Set Subsystem value in the NT Optional header");
+      printf("\n/SSVER=<int>.<int>      Set Subsystem version number in the NT Optional header");
+      printf("\n/FLAGS=<int>            Set CLR ImageFlags value in the CLR header");
+      printf("\n/ALIGNMENT=<int>        Set FileAlignment value in the NT Optional header");
+      printf("\n/BASE=<int>             Set ImageBase value in the NT Optional header (max 2GB for 32-bit images)");
+      printf("\n/STACK=<int>            Set SizeOfStackReserve value in the NT Optional header");
       printf("\n/MDV=<version_string>   Set Metadata version string");
-      printf("\n/MSV=<int>.<int>   Set Metadata stream version (<major>.<minor>)");
-      printf("\n/PE64           Create a 64bit image (PE32+)");
-      printf("\n/HIGHENTROPYVA  Set High Entropy Virtual Address capable PE32+ images (default for /APPCONTAINER)");
-      printf("\n/NOCORSTUB      Suppress generation of CORExeMain stub");
-      printf("\n/STRIPRELOC     Indicate that no base relocations are needed");
-      printf("\n/ITANIUM        Target processor: Intel Itanium");
-      printf("\n/X64            Target processor: 64bit AMD processor");
-      printf("\n/ARM            Target processor: ARM processor");
-      printf("\n/32BITPREFERRED Create a 32BitPreferred image (PE32)");
-      printf("\n/ENC=<file>     Create Edit-and-Continue deltas from specified source file");
+      printf("\n/MSV=<int>.<int>        Set Metadata stream version (<major>.<minor>)");
+      printf("\n/PE64                   Create a 64bit image (PE32+)");
+      printf("\n/HIGHENTROPYVA          Set High Entropy Virtual Address capable PE32+ images (default for /APPCONTAINER)");
+      printf("\n/NOCORSTUB              Suppress generation of CORExeMain stub");
+      printf("\n/STRIPRELOC             Indicate that no base relocations are needed");
+      printf("\n/ITANIUM                Target processor: Intel Itanium");
+      printf("\n/X64                    Target processor: 64bit AMD processor");
+      printf("\n/ARM                    Target processor: ARM processor");
+      printf("\n/32BITPREFERRED         Create a 32BitPreferred image (PE32)");
+      printf("\n/ENC=<file>             Create Edit-and-Continue deltas from specified source file");
       
       printf("\n\nKey may be '-' or '/'\nOptions are recognized by first 3 characters\nDefault source file extension is .il\n");
 
@@ -394,6 +406,15 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                         for(pStr++; *pStr == L' '; pStr++); //skip the blanks
                         if(wcslen(pStr)==0) goto InvalidOption; //if no file name
                         wzIncludePath = pStr;
+                    }
+                    else if (!_stricmp(szOpt, "CVR"))
+                    {
+                        // TODO: ^v omg, how about common handler o_O
+                        WCHAR *pStr = EqualOrColon(argv[i]);
+                        if(pStr == NULL) goto InvalidOption;
+                        for(pStr++; *pStr == L' '; pStr++); //skip the blanks
+                        if(wcslen(pStr) == 0) goto InvalidOption; //if no file name
+                        wzPathToCvtRes = pStr;
                     }
                     else if (!_stricmp(szOpt, "OUT"))
                     {
@@ -644,8 +665,10 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 //======================================================================
                 if(bLogo)
                 {
-                    printf("\nMicrosoft (R) .NET Framework IL Assembler.  Version " VER_FILEVERSION_STR);
+                    printf("\nMicrosoft (R) .NET Framework IL Assembler.");
                     printf("\n%S", VER_LEGALCOPYRIGHT_LOGO_STR_L);
+                    printMod();
+                    printf("\n\n");
                 }
 
                 pAsm->SetDLL(IsDLL);
@@ -724,7 +747,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                         if(g_dwFileAlignment)   pAsm->m_dwFileAlignment = g_dwFileAlignment;
                         if(g_stBaseAddress)     pAsm->m_stBaseAddress = g_stBaseAddress;
                         if(g_stSizeOfStackReserve)     pAsm->m_stSizeOfStackReserve = g_stSizeOfStackReserve;
-                        if(FAILED(hr=pAsm->CreatePEFile(wzOutputFilename)))
+                        if(FAILED(hr = pAsm->DefinePathToCvtRes(wzPathToCvtRes)) || FAILED(hr = pAsm->CreatePEFile(wzOutputFilename)))
                             pParser->msg("Could not create output file, error code=0x%08X\n",hr);
                         else
                         {

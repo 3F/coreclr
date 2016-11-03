@@ -1205,6 +1205,14 @@ BOOL Assembler::EmitEventsProps(Class* pClass)
     return ret;
 }
 
+HRESULT Assembler::DefinePathToCvtRes(__in __nullterminated WCHAR* path)
+{
+    if(path != nullptr) {
+        return m_pCeeFileGen->SetPathToCvtRes(m_pCeeFile, path);
+    }
+    return S_OK;
+}
+
 #ifdef _PREFAST_
 #pragma warning(push)
 #pragma warning(disable:21000) // Suppress PREFast warning about overly large function
