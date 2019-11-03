@@ -20,6 +20,8 @@
 
 #include "new.hpp"
 
+#include <_version.h>
+
 #define MODE_DUMP_ALL               0
 #define MODE_DUMP_CLASS             1
 #define MODE_DUMP_CLASS_METHOD      2
@@ -99,6 +101,12 @@ void PrintLogo()
 {
     printf("Microsoft (R) .NET Framework IL Disassembler.  Version " VER_FILEVERSION_STR);
     printf("\n%S\n\n", VER_LEGALCOPYRIGHT_LOGO_STR_L);
+}
+
+void PrintMod()
+{
+    printf("\n# GitHub/3F Edition specially for .NET DllExport: https://github.com/3F");
+    printf("\n  v" VER_3FMOD_PRODUCT_STR "\n\n");
 }
 
 void SyntaxCon()
@@ -187,6 +195,11 @@ int ProcessOneArg(__in __nullterminated char* szArg, __out char** ppszObjFileNam
         else if (_stricmp(szOpt, "noi") == 0)
         {
             g_fDumpAsmCode = FALSE;
+        }
+        else if (_stricmp(szOpt, "nob") == 0)
+        {
+            // Eliminates the difference between other ILDasm versions
+            // where '/NOBAR - Suppress disassembly progress bar window pop-up.'
         }
         else if (_stricmp(szOpt, "noc") == 0)
         {
@@ -556,10 +569,12 @@ int __cdecl main(int nCmdShow, char* lpCmdLine[])
         if(iCommandLineParsed)
         {
             if(iCommandLineParsed > 0) PrintLogo();
+            PrintMod();
             SyntaxCon();
             exit((iCommandLineParsed == 1) ? 0 : 1);
         }
 
+        PrintMod();
         {
             DWORD   exitCode = 1;
             if(g_szInputFile[0] == 0)
