@@ -962,36 +962,35 @@ HRESULT CeeFileGenWriter::emitExeMain()
 * https://github.com/3F/DllExport/issues/17
 * https://github.com/3F/coreclr/issues/2
 * @param workdir Path to current directory.
-* @param path User path without leading and trailing white-space chars. Specified from our new /CVRES key etc.
+* @param path Path specified by /CVRES key.
 * @param fname File name of converter. null value is valid for handler by default. 
 * @param ret [out] Final path to converter will be here.
 */
-void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString* ret)
+void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString& ret)
 {
     auto retval = [&](LPCWSTR v = nullptr)
     {
-        ret->Clear();
+        ret.Clear();
         if(v != nullptr) {
-            ret->Append(v);
+            ret.Append(v);
         }
     };
 
-    // already should not contain any leading and trailing white-space chars
-    int len = lstrlenW(path);
+    size_t len = lstrlenW(path);
 
     if(fname == nullptr) {
         fname = L"cvtres.exe";
     }
 
     if(path == nullptr || len < 1) {
-        retval(fname); // leave as is for env.PATH
+        retval(fname); // leave 'as is' for env.PATH
         return;
     }
 
     // check special symbols in path
 
-    int /* : */colon = 0, /* \ */slashL = 0, /* / */slashR = 0;
-    for(int i = 0; i < len; ++i)
+    signed char /* : */colon = 0, /* \ */slashL = 0, /* / */slashR = 0;
+    for(size_t i = 0; i < len; ++i)
     {
         if(path[i] == L':') {
             colon = 1;
@@ -1018,8 +1017,8 @@ void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString
             return;
         }
 
-        ret->Append(workdir); ret->Append(path);
-        if(_waccess(ret->GetUnicode(), 	0 /* Check for file existence */) == 0) {
+        ret.Append(workdir); ret.Append(path);
+        if(_waccess(ret.GetUnicode(), 0 /* Check for file existence */) == 0) {
             return;
         }
 
@@ -1027,10 +1026,17 @@ void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString
         return;
     }
 
-    ret->Append(path);
+    ret.Append(path);
 
-    if(path[--len] == L'/' || path[len] == L'\\') { // directory
-        ret->Append(fname);
+    for(auto it = ret.End(), rend = ret.Begin(); it-- != rend;)
+    {
+        WCHAR c = *it;
+
+        if(c == L' ') continue;
+        ret.Truncate(it + 1);
+
+        if(c == L'/' || c == L'\\') ret.Append(fname);
+        break;
     }
 
     if(slashL == -1 || slashR == -1 || colon > 0) { // absolute
@@ -1038,7 +1044,7 @@ void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString
     }
 
     if(workdir != nullptr) {
-        ret->Insert(ret->Begin(), workdir); // workdir + path ^
+        ret.Insert(ret.Begin(), workdir); // workdir + path ^
     }
 }
 
@@ -1071,10 +1077,10 @@ BOOL CeeFileGenWriter::RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD
 
     PathString wszSystemDir, cvtres;
     if(FAILED(GetClrSystemDirectory(wszSystemDir))) {
-        pathToCvtRes(nullptr, m_pathToCvtRes, nullptr, &cvtres);
+        pathToCvtRes(nullptr, m_pathToCvtRes, nullptr, cvtres);
     }
     else {
-        pathToCvtRes(wszSystemDir.GetUnicode(), m_pathToCvtRes, nullptr, &cvtres);
+        pathToCvtRes(wszSystemDir.GetUnicode(), m_pathToCvtRes, nullptr, cvtres);
     }
 
     const WCHAR* wzMachine;
