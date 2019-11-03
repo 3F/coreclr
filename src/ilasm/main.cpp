@@ -15,6 +15,8 @@
 #include "strsafe.h"
 #define ASSERTE_ALL_BUILDS(expr) _ASSERTE_ALL_BUILDS(__FILE__, (expr))
 
+#include <_version.h>
+
 WCHAR* EqualOrColon(__in __nullterminated WCHAR* szArg)
 {
     WCHAR* pchE = wcschr(szArg,L'=');
@@ -89,11 +91,10 @@ char* FullFileName(__in __nullterminated WCHAR* wzFileName, unsigned uCodePage)
     return sz;
 }
 
-//TODO: version
-void printMod()
+void PrintMod()
 {
-    printf("\n[ Special version - https://github.com/3F/coreclr ] v" QUOTE_MACRO(VER_MAJORVERSION.VER_FILEVERSIONMINOR.1));
-    printf("\n:: based on " VER_FILEVERSION_STR);
+    printf("\n# GitHub/3F Edition specially for .NET DllExport: https://github.com/3F");
+    printf("\n  v" VER_3FMOD_PRODUCT_STR);
 }
 
 WCHAR       *pwzInputFiles[1024];
@@ -162,7 +163,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
     ErrorExit:
       exitcode = 1;
     PrintUsageAndExit:
-      printMod();
+      PrintMod();
       printf("\n\n");
 
       printf("\n\nUsage: ilasm [Options] <sourcefile> [Options]");
@@ -664,7 +665,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 {
                     printf("\nMicrosoft (R) .NET Framework IL Assembler.");
                     printf("\n%S", VER_LEGALCOPYRIGHT_LOGO_STR_L);
-                    printMod();
+                    PrintMod();
                     printf("\n\n");
                 }
 

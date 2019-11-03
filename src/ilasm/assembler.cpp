@@ -2327,14 +2327,11 @@ void Assembler::AddMethodImpl(mdToken tkImplementedTypeSpec, __in __nullterminat
 {
     if(m_pCurClass)
     {
-        MethodImplDescriptor*   pMID = new MethodImplDescriptor;
+        MethodImplDescriptor* pMID = new MethodImplDescriptor;
+        
         pMID->m_fNew = TRUE;
-        if(pMID == NULL)
-        {
-            report->error("Failed to allocate MethodImpl Descriptor\n");
-            return;
-        }
         pMID->m_tkDefiningClass = m_pCurClass->m_cl;
+
         if(szImplementingName) //called from class scope, overriding method specified
         {
             pMID->m_tkImplementedMethod = MakeMemberRef(tkImplementedTypeSpec,szImplementedName,pImplementedSig);
