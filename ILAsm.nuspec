@@ -15,7 +15,7 @@
         Custom version on .NET Core CLR (CoreCLR) 3.0
         Target platforms: Win.x64 and Win.x86
 
-        %Version%
+        %VersionFull%
         _ _ _ _ _ _
         
         https://github.com/3F/coreclr
