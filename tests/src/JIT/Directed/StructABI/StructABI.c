@@ -7,6 +7,16 @@
 #define DLLEXPORT __declspec(dllexport)
 #else
 #define DLLEXPORT __attribute__((visibility("default")))
+#ifdef BIT64
+#define __int64     long
+#else // BIT64
+#define __int64     long long
+#endif // BIT64
+
+#define __int32     int
+#define __int16     short int
+#define __int8      char        // assumes char is signed
+
 #endif // _MSC_VER
 
 struct SingleByte
@@ -83,6 +93,14 @@ struct PointerFloatAndByte
 	void* Pointer;
 	float Float;
 	uint8_t Byte;
+};
+
+struct ShortIntFloatIntPtr
+{
+	__int16 Short;
+	__int32 Int;
+	float Float;
+	__int32* Pointer;
 };
 
 struct TwoLongs
@@ -259,6 +277,11 @@ DLLEXPORT struct ByteFloatAndPointer EchoByteFloatAndPointer(struct ByteFloatAnd
 }
 
 DLLEXPORT struct PointerFloatAndByte EchoPointerFloatAndByte(struct PointerFloatAndByte value)
+{
+	return value;
+}
+
+DLLEXPORT struct ShortIntFloatIntPtr EchoShortIntFloatIntPtr(struct ShortIntFloatIntPtr value)
 {
 	return value;
 }

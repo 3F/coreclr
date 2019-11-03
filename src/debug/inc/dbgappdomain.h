@@ -9,15 +9,11 @@
 class AppDomain;
 
 
-void BeginThreadAffinityHelper();
-void EndThreadAffinityHelper();
-
-
 // AppDomainInfo contains information about an AppDomain
 // All pointers are for the left side, and we do not own any of the memory
 struct AppDomainInfo
 {
-    ULONG       m_id;    // unique identifier
+    DWORD       m_id = 0; // UNUSED, only present to maintain the shape of this structure
     int         m_iNameLengthInBytes;
     LPCWSTR     m_szAppDomainName;
     AppDomain  *m_pAppDomain; // only used by LS
@@ -180,8 +176,6 @@ struct AppDomainEnumerationIPCBlock
      *************************************************************************/
     BOOL Lock()
     {
-        BeginThreadAffinityHelper();        
-
         DWORD dwRes = WaitForSingleObject(m_hMutex, 3000);
         if (dwRes == WAIT_TIMEOUT)
         {
@@ -218,8 +212,6 @@ struct AppDomainEnumerationIPCBlock
         // Lock may or may not be valid at this point. Thus Release may fail, 
         // but we'll just ignore that.
         ReleaseMutex(m_hMutex);
-        EndThreadAffinityHelper();        
-        
     }
 
     /*************************************************************************

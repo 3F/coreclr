@@ -412,6 +412,7 @@ HRESULT SidBuffer::InitFromProcessAppContainerSidNoThrow(DWORD pid)
 {
     HRESULT hr = S_OK;
     HANDLE hToken = NULL;
+    BOOL fIsLowBox = FALSE;
 
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (hProcess == NULL)
@@ -438,7 +439,6 @@ HRESULT SidBuffer::InitFromProcessAppContainerSidNoThrow(DWORD pid)
     } TOKEN_APPCONTAINER_INFORMATION, *PTOKEN_APPCONTAINER_INFORMATION;
 
     DWORD size;
-    BOOL fIsLowBox = FALSE;
     if (!GetTokenInformation(hToken, (TOKEN_INFORMATION_CLASS)TokenIsAppContainer, &fIsLowBox, sizeof(fIsLowBox), &size))
     {
         DWORD gle = GetLastError();
@@ -466,23 +466,25 @@ HRESULT SidBuffer::InitFromProcessAppContainerSidNoThrow(DWORD pid)
         goto exit;
     }
 
-    PTOKEN_APPCONTAINER_INFORMATION pTokPack = (PTOKEN_APPCONTAINER_INFORMATION)&PackSid;
-    PSID pLowBoxPackage = pTokPack->TokenPackage;
-    DWORD dwSidLen = GetLengthSid(pLowBoxPackage);
-    m_pBuffer = new (nothrow) BYTE[dwSidLen];
-    if (m_pBuffer == NULL)
     {
-        hr = E_OUTOFMEMORY;
-        goto exit;
-    }
-    else
-    {
-        if (!CopySid(dwSidLen, m_pBuffer, pLowBoxPackage))
+        PTOKEN_APPCONTAINER_INFORMATION pTokPack = (PTOKEN_APPCONTAINER_INFORMATION)&PackSid;
+        PSID pLowBoxPackage = pTokPack->TokenPackage;
+        DWORD dwSidLen = GetLengthSid(pLowBoxPackage);
+        m_pBuffer = new (nothrow) BYTE[dwSidLen];
+        if (m_pBuffer == NULL)
         {
-            hr = HRESULT_FROM_GetLastError();
-            delete m_pBuffer;
-            m_pBuffer = NULL;
+            hr = E_OUTOFMEMORY;
             goto exit;
+        }
+        else
+        {
+            if (!CopySid(dwSidLen, m_pBuffer, pLowBoxPackage))
+            {
+                hr = HRESULT_FROM_GetLastError();
+                delete m_pBuffer;
+                m_pBuffer = NULL;
+                goto exit;
+            }
         }
     }
 
@@ -692,7 +694,7 @@ Sid Win32SecurityDescriptor::GetOwner()
 
 //-----------------------------------------------------------------------------
 // Initialize this instance of a SecurityDescriptor with the SD for the handle.
-// The handle must ahve READ_CONTROL permissions to do this.
+// The handle must have READ_CONTROL permissions to do this.
 // Throws on error.
 //-----------------------------------------------------------------------------
 HRESULT Win32SecurityDescriptor::InitFromHandleNoThrow(HANDLE h)
@@ -745,93 +747,4 @@ void Win32SecurityDescriptor::InitFromHandle(HANDLE h)
     {
         ThrowHR(hr);
     }      
-}
-
-//-----------------------------------------------------------------------------
-// We open several named kernel objects that are well-known names decorated with 
-// pid of some target process (usually a debuggee).
-// Since anybody can create any kernel object with any name, we we want to make
-// sure the objects we're opening were actually created by who we think they 
-// were. Each kernel object has an "owner" property which serves as the 
-// fingerprints of who created the handle.
-// 
-// Check if the handle owner belongs to either the process specified by the 
-// pid or the current process (in case the target process is impersonating us).
-// This lets us know if the handle is spoofed.
-// 
-// Parameters:
-//   handle - handle for kernel object to test
-//   pid - target process that it may belong to.
-//
-// Returns:
-//   false- if we can verify that Owner(handle) is in the set of { Owner(Process(pid)), or Owner(this Process) }
-//           
-//          
-//   true - Elsewise, including if we can't verify that it's false.
-//-----------------------------------------------------------------------------
-bool IsHandleSpoofed(HANDLE handle, DWORD pid)
-{
-    CONTRACTL 
-    {
-        NOTHROW;
-    }
-    CONTRACTL_END;
-
-    _ASSERTE(handle != NULL);
-    _ASSERTE(pid != 0);
-    bool fIsSpoofed = true;
-
-    EX_TRY
-    {
-        // Get the owner of the kernel object referenced by the handle.
-        Win32SecurityDescriptor sdHandle;
-        sdHandle.InitFromHandle(handle);
-        Sid sidOwner(sdHandle.GetOwner());
-
-        SidBuffer sbPidOther;
-        SidBuffer sbPidThis;    
-
-        // Is the object owner the "other" pid?
-        sbPidOther.InitFromProcess(pid);
-        if (Sid::Equals(sbPidOther.GetSid(), sidOwner))
-        {
-            // We now know that the kernel object was created by the user of the "other" pid.
-            // This should be the common case by far. It's not spoofed. All is well.
-            fIsSpoofed = false;
-            goto Label_Done;
-        }
-        
-        // Test against our current pid if it's different than the "other" pid.
-        // This can happen if the other process impersonates us. The most common case would
-        // be if we're an admin and the other process (say some service) is impersonating Admin
-        // when it spins up the CLR.
-        DWORD pidThis = GetCurrentProcessId();
-        if (pidThis != pid)
-        {
-            sbPidThis.InitFromProcess(pidThis);
-            if (Sid::Equals(sbPidThis.GetSid(), sidOwner))
-            {     
-                // The object was created by somebody pretending to be us. If they had sufficient permissions
-                // to pretend to be us, then we still trust them.
-                fIsSpoofed = false;
-                goto Label_Done;
-            }
-        }
-        
-        // This should only happen if we're being attacked.
-        _ASSERTE(fIsSpoofed);
-        STRESS_LOG2(LF_CORDB, LL_INFO1000, "Security Check failed with mismatch. h=%x,pid=%x", handle, pid);
-
-Label_Done: 
-        ;        
-    }
-    EX_CATCH
-    {
-        // This should only happen if something goes really bad and we can't find the information.
-        STRESS_LOG2(LF_CORDB, LL_INFO1000, "Security Check failed with exception. h=%x,pid=%x", handle, pid);
-        _ASSERTE(fIsSpoofed); // should still have its default value
-    }
-    EX_END_CATCH(SwallowAllExceptions);
-
-    return fIsSpoofed;
 }

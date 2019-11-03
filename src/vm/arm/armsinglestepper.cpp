@@ -97,17 +97,25 @@ ArmSingleStepper::ArmSingleStepper()
 
 ArmSingleStepper::~ArmSingleStepper()
 {
-#if !defined(DACCESS_COMPILE) && !defined(FEATURE_PAL)
+#if !defined(DACCESS_COMPILE)
+#ifdef FEATURE_PAL
+    SystemDomain::GetGlobalLoaderAllocator()->GetExecutableHeap()->BackoutMem(m_rgCode, kMaxCodeBuffer * sizeof(WORD));
+#else
     DeleteExecutable(m_rgCode);
+#endif
 #endif
 }
 
 void ArmSingleStepper::Init()
 {
-#if !defined(DACCESS_COMPILE) && !defined(FEATURE_PAL)
+#if !defined(DACCESS_COMPILE)
     if (m_rgCode == NULL)
     {
+#ifdef FEATURE_PAL
+        m_rgCode = (WORD *)(void *)SystemDomain::GetGlobalLoaderAllocator()->GetExecutableHeap()->AllocMem(S_SIZE_T(kMaxCodeBuffer * sizeof(WORD)));
+#else
         m_rgCode = new (executable) WORD[kMaxCodeBuffer];
+#endif
     }
 #endif
 }
@@ -1042,6 +1050,21 @@ bool ArmSingleStepper::TryEmulate(T_CONTEXT *pCtx, WORD opcode1, WORD opcode2, b
             }
 
             fEmulated = true;
+        }
+        else if ((opcode1 & 0xff00) == 0x4400)
+        {
+            // A8.8.6 ADD (register, Thumb) : T2
+            DWORD Rm = BitExtract(opcode1, 6, 3);
+
+            // We should only emulate this instruction if Pc is used
+            if (Rm == 15)
+                fEmulated = true;
+
+            if (execute)
+            {
+                DWORD Rd = BitExtract(opcode1, 2, 0) | BitExtract(opcode1, 7, 7) << 3;
+                SetReg(pCtx, Rd, GetReg(pCtx, Rm) + GetReg(pCtx, Rd));
+            }
         }
         else if (((opcode1 & 0xf000) == 0xd000) && ((opcode1 & 0x0f00) != 0x0e00))
         {

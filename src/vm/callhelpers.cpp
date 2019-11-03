@@ -16,6 +16,8 @@
 // To include declaration of "SignatureNative"
 #include "runtimehandles.h"
 
+#include "invokeutil.h"
+#include "argdestination.h"
 
 #if defined(FEATURE_MULTICOREJIT) && defined(_DEBUG)
 
@@ -23,27 +25,10 @@
 
 void AssertMulticoreJitAllowedModule(PCODE pTarget)
 {
-    CONTRACTL
-    {
-        SO_NOT_MAINLINE;
-    }
-    CONTRACTL_END;
-
     MethodDesc* pMethod = Entry2MethodDesc(pTarget, NULL); 
 
     Module * pModule = pMethod->GetModule_NoLogging();
 
-#if defined(FEATURE_APPX_BINDER)
-    
-    // For Appx process, allow certain modules to load on background thread
-    if (AppX::IsAppXProcess())
-    {
-        if (MulticoreJitManager::IsLoadOkay(pModule))
-        {
-            return;
-        }
-    }
-#endif
 
     _ASSERTE(pModule->IsSystem());
 }
@@ -69,8 +54,6 @@ void CallDescrWorkerWithHandler(
                 CallDescrData *   pCallDescrData,
                 BOOL              fCriticalCall)
 {
-    STATIC_CONTRACT_SO_INTOLERANT;
-
 #if defined(FEATURE_MULTICOREJIT) && defined(_DEBUG)
 
     // For multicore JITting, background thread should not call managed code, except when calling system code (e.g. throwing managed exception)
@@ -112,7 +95,6 @@ void CallDescrWorker(CallDescrData * pCallDescrData)
 #endif // 0
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     _ASSERTE(!NingenEnabled() && "You cannot invoke managed code inside the ngen compilation process.");
 
@@ -217,6 +199,12 @@ void * DispatchCallSimple(
     callDescrData.pSrc = pSrc;
     callDescrData.numStackSlots = numStackSlotsToCopy;
 #endif
+
+#ifdef CALLDESCR_RETBUFFARGREG
+    UINT64 retBuffArgPlaceholder = 0;
+    callDescrData.pRetBuffArg = &retBuffArgPlaceholder;
+#endif
+
 #ifdef CALLDESCR_FPARGREGS
     callDescrData.pFloatArgumentRegisters = NULL;
 #endif
@@ -327,17 +315,11 @@ void FillInRegTypeMap(int argOffset, CorElementType typ, BYTE * pMap)
 }
 #endif // CALLDESCR_REGTYPEMAP
 
-#if defined(_DEBUG) && defined(FEATURE_COMINTEROP)
-extern int g_fMainThreadApartmentStateSet;
-extern int g_fInitializingInitialAD;
-extern Volatile<LONG> g_fInExecuteMainMethod;
-#endif
-
 //*******************************************************************************
 #ifdef FEATURE_INTERPRETER
-ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments, bool transitionToPreemptive)
+void MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments, ARG_SLOT *pReturnValue, int cbReturnValue, bool transitionToPreemptive)
 #else
-ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
+void MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments, ARG_SLOT *pReturnValue, int cbReturnValue)
 #endif
 {
     //
@@ -358,14 +340,6 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
         MODE_COOPERATIVE;
         PRECONDITION(GetAppDomain()->CheckCanExecuteManagedCode(m_pMD));
         PRECONDITION(m_pMD->CheckActivated());          // EnsureActive will trigger, so we must already be activated
-
-#ifdef FEATURE_COMINTEROP
-        // If we're an exe, then we must either be initializing the first AD, or have already setup the main thread's
-        //  COM apartment state.
-        // If you hit this assert, then you likely introduced code during startup that could inadvertently 
-        //  initialize the COM apartment state of the main thread before we set it based on the user attribute.
-        PRECONDITION(g_fInExecuteMainMethod ? (g_fMainThreadApartmentStateSet || g_fInitializingInitialAD) : TRUE);
-#endif // FEATURE_COMINTEROP
     }
     CONTRACTL_END;
 
@@ -407,8 +381,6 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
         //
         ENABLE_FORBID_GC_LOADER_USE_IN_THIS_SCOPE();
 
-        _ASSERTE(GetAppDomain()->ShouldHaveCode());
-
 #ifdef FEATURE_INTERPRETER
         _ASSERTE(isCallConv(m_methodSig.GetCallingConvention(), IMAGE_CEE_CS_CALLCONV_DEFAULT)
                  || isCallConv(m_methodSig.GetCallingConvention(), CorCallingConvention(IMAGE_CEE_CS_CALLCONV_C))
@@ -427,22 +399,20 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
         }
 #endif // DEBUGGING_SUPPORTED
 
-#if CHECK_APP_DOMAIN_LEAKS
-        if (g_pConfig->AppDomainLeaks())
-        {
-            // See if we are in the correct domain to call on the object
-            if (m_methodSig.HasThis() && !m_pMD->GetMethodTable()->IsValueType())
-            {
-                CONTRACT_VIOLATION(ThrowsViolation|GCViolation|FaultViolation);
-                OBJECTREF pThis = ArgSlotToObj(pArguments[0]);
-                if (!pThis->AssignAppDomain(GetAppDomain()))
-                    _ASSERTE(!"Attempt to call method on object in wrong domain");
-            }
-        }
-#endif // CHECK_APP_DOMAIN_LEAKS
-
 #ifdef _DEBUG
         {
+#ifdef UNIX_AMD64_ABI
+            // Validate that the return value is not too big for the buffer passed
+            if (m_pMD->GetMethodTable()->IsRegPassedStruct())
+            {
+                TypeHandle thReturnValueType;
+                if (m_methodSig.GetReturnTypeNormalized(&thReturnValueType) == ELEMENT_TYPE_VALUETYPE)
+                {
+                    _ASSERTE((DWORD)cbReturnValue >= thReturnValueType.GetSize());
+                }
+            }
+#endif // UNIX_AMD64_ABI
+
             // The metasig should be reset
             _ASSERTE(m_methodSig.GetArgNum() == 0);
 
@@ -524,7 +494,7 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
         }
 #endif
 
-        int    ofs;
+        int ofs;
         for (; TransitionBlock::InvalidOffset != (ofs = m_argIt.GetNextOffset()); arg++)
         {
 #ifdef CALLDESCR_REGTYPEMAP
@@ -544,57 +514,56 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
             }
 #endif
 
-#if CHECK_APP_DOMAIN_LEAKS
-            // Make sure the arg is in the right app domain
-            if (g_pConfig->AppDomainLeaks() && m_argIt.GetArgType() == ELEMENT_TYPE_CLASS)
-            {
-                CONTRACT_VIOLATION(ThrowsViolation|GCViolation|FaultViolation);
-                OBJECTREF objRef = ArgSlotToObj(pArguments[arg]);
-                if (!objRef->AssignAppDomain(GetAppDomain()))
-                    _ASSERTE(!"Attempt to pass object in wrong app domain to method");
-            }
-#endif // CHECK_APP_DOMAIN_LEAKS
-
-#if defined(UNIX_AMD64_ABI) && defined(FEATURE_UNIX_AMD64_STRUCT_PASSING)
-            _ASSERTE(ofs != TransitionBlock::StructInRegsOffset);
-#endif
-            PVOID pDest = pTransitionBlock + ofs;
+            ArgDestination argDest(pTransitionBlock, ofs, m_argIt.GetArgLocDescForStructInRegs());
 
             UINT32 stackSize = m_argIt.GetArgSize();
-            switch (stackSize)
+            // We need to pass in a pointer, but be careful of the ARG_SLOT calling convention. We might already have a pointer in the ARG_SLOT.
+            PVOID pSrc = stackSize > sizeof(ARG_SLOT) ? (LPVOID)ArgSlotToPtr(pArguments[arg]) : (LPVOID)ArgSlotEndianessFixup((ARG_SLOT*)&pArguments[arg], stackSize);
+
+#if defined(UNIX_AMD64_ABI)
+            if (argDest.IsStructPassedInRegs())
             {
-                case 1:
-                case 2:
-                case 4:
-                    *((INT32*)pDest) = (INT32)pArguments[arg];
-                    break;
+                TypeHandle th;
+                m_argIt.GetArgType(&th);
 
-                case 8:
-                    *((INT64*)pDest) = pArguments[arg];
-                    break;
+                argDest.CopyStructToRegisters(pSrc, th.AsMethodTable()->GetNumInstanceFieldBytes(), 0);
+            }
+            else
+#endif // UNIX_AMD64_ABI
+            {
+                PVOID pDest = argDest.GetDestinationAddress();
 
-                default:
-                    // The ARG_SLOT contains a pointer to the value-type
-#ifdef ENREGISTERED_PARAMTYPE_MAXSIZE
-                    if (m_argIt.IsArgPassedByRef())
-                    {
-                        // We need to pass in a pointer, but be careful of the ARG_SLOT calling convention.
-                        // We might already have a pointer in the ARG_SLOT
-                       *(PVOID*)pDest = stackSize>sizeof(ARG_SLOT) ?
-                                (LPVOID)ArgSlotToPtr(pArguments[arg]) :
-                                (LPVOID)ArgSlotEndianessFixup((ARG_SLOT*)&pArguments[arg], stackSize);
-                    }
-                    else
-#endif // ENREGISTERED_PARAMTYPE_MAXSIZE
-                    if (stackSize>sizeof(ARG_SLOT))
-                    {
-                        CopyMemory(pDest, ArgSlotToPtr(pArguments[arg]), stackSize);
-                    }
-                    else
-                    {
-                        CopyMemory(pDest, (LPVOID) (&pArguments[arg]), stackSize);
-                    }
-                    break;
+                switch (stackSize)
+                {
+                    case 1:
+                    case 2:
+                    case 4:
+                        *((INT32*)pDest) = (INT32)pArguments[arg];
+                        break;
+
+                    case 8:
+                        *((INT64*)pDest) = pArguments[arg];
+                        break;
+
+                    default:
+                        // The ARG_SLOT contains a pointer to the value-type
+    #ifdef ENREGISTERED_PARAMTYPE_MAXSIZE
+                        if (m_argIt.IsArgPassedByRef())
+                        {
+                            *(PVOID*)pDest = pSrc;
+                        }
+                        else
+    #endif // ENREGISTERED_PARAMTYPE_MAXSIZE
+                        if (stackSize > sizeof(ARG_SLOT))
+                        {
+                            CopyMemory(pDest, ArgSlotToPtr(pArguments[arg]), stackSize);
+                        }
+                        else
+                        {
+                            CopyMemory(pDest, (LPVOID) (&pArguments[arg]), stackSize);
+                        }
+                        break;
+                }
             }
         }
 
@@ -608,6 +577,9 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
     callDescrData.numStackSlots = nStackBytes / STACK_ELEM_SIZE;
 #ifdef CALLDESCR_ARGREGS
     callDescrData.pArgumentRegisters = (ArgumentRegisters*)(pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters());
+#endif
+#ifdef CALLDESCR_RETBUFFARGREG
+    callDescrData.pRetBuffArg = (UINT64*)(pTransitionBlock + TransitionBlock::GetOffsetOfRetBuffArgReg());
 #endif
 #ifdef CALLDESCR_FPARGREGS
     callDescrData.pFloatArgumentRegisters = pFloatArgumentRegisters;
@@ -637,20 +609,22 @@ ARG_SLOT MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments)
         memcpyNoGCRefs(pvRetBuff, &callDescrData.returnValue, sizeof(callDescrData.returnValue));
     }
 
-    ARG_SLOT retval = *(ARG_SLOT *)(&callDescrData.returnValue);
+    if (pReturnValue != NULL)
+    {
+        _ASSERTE((DWORD)cbReturnValue <= sizeof(callDescrData.returnValue));
+        memcpyNoGCRefs(pReturnValue, &callDescrData.returnValue, cbReturnValue);
 
 #if !defined(_WIN64) && BIGENDIAN
-    {
-        GCX_FORBID();
-
-        if (!m_methodSig.Is64BitReturn())
         {
-            retval >>= 32;
+            GCX_FORBID();
+
+            if (!m_methodSig.Is64BitReturn())
+            {
+                pReturnValue[0] >>= 32;
+            }
         }
-    }
 #endif // !defined(_WIN64) && BIGENDIAN
-    
-    return retval;
+    }
 }
 
 void CallDefaultConstructor(OBJECTREF ref)
@@ -663,7 +637,7 @@ void CallDefaultConstructor(OBJECTREF ref)
     }
     CONTRACTL_END;
 
-    MethodTable *pMT = ref->GetTrueMethodTable();
+    MethodTable *pMT = ref->GetMethodTable();
 
     PREFIX_ASSUME(pMT != NULL);
 

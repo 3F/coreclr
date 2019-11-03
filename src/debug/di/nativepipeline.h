@@ -19,8 +19,9 @@
 // that is being debugged.
 //
 // On windows, this is a wrapper around the win32 debugging API 
-// (eg, kernel32!WaitForDebugEvent). On rotor, it has an alternative implementation.
-// .  See code:IEventChannel for more information.
+// (eg, kernel32!WaitForDebugEvent). On most Unix-like platforms,
+// it has an alternative implementation. See code:IEventChannel and
+// platformspecific.cpp for more information.
 // @dbgtodo : All of the APIs that return BOOL should probably be changed to
 // return HRESULTS so we don't have to rely on some implicit GetLastError protocol.
 //-----------------------------------------------------------------------------
@@ -66,7 +67,7 @@ public:
         LPPROCESS_INFORMATION lpProcessInformation) = 0;
 
     // Attach
-    virtual HRESULT DebugActiveProcess(MachineInfo machineInfo, DWORD processId) = 0;
+    virtual HRESULT DebugActiveProcess(MachineInfo machineInfo, const ProcessDescriptor& processDescriptor) = 0;
 
     // Detach
     virtual HRESULT DebugActiveProcessStop(DWORD processId) =0;

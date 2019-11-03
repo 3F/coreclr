@@ -19,14 +19,11 @@
 #include "clrex.h"
 #include "hash.h"
 #include "crst.h"
-#include "objecthandle.h"
 #include "cgensys.h"
-#include "declsec.h"
 #include "stdinterfaces.h"
 #include "slist.h"
 #include "spinlock.h"
 #include "typehandle.h"
-#include "perfcounters.h"
 #include "methodtable.h"
 #include "eeconfig.h"
 #include "typectxt.h"
@@ -41,7 +38,6 @@ class   ArrayClass;
 class   ArrayMethodDesc;
 class   Assembly;
 class   ClassLoader;
-class   DomainLocalBlock;
 class   FCallMethodDesc;
 class   EEClass;
 class   LayoutEEClass;
@@ -203,11 +199,12 @@ public:
 class MethodTableBuilder
 {
 public:
-    MethodTableBuilder(MethodTable * pMT) 
+    MethodTableBuilder(MethodTable * pMT, StackingAllocator *pStackingAllocator) 
     {
         LIMITED_METHOD_CONTRACT;
         m_pHalfBakedMT = pMT;
         m_pHalfBakedClass = pMT->GetClass();
+        m_pStackingAllocator = pStackingAllocator;
         NullBMTData();
     }
 public:
@@ -244,6 +241,9 @@ private:
     // <NICE> Get rid of this.</NICE>
     EEClass *m_pHalfBakedClass;
     MethodTable * m_pHalfBakedMT;
+    StackingAllocator *m_pStackingAllocator;
+
+    StackingAllocator* GetStackingAllocator() { return m_pStackingAllocator; }
 
     // GetHalfBakedClass: The EEClass you get back from this function may not have all its fields filled in yet.
     // Thus you have to make sure that the relevant item which you are accessing has
@@ -267,10 +267,8 @@ private:
     BOOL IsAbstract() { LIMITED_METHOD_CONTRACT; return IsTdAbstract(bmtType->dwAttr); } 
     BOOL HasLayout() { LIMITED_METHOD_CONTRACT; return bmtProp->fHasLayout; } 
     BOOL IsDelegate() { LIMITED_METHOD_CONTRACT; return bmtProp->fIsDelegate; } 
-    BOOL IsContextful() { LIMITED_METHOD_CONTRACT; return bmtProp->fIsContextful; } 
     Module *GetModule() { LIMITED_METHOD_CONTRACT; return bmtType->pModule; } 
     Assembly *GetAssembly() { WRAPPER_NO_CONTRACT; return GetModule()->GetAssembly(); } 
-    BaseDomain *GetDomain() { LIMITED_METHOD_CONTRACT; return bmtDomain; } 
     ClassLoader *GetClassLoader() { WRAPPER_NO_CONTRACT; return GetModule()->GetClassLoader(); } 
     IMDInternalImport* GetMDImport()  { WRAPPER_NO_CONTRACT; return GetModule()->GetMDImport(); } 
 #ifdef _DEBUG
@@ -290,7 +288,6 @@ private:
     void SetEnum() { LIMITED_METHOD_CONTRACT; bmtProp->fIsEnum = TRUE; }
     void SetHasLayout() { LIMITED_METHOD_CONTRACT; bmtProp->fHasLayout = TRUE; }
     void SetIsDelegate() { LIMITED_METHOD_CONTRACT; bmtProp->fIsDelegate = TRUE; }
-    void SetContextful() { LIMITED_METHOD_CONTRACT; bmtProp->fIsContextful = TRUE; }
 #ifdef _DEBUG
     void SetDebugClassName(LPUTF8 x) { LIMITED_METHOD_CONTRACT; bmtProp->szDebugClassName = x; }
 #endif
@@ -326,7 +323,6 @@ private:
  
         BOOL fIsValueClass;
         BOOL fIsEnum;
-        BOOL fIsContextful;
         BOOL fIsComClassInterface;
         BOOL fHasLayout;
         BOOL fIsDelegate;
@@ -366,7 +362,6 @@ private:
             {
                 NOTHROW;
                 GC_NOTRIGGER;
-                SO_TOLERANT;
                 MODE_ANY;
             }
             CONTRACTL_END;
@@ -570,7 +565,6 @@ private:
     // Look at the struct definitions for a detailed list of all parameters available
     // to BuildMethodTable.
 
-    BaseDomain *bmtDomain;
     bmtErrorInfo *bmtError;
     bmtProperties *bmtProp;
     bmtVtable *bmtVT;
@@ -581,7 +575,6 @@ private:
     bmtMethodImplInfo *bmtMethodImpl;
 
     void SetBMTData(
-        BaseDomain *bmtDomain,
         bmtErrorInfo *bmtError,
         bmtProperties *bmtProp,
         bmtVtable *bmtVT,
@@ -708,7 +701,6 @@ private:
         WORD *pcBuildingInterfaceList);
 
     VOID BuildInteropVTable_PlaceMembers(
-        BaseDomain *bmtDomain,
         bmtTypeInfo* bmtType,
         DWORD numDeclaredInterfaces,
         BuildingInterfaceInfo_t *pBuildingInterfaceList,
@@ -721,7 +713,6 @@ private:
         bmtVtable* bmtVT);
 
     VOID BuildInteropVTable_ResolveInterfaces(
-        BaseDomain *bmtDomain,
         BuildingInterfaceInfo_t *pBuildingInterfaceList,
         bmtTypeInfo* bmtType,
         bmtInterfaceInfo* bmtInterface,
@@ -755,7 +746,6 @@ private:
         bmtParentInfo* bmtParent);
 
     VOID BuildInteropVTable_PlaceMethodImpls(
-        BaseDomain *bmtDomain,
         bmtTypeInfo* bmtType,
         bmtMethodImplInfo* bmtMethodImpl,
         bmtErrorInfo* bmtError,

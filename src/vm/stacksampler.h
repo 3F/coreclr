@@ -21,7 +21,7 @@ class StackSampler
 public:
     // Interface
     static void Init();
-    static void RecordJittingInfo(MethodDesc* pMD, DWORD dwFlags, DWORD dwFlags2);
+    static void RecordJittingInfo(MethodDesc* pMD, CORJIT_FLAGS flags);
 
 private:
 
@@ -39,10 +39,9 @@ private:
 
     void JitFrequentMethodsInSamples();
 
-    void JitAndCollectTrace(MethodDesc* pMD, const ADID& adId);
+    void JitAndCollectTrace(MethodDesc* pMD);
 
-    void RecordJittingInfoInternal(MethodDesc* pMD, DWORD flags);
-    ADID GetDomainId(MethodDesc* pMD, const ADID& defaultId);
+    void RecordJittingInfoInternal(MethodDesc* pMD, CORJIT_FLAGS flags);
 
 
     // Constants
@@ -55,7 +54,7 @@ private:
     typedef MapSHash<MethodDesc*, CountInfo> CountInfoHash;
     typedef CountInfoHash::element_t CountInfoHashEntry;
 
-    typedef MapSHash<MethodDesc*, ADID> JitInfoHash;
+    typedef MapSHash<MethodDesc*, CORJIT_FLAGS> JitInfoHash;
     typedef JitInfoHash::element_t JitInfoHashEntry;
 
     // Nested types
@@ -63,9 +62,7 @@ private:
     {
         unsigned uCount;
         bool fJitted;
-        ADID adDomainId;
-        CountInfo(const ADID& adId) : adDomainId(adId), fJitted(false), uCount(0) {}
-        CountInfo() {} // SHash doesn't like it
+        CountInfo() : fJitted(false), uCount(0) {}
     };
 
     // Fields

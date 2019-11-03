@@ -19,6 +19,9 @@ private:
     // The one and only PerfMap for the process.
     static PerfMap * s_Current;
 
+    // Indicates whether optimization tiers should be shown for methods in perf maps
+    static bool s_ShowOptimizationTiers;
+
     // The file stream to write the map to.
     CFileStream * m_FileStream;
 
@@ -27,6 +30,9 @@ private:
 
     // Set to true if an error is encountered when writing to the file.
     bool m_ErrorEncountered;
+
+    // Set to true if an error is encountered when writing to the file.
+    unsigned m_StubsMapped;
 
     // Construct a new map for the specified pid.
     PerfMap(int pid);
@@ -46,7 +52,7 @@ protected:
     void OpenFile(SString& path);
 
     // Does the actual work to log a method to the map.
-    void LogMethod(MethodDesc * pMethod, PCODE pCode, size_t codeSize);
+    void LogMethod(MethodDesc * pMethod, PCODE pCode, size_t codeSize, const char *optimizationTier);
 
     // Does the actual work to log an image
     void LogImage(PEFile * pFile);
@@ -62,7 +68,10 @@ public:
     static void LogImageLoad(PEFile * pFile);
 
     // Log a JIT compiled method to the map.
-    static void LogJITCompiledMethod(MethodDesc * pMethod, PCODE pCode, size_t codeSize);
+    static void LogJITCompiledMethod(MethodDesc * pMethod, PCODE pCode, size_t codeSize, PrepareCodeConfig *pConfig);
+
+    // Log a set of stub to the map.
+    static void LogStubs(const char* stubType, const char* stubOwner, PCODE pCode, size_t codeSize);
 
     // Close the map and flush any remaining data.
     static void Destroy();
@@ -72,8 +81,13 @@ public:
 class NativeImagePerfMap : PerfMap
 {
 private:
+    const WCHAR *strOFFSET = W("OFFSET");
+
+    // Specify the address format since it's now possible for 'perf script' to output file offsets or RVAs.
+    bool m_EmitRVAs;
+
     // Log a pre-compiled method to the map.
-    void LogPreCompiledMethod(MethodDesc * pMethod, PCODE pCode, SIZE_T baseAddr);
+    void LogPreCompiledMethod(MethodDesc * pMethod, PCODE pCode, PEImageLayout *pLoadedLayout, const char *optimizationTier);
 
 public:
     // Construct a new map for a native image.

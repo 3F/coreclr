@@ -1,12 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="src\dir.props" />
-  <Import Project="$(ToolsDir)Build.Post.targets" Condition="Exists('$(ToolsDir)Build.Post.targets') AND '$(BuildWrappers)' == 'true'" /> 
-  <Import Project="helixperftasks.targets" Condition="'$(Performance)'=='true'"/> 
+  <Import Project="$(ToolsDir)Build.Post.targets" Condition="Exists('$(ToolsDir)Build.Post.targets') AND '$(BuildWrappers)' == 'true'" />
   <PropertyGroup>
     <XunitTestBinBase Condition="'$(XunitTestBinBase)'==''" >$(BaseOutputPathWithConfig)</XunitTestBinBase>
     <XunitWrapperGeneratedCSDirBase>$(XunitTestBinBase)\TestWrappers\</XunitWrapperGeneratedCSDirBase>
-    <XunitWrapperOutputIntermediatedDirBase>$(XunitTestBinBase)\Tests\</XunitWrapperOutputIntermediatedDirBase>
     <MSBuildEnableAllPropertyFunctions>1</MSBuildEnableAllPropertyFunctions>
   </PropertyGroup>
 
@@ -15,10 +13,12 @@
     <_SkipTestDir Include="@(DisabledTestDir)" />
   </ItemGroup>
 
+  <Target Name="Rebuild" />
+
   <Target Name="FindCmdDirectories" DependsOnTargets="GetListOfTestCmds">
 
-    <Error Condition="!Exists('$(XunitTestBinBase)')" 
-           Text="$(XunitTestBinBase) does not exist. Please run buildtest.cmd from the (repo root)\tests at least once to get the tests built." />
+    <Error Condition="!Exists('$(XunitTestBinBase)')"
+           Text="$(XunitTestBinBase) does not exist. Please run build-test.cmd from the repo root at least once to get the tests built." />
 
     <ItemGroup>
 
@@ -27,10 +27,13 @@
       <AllTestDirsPaths Include="@(AllTestDirsNonCanonicalPaths)" >
         <Path>$([System.IO.Path]::GetFullPath(%(Identity)))</Path>
       </AllTestDirsPaths>
-      <NonExcludedTestDirectories Include="@(AllTestDirsPaths -> '%(Path)')" Exclude="@(_SkipTestDir -> '$(XunitTestBinBase)%(Identity)')">
+      <NonExcludedTestDirectories Include="@(AllTestDirsPaths -> '%(Path)')" Exclude="@(_SkipTestDir -> '$(XunitTestBinBase)%(Identity)')" />
+      <TopLevelDirectories Include="@(NonExcludedTestDirectories)" />
+      <SecondLevel Include="$([System.IO.Directory]::GetDirectories(%(TopLevelDirectories.Identity)))" />
+      <SecondLevelDirectories Include="@(SecondLevel)">
         <Path>$([System.IO.Path]::GetFullPath(%(AllRunnableTestPaths.Identity)))</Path>
-      </NonExcludedTestDirectories>
-      <TestDirectoriesWithDup Include="@(NonExcludedTestDirectories -> '%(Identity)')" Condition="$([System.String]::new('%(Path)').StartsWith('%(Identity)'))" />
+      </SecondLevelDirectories>
+      <TestDirectoriesWithDup Include="@(SecondLevelDirectories -> '%(Identity)')" Condition="$([System.String]::new('%(Path)').StartsWith('%(Identity)'))" />
 
     </ItemGroup>
 
@@ -42,12 +45,33 @@
 
   </Target>
 
+  <!-- Target to check the test build, to see if it looks ok. We've had several cases where a change inadvertently and drastically changes
+       the set of tests that are built, and that change is unnoticed. The most common case is for a build of the Priority 1 tests
+       to only build the Priority 0 tests. This target is run after a test build to verify that the basic number of tests that were
+       built is basically what was expected. When this was written, there were about 2500 Priority 0 tests and about 10268 Priority 1
+       tests on Windows, 9976 on Ubuntu (it differs slightly based on platform). We currently check that the number of Priority 0 tests
+       is greater than 2000 and less than 3000, and the number of Priority 1 tests is greater than 9000.
+  -->
+  <Target Name="CheckTestBuild" DependsOnTargets="GetListOfTestCmds">
+    <Error Condition="!Exists('$(XunitTestBinBase)')"
+        Text="$(XunitTestBinBase) does not exist. Please run build-test.cmd from the repo root at least once to get the tests built." />
 
-  <Import Project="$(__Exclude0)" Condition="'$(__Exclude0)' != '' AND '$(XunitTestBinBase)' != ''" /> 
-  <Import Project="$(__Exclude)" Condition="'$(__Exclude)' != '' AND '$(XunitTestBinBase)' != ''" /> 
+    <PropertyGroup>
+        <TestCount>@(AllRunnableTestPaths->Count())</TestCount>
+    </PropertyGroup>
+
+    <Message Text="Found $(TestCount) built tests"/>
+
+    <Error Condition="'$(CLRTestPriorityToBuild)' == '0' and '$(TestCount)' &lt;= 2000" Text="Unexpected test count. Expected &gt; 2000, found $(TestCount).'" />
+    <Error Condition="'$(CLRTestPriorityToBuild)' == '0' and '$(TestCount)' &gt;= 3000" Text="Unexpected test count. Expected &lt; 3000, found $(TestCount).'" />
+    <Error Condition="'$(CLRTestPriorityToBuild)' == '1' and '$(TestCount)' &lt;= 9000" Text="Unexpected test count. Expected &gt; 9000, found $(TestCount).'" />
+    <Error Condition="'$(CLRTestPriorityToBuild)' != '0' and '$(CLRTestPriorityToBuild)' != '1'" Text="Unknown priority $(CLRTestPriorityToBuild)" />
+  </Target>
+
+  <Import Project="$(__Exclude)" Condition="'$(__Exclude)' != '' AND '$(XunitTestBinBase)' != ''" />
   <PropertyGroup>
     <HaveExcludes>False</HaveExcludes>
-    <HaveExcludes Condition="('$(__Exclude0)' != '') Or ('$(__Exclude)' != '')">True</HaveExcludes>
+    <HaveExcludes Condition="'$(__Exclude)' != ''">True</HaveExcludes>
   </PropertyGroup>
 
   <Target Name="CreateXunitWrapper" DependsOnTargets="CreateXunitFacts">
@@ -55,78 +79,44 @@
     <PropertyGroup>
       <_XunitWrapperGen >
         <![CDATA[
-        
+
 $(_XunitProlog)
 @(AllXUnitFacts)
 $(_XunitEpilog)
 
 ]]>
       </_XunitWrapperGen>
-      <XunitVersionCompiled>2.1.0</XunitVersionCompiled>
       <XunitWrapperGenCsProj>
         <![CDATA[
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="12.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-    
-  <Import Project="$(SourceDir)dir.props" />
+<Project>
+
+  <Import Project="$(ProjectDir)dir.sdkbuild.props" />
+
   <PropertyGroup>
-    <Configuration Condition=" '%24(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '%24(Platform)' == '' ">AnyCPU</Platform>
-    <AssemblyName>$(XunitWrapper)</AssemblyName>
-    <SchemaVersion>2.0</SchemaVersion>
-    <ProjectGuid>{95DFC527-4DC1-495E-97D7-E94EE1F7140D}</ProjectGuid>
-    <OutputType>Library</OutputType>
-    <TargetFrameworkIdentifier>.NETFramework</TargetFrameworkIdentifier>
-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
-    <IsXunitWrapperProject>true</IsXunitWrapperProject>
-    <SkipSigning>true</SkipSigning>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <FileAlignment>512</FileAlignment>
-    <ProjectTypeGuids>{786C830F-07A1-408B-BD7F-6EE04809D6DB};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
-    <SolutionDir Condition="%24(SolutionDir) == '' Or %24(SolutionDir) == '*Undefined*'">..\..\</SolutionDir>
-    <NuGetPackageImportStamp>7a9bfb7d</NuGetPackageImportStamp>
-    <CLRTestKind>BuildOnly</CLRTestKind>
-    <IsTestProject>true</IsTestProject>
-  </PropertyGroup>
-  <!-- Default configurations to help VS understand the configurations -->
-  <PropertyGroup Condition=" '%24(Configuration)|%24(Platform)' == 'Debug|AnyCPU' ">
-  </PropertyGroup>
-  <PropertyGroup Condition=" '%24(Configuration)|%24(Platform)' == 'Release|AnyCPU' ">
-  </PropertyGroup>
+    <OutputPath>$(XUnitTestBinBase)\$(CategoryWithSlash)</OutputPath>
+    <RuntimeFrameworkVersion>$(MicrosoftNETCoreAppVersion)</RuntimeFrameworkVersion>
+ </PropertyGroup>
+
+  <Import Sdk="Microsoft.NET.Sdk" Project="Sdk.props" />
+
   <ItemGroup>
     <Compile Include="$(XunitWrapper).cs" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="%24(TestWrappersPackagesConfigFileDirectory)project.json" />
-  </ItemGroup>
-  <ItemGroup>
-    <Service Include="{82A7F48D-3B50-4B1E-B82E-3ADA8210C358}" />
-  </ItemGroup>
-   <ItemGroup>
-    <ProjectReference Include="$(SourceDir)Common\Desktop.Coreclr.TestWrapper\Desktop.Coreclr.TestWrapper.csproj">
-      <Project>{8ffe99c0-22f8-4462-b839-970eac1b3472}</Project>
-      <Name>coreclr</Name>
-    </ProjectReference>
-  </ItemGroup>
- 
-  <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.Runtime" />
-    <Reference Include="mscorlib" />
-  </ItemGroup>
-  <PropertyGroup>
-    <ProjectJson>%24(TestWrappersPackagesConfigFileDirectory)project.json</ProjectJson>
-    <ProjectLockJson>%24(TestWrappersPackagesConfigFileDirectory)project.lock.json</ProjectLockJson>
-  </PropertyGroup>
-  <Import Project="$(SourceDir)dir.targets" />
-  <Import Project="$(ProjectDir)helix.targets" />
-  <PropertyGroup>
-     <OutDir>$(XunitTestBinBase)\$(Category)\</OutDir>
-  </PropertyGroup>
-</Project>
-        ]]>
-      </XunitWrapperGenCsProj>
 
+  <ItemGroup>
+    <ProjectReference Include="$(SourceDir)Common\Coreclr.TestWrapper\Coreclr.TestWrapper.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit" Version="$(XunitPackageVersion)" />
+    <PackageReference Include="xunit.runner.console" Version="$(XunitPackageVersion)" />
+  </ItemGroup>
+
+  <Import Sdk="Microsoft.NET.Sdk" Project="Sdk.targets" />
+
+</Project>
+]]>
+      </XunitWrapperGenCsProj>
     </PropertyGroup>
 
     <!-- <Exec Command="md" -->
@@ -144,26 +134,31 @@ $(_XunitEpilog)
       Lines="$(XunitWrapperGenCsProj)"
       Overwrite="true" />
   </Target>
-  
+
   <Target Name="BuildXunitWrapper">
-    <MSBuild Projects="$(XunitWrapperSrcDir)\$(XunitWrapper).csproj"
-             Properties="RestorePackages=false"/>
+    <MSBuild Projects="$(XunitWrapperSrcDir)\$(XunitWrapper).csproj" Targets="Restore;Build" />
   </Target>
+
+  <Import Project="testgrouping.proj" />
 
   <Target Name="CreateXunitFacts">
     <!-- NOTE! semicolons must be escaped with %3B boooo -->
 
     <PropertyGroup>
       <_CMDDIR_Parent>$([System.IO.Path]::GetDirectoryName($(_CMDDIR)))</_CMDDIR_Parent>
-      <Category>$([System.String]::Copy('$(_CMDDIR)').Replace($(_CMDDIR_Parent)\,''))</Category>
+      <_CMDDIR_Grandparent>$([System.IO.Path]::GetDirectoryName($(_CMDDIR_Parent)))</_CMDDIR_Grandparent>
+      <CategoryWithSlash Condition="'$(RunningOnUnix)' != 'true'" >$([System.String]::Copy('$(_CMDDIR)').Replace("$(_CMDDIR_Grandparent)\",""))</CategoryWithSlash>
+      <CategoryWithSlash Condition="'$(RunningOnUnix)' == 'true'" >$([System.String]::Copy('$(_CMDDIR)').Replace("$(_CMDDIR_Grandparent)/",""))</CategoryWithSlash>
+      <Category Condition="'$(RunningOnUnix)' != 'true'" >$([System.String]::Copy('$(CategoryWithSlash)').Replace('\','.'))</Category>
+      <Category Condition="'$(RunningOnUnix)' == 'true'" >$([System.String]::Copy('$(CategoryWithSlash)').Replace('/','.'))</Category>
       <XunitWrapper>$(Category).XUnitWrapper</XunitWrapper>
       <XunitWrapperSrcDir>$(XunitWrapperGeneratedCSDirBase)$(Category)</XunitWrapperSrcDir>
-      <XunitWrapperOutputDir>$(XunitWrapperOutputIntermediatedDirBase)$(Category)</XunitWrapperOutputDir>
     </PropertyGroup>
     <PropertyGroup>
       <_XunitProlog Condition=" '$(_XunitProlog)'=='' ">
         <![CDATA[
 using Xunit%3B
+using Xunit.Abstractions%3B
 using System%3B
 using System.Collections.Generic%3B
 using System.Diagnostics%3B
@@ -183,7 +178,7 @@ namespace $([System.String]::Copy($(Category)).Replace(".","_").Replace("\","").
             {
                 reportBase = System.Environment.GetEnvironmentVariable(%22XunitTestReportDirBase%22)%3B
                 testBinaryBase = System.IO.Path.GetDirectoryName(new Uri(Assembly.GetExecutingAssembly().CodeBase).LocalPath)%3B
-                coreRoot = System.IO.Path.GetFullPath(System.Environment.GetEnvironmentVariable(%22CORE_ROOT%22))%3B
+                coreRoot = System.Environment.GetEnvironmentVariable(%22CORE_ROOT%22)%3B
 
                 if (String.IsNullOrEmpty(reportBase)) {
                     reportBase = System.IO.Path.Combine(testBinaryBase, "Reports")%3B
@@ -197,7 +192,10 @@ namespace $([System.String]::Copy($(Category)).Replace(".","_").Replace("\","").
                     throw new ArgumentException("Environment variable CORE_ROOT is not set")%3B
                 }
 
-                runningInWindows = System.Environment.GetEnvironmentVariable("OS").StartsWith("Windows")%3B
+                coreRoot = System.IO.Path.GetFullPath(coreRoot)%3B
+
+                string operatingSystem = System.Environment.GetEnvironmentVariable("OS")%3B
+                runningInWindows = (operatingSystem != null && operatingSystem.StartsWith("Windows"))%3B
             }
         }
 
@@ -212,26 +210,45 @@ namespace $([System.String]::Copy($(Category)).Replace(".","_").Replace("\","").
       </_XunitEpilog>
     </PropertyGroup>
 
-    <ItemGroup>
-      <CanonicalExcludeList Include="%(ExcludeList.FullPath)" Condition="$(HaveExcludes)"/>
-    </ItemGroup>
+    <PropertyGroup>
+      <TestExecutableReplacement Condition="'$(TargetsWindows)' != 'true' ">testExecutable = testExecutable.Replace("\\", "/")%3B</TestExecutableReplacement>
+    </PropertyGroup>
 
     <ItemGroup>
-      <AllCMDsPresent Include="$(_CMDDIR)\**\*.cmd" />
-      <AllCMDExcludeFilter Include="@(CanonicalExcludeList)" Condition="$(HaveExcludes)"/>
-      <AllCMDs Include="@(AllCMDsPresent)" Exclude="@(AllCMDExcludeFilter)"/>
-
-      <AllCommands Include="@(AllCMDs)" >
-        <_FactName>$([System.String]::Copy('%(AllCMDs.FullPath)').Replace("$(_CMDDIR)",'').Replace(".","_").Replace("\","_").Replace("-","_"))</_FactName>
-        <_ClassName>$([System.String]::Copy('%(AllCMDs.FullPath)').Replace("$(_CMDDIR)",'').Replace("cmd","").Replace(".","_").Replace("\","_").Replace("-","_"))</_ClassName>
-
-        <_XunitFact >
+      <AllCMDsPresent Include="$(_CMDDIR)\**\*.cmd" Condition="'$(RunningOnUnix)' != 'true'" />
+      <AllCMDsPresent Include="$(_CMDDIR)\**\*.sh" Condition="'$(RunningOnUnix)' == 'true'" />
+      <TestGroupingDistinctWithCase Include="@(TestGrouping->Metadata('FullPath')->DistinctWithCase())" />
+      <TestGroupingNotRelevant Include="@(TestGroupingDistinctWithCase)" Exclude="@(AllCMDsPresent)" />
+      <GroupedCMDs Include="@(TestGroupingDistinctWithCase)" Exclude="@(TestGroupingNotRelevant)" />
+      <GroupedCMDs Include="@(AllCMDsPresent)" Exclude="@(GroupedCMDs)">
+        <TestGroup>$(Category)</TestGroup>
+      </GroupedCMDs>
+      <AllCMDExcludeFilter Include="@(ExcludeList->Metadata('FullPath'))" Condition="$(HaveExcludes)" />
+      <AllCMDs Include="@(GroupedCMDs)" Exclude="@(AllCMDExcludeFilter)">
+        <RelativeToCMDDIR>$([MSBuild]::MakeRelative($(_CMDDIR), %(FullPath)))</RelativeToCMDDIR>
+      </AllCMDs>
+      <AllCommands Include="@(AllCMDs)" Condition="@(AllCMDs->Count()) &gt; 0">
+        <DisplayName>$([MSBuild]::MakeRelative($(XunitTestBinBase), %(AllCMDs.FullPath)))</DisplayName>
+        <FactName Condition="'$(RunningOnUnix)' != 'true'" >_$([MSBuild]::ValueOrDefault(%(AllCMDs.RelativeToCMDDIR),"").Replace(".","_").Replace("\","_").Replace("-","_"))</FactName>
+        <ClassName Condition="'$(RunningOnUnix)' != 'true'" >_$([MSBuild]::ValueOrDefault(%(AllCMDs.RelativeToCMDDIR),"").Replace("cmd","").Replace(".","_").Replace("\","_").Replace("-","_"))</ClassName>
+        <FactName Condition="'$(RunningOnUnix)' == 'true'" >_$([MSBuild]::ValueOrDefault(%(AllCMDs.RelativeToCMDDIR),"").Replace(".","_").Replace("/","_").Replace("-","_"))</FactName>
+        <ClassName Condition="'$(RunningOnUnix)' == 'true'" >_$([MSBuild]::ValueOrDefault(%(AllCMDs.RelativeToCMDDIR), '').Replace('sh','').Replace('.','_').Replace('/','_').Replace('-','_'))</ClassName>
+        <TestGroup>%(AllCMDs.TestGroup)</TestGroup>
+        <XUnitFact >
           <![CDATA[
 
-        public class %(AllCommands._ClassName)
+        public class %(AllCommands.ClassName)
         {
-            [Fact]
-            public void %(AllCommands._FactName)()
+            private readonly ITestOutputHelper output%3B
+
+            public %(AllCommands.ClassName)(ITestOutputHelper output)
+            {
+                this.output = output%3B
+            }
+
+            [Fact(DisplayName=@"%(AllCommands.DisplayName)")]
+            [Trait("TestGroup", "%(AllCommands.TestGroup)")]
+            public void %(AllCommands.FactName)()
             {
                 int ret = -100%3B
                 string outputFile = null%3B
@@ -242,10 +259,11 @@ namespace $([System.String]::Copy($(Category)).Replace(".","_").Replace("\","").
                 try
                 {
                   CoreclrTestWrapperLib wrapper = new CoreclrTestWrapperLib()%3B
-                  string testSubfolder = @"\$(Category)\$([System.String]::Copy('%(AllCMDs.RelativeDir)').Replace("$(_CMDDIR)\",''))"%3B
+                  string testSubfolder = @"\$(Category)\$([System.String]::Copy('%(AllCMDs.RelativeDir)').Replace("$(_CMDDIR)$([System.IO.Path]::DirectorySeparatorChar)",''))"%3B
                   outputFile = System.IO.Path.GetFullPath(_Global.reportBase + testSubfolder + @"%(AllCMDs.FileName).output.txt")%3B
                   errorFile = System.IO.Path.GetFullPath(_Global.reportBase + testSubfolder + @"%(AllCMDs.FileName).error.txt")%3B
                   testExecutable = System.IO.Path.GetFullPath(_Global.testBinaryBase + @"$([System.String]::Copy('%(AllCMDs.FullPath)').Replace("$(_CMDDIR)",''))")%3B
+                  $(TestExecutableReplacement)
 
                   if (!_Global.runningInWindows) {
                       testExecutable = testExecutable.Replace(".cmd", ".sh")%3B
@@ -260,162 +278,134 @@ namespace $([System.String]::Copy($(Category)).Replace(".","_").Replace("\","").
                     infraEx = ex%3B
                 }
 
-                if (ret != CoreclrTestWrapperLib.EXIT_SUCCESS_CODE)
+                if (infraEx != null)
                 {
-                    string sErrorText = null%3B
+                    Assert.True(false, "Test Infrastructure Failure: " + infraEx.Message)%3B
+                }
+                else if (ret != CoreclrTestWrapperLib.EXIT_SUCCESS_CODE)
+                {
+                    List<string> allOutput = new List<string>()%3B
+
                     try
                     {
-                        sErrorText = System.IO.File.ReadAllText(errorFile)%3B
+                        allOutput.AddRange(System.IO.File.ReadAllLines(errorFile))%3B
+                    }
+                    catch (Exception ex)
+                    {
+                        allOutput.Add("Unable to read error file: " + errorFile)%3B
+                        allOutput.Add(ex.Message)%3B
+                    }
+
+                    allOutput.Add(string.Empty)%3B
+                    allOutput.Add("Return code:      " + ret)%3B
+                    allOutput.Add("Raw output file:      " + outputFile)%3B
+                    allOutput.Add("Raw output:")%3B
+
+                    try
+                    {
+                        allOutput.AddRange(System.IO.File.ReadAllLines(outputFile))%3B
                     }
                     catch(Exception ex)
                     {
-                      sErrorText = "Unable to read error file: " + errorFile%3B
+                        allOutput.Add("Unable to read output file: " + outputFile)%3B
+                        allOutput.Add(ex.Message)%3B
                     }
 
-                    string outputText = null%3B
-                    try
+                    allOutput.Add("To run the test:")%3B
+                    allOutput.Add("> set CORE_ROOT=" + _Global.coreRoot)%3B
+                    allOutput.Add("> " + testExecutable)%3B
+
+                    foreach (string line in allOutput)
                     {
-                        System.IO.StreamReader outputReader = new System.IO.StreamReader(outputFile)%3B
-                        outputText = outputReader.ReadToEnd()%3B
-                        outputReader.Close()%3B
-                    }
-                    catch(Exception ex)
-                    {
-                        outputText = "Unable to read output file: " + outputFile%3B
+                        output.WriteLine(line)%3B
                     }
 
-                    string msg = infraEx != null ? "Test Infrastructure Failure: " + infraEx.Message
-                                                 : sErrorText + "\n\n" +
-                                                   "Return code:      " + ret + "\n" +
-                                                   "Raw output file:      " + outputFile + "\n" +
-                                                   "Raw output:\n" + outputText + "\n" +
-                                                   "To run the test:\n" +
-                                                   "> set CORE_ROOT=" + _Global.coreRoot + "\n" +
-                                                   "> " + testExecutable + "\n"%3B
-
-                    Assert.True(ret == CoreclrTestWrapperLib.EXIT_SUCCESS_CODE, msg)%3B
+                    Assert.True(false, string.Join(Environment.NewLine, allOutput))%3B
                 }
             }
-       }
+        }
 
         ]]>
-        </_XunitFact>
+        </XUnitFact>
       </AllCommands>
-      <AllXUnitFacts Include= "%(AllCommands._XunitFact)" />
+      <AllXUnitFacts Include= "@(AllCommands->Metadata(XUnitFact))" />
     </ItemGroup>
-
   </Target>
 
   <Target Name="CreateAllWrappers" DependsOnTargets="GetListOfTestCmds;FindCmdDirectories">
-    <MSBuild Projects="$(MSBuildProjectFile)" Targets="CreateXunitWrapper" Properties="_CMDDIR=%(TestDirectories.Identity)" />
-
-    <!--
-      Contents of a project.json that will be restored once with errors turned off. This works
-      around the package being incompatible with dotnet restore. Only the package contents are
-      required so the compatibility errors can be ignored.
-    -->
-    <PropertyGroup>
-      <XunitRunnerRestoreGenConfig>{ "dependencies": { "xunit.runner.msbuild": "$(XunitPackageVersion)" }, "frameworks": { "net45": {} } }</XunitRunnerRestoreGenConfig>
-      <XunitRunnerRestoreProjectDir>$(BaseOutputPath)\tempRestoreProject</XunitRunnerRestoreProjectDir>
-      <XunitRunnerRestoreProjectJsonPath>$(XunitRunnerRestoreProjectDir)\project.json</XunitRunnerRestoreProjectJsonPath>
-    </PropertyGroup>
-    
-    <MakeDir Directories="$(XunitRunnerRestoreProjectDir)" />
-    <WriteLinesToFile File="$(XunitRunnerRestoreProjectJsonPath)"
-                      Lines="$(XunitRunnerRestoreGenConfig)"
-                      Overwrite="true" />
-    
-    <Exec Command="$(DnuRestoreCommand) &quot;$(XunitRunnerRestoreProjectJsonPath)&quot;"
-          StandardOutputImportance="Low"
-          CustomErrorRegularExpression="^Unable to resolve .*"
-          IgnoreExitCode="true" 
-          IgnoreStandardErrorWarningFormat="true" />
-
-    <MSBuild Projects="$(MSBuildProjectFile)" Targets="BuildXunitWrapper" Properties="_CMDDIR=%(TestDirectories.Identity)" />
+    <MSBuild Projects="$(MSBuildProjectFile)" Targets="CreateXunitWrapper;BuildXunitWrapper" Properties="_CMDDIR=%(TestDirectories.Identity)" />
   </Target>
 
   <Target Name="GetListOfTestCmds">
     <ItemGroup>
-      <AllRunnableTestPaths Include="$(XunitTestBinBase)\**\*.cmd" />
+      <AllRunnableTestPaths Include="$(XunitTestBinBase)\**\*.cmd" Condition="'$(BuildOS)' == 'Windows_NT'" />
+      <AllRunnableTestPaths Include="$(XunitTestBinBase)\**\*.sh" Condition="'$(BuildOS)' != 'Windows_NT'" />
     </ItemGroup>
-  </Target> 
+  </Target>
+
+  <!-- If we want to overwrite the desired CoreCLR package version, we need to get the new version from the generated props file in bin/obj -->
+  <Import Condition="'$(OverwriteCoreClrPackageVersion)' == 'true'" Project="$(BuildVersionFile)" />
+
+  <PropertyGroup Condition="'$(OverwriteCoreClrPackageVersion)' == 'true'">
+    <VersionToRestore Condition="'$(StableVersion)' != ''">$(StableVersion)</VersionToRestore>
+    <VersionToRestore Condition="'$(VersionToRestore)' == ''">$(PackageVersion)-$(PreReleaseLabel)-$(BuildNumberMajor)-$(BuildNumberMinor)</VersionToRestore>
+    <DesiredPackageVersionArg>$(VersionToRestore)</DesiredPackageVersionArg>
+  </PropertyGroup>
 
   <Import Project="tests.targets" />
   <Import Project="publishdependency.targets" />
 
+  <PropertyGroup>
+    <DesiredPackageVersionArg Condition="'$(DesiredPackageVersionArg)' == ''">$(MicrosoftNETCoreRuntimeCoreCLRPackageVersion)</DesiredPackageVersionArg>
+  </PropertyGroup>
+
   <Target Name="CreateTestOverlay">
     <MSBuild Projects="$(MSBuildProjectFile)"
-             Targets="CopyDependecyToCoreRoot"
-             Properties="Language=C#" />
+             Targets="CopyDependencyToCoreRoot"
+             Properties="Language=C#;TargetRid=$(TargetRid)" />
   </Target>
 
-  <!-- All the test projects need to add dependency to currently built runtime as they require that to run. 
-       In addition the version number of built runtime can change so all project.json needs to be dynamically generated. 
-       In order to avoid regenerating project.json for all the tests projects...I added a common project for all the tests.
-       This project is at tests\src\common\test_runtime\test_runtime.csproj. This project is adding common dependencies to
-       all the tests like dependency on Microsoft.netcore.runtime.coreclr ..etc. Project.json for this project is dynamically 
-       generated via task CreateTestRuntimeJsonFile. -->
-  <Target Name="CreateTestRuntimeJsonFile">
-    <ItemGroup>
-      <CoreclrPackage Include="$(CORE_ROOT)\.nuget\**\Microsoft.NETCore.Runtime.CoreCLR.*.nupkg"/>
-    </ItemGroup>
-    <PropertyGroup>
-      <CoreclrPackageFileName>%(CoreclrPackage.Filename)</CoreclrPackageFileName>
-      <!-- Get package version number from nuget package filename at core_root -->
-      <CoreclrPackageVersion>$([System.String]::Copy('$(CoreclrPackageFileName)').Replace('Microsoft.NETCore.Runtime.CoreCLR.',''))</CoreclrPackageVersion>
-      <TestRuntimeJsonContents>
-        <![CDATA[
-{
-  "dependencies": {
-    "Microsoft.NETCore.Runtime.CoreCLR": "$(CoreclrPackageVersion)",
-    "Microsoft.NETCore.TestHost": "1.0.0-rc3-24117-00"
-  },
-  "frameworks": {
-    "dnxcore50": {}
-  },
-  "runtimes": {
-    "$(TestNugetRuntimeId)":{}
-  }
-}
+  <!--
+       Targets and properties for creating the testhost directory used to run corefx tests.
+   -->
 
-        ]]>
-      </TestRuntimeJsonContents>
+  <Target Name="CreateTestHost">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)src\Common\CoreFX\CoreFX.depproj"
+             Targets="Build;SetupTestingHost"
+             Properties="OutputPath=$(NETCoreAppTestSharedFrameworkPath)" />
+
+    <MSBuild Projects="$(MSBuildProjectFile)"
+             Targets="GenerateTestSharedFrameworkDepsFile"/>
+  </Target>
+
+  <UsingTask TaskName="GenerateDepsJson" AssemblyFile="$(BuildToolsTaskDir)Microsoft.DotNet.Build.Tasks.dll"/>
+
+  <!-- After we copied all the framework libraries we need to generate a deps.json file for the shared test framework -->
+  <Target Name="GenerateTestSharedFrameworkDepsFile">
+    <ItemGroup>
+      <!-- This is for HostPolicy, CoreCLR and Jit dependencies to continue to remain inside of the dep.json -->
+      <ExceptionForDepsJson Include="microsoft.netcore.app" />
+
+      <!-- TODO: We should see about generating this from scratch instead of relying on a previous deps file as a template -->
+      <_sharedFrameworkDepsJson Include="$(DotnetCliPath)\shared\Microsoft.NETCore.App\*\Microsoft.NETCore.App.deps.json" />
+    </ItemGroup>
+
+    <PropertyGroup>
+      <_OriginalDepsJsonPath>%(_sharedFrameworkDepsJson.FullPath)</_OriginalDepsJsonPath>
+      <_OutputTestSharedFrameworkDepsPath>$(NETCoreAppTestSharedFrameworkPath)\Microsoft.NETCore.App.deps.json</_OutputTestSharedFrameworkDepsPath>
     </PropertyGroup>
 
-    <MakeDir Directories="$(TestRuntimeProjectJsonDir)" Condition="!Exists('$(TestRuntimeProjectJsonDir)')" />
-
-    <!-- Write the file -->
-    <WriteLinesToFile
-      File="$(TestRuntimeProjectJson)"
-      Lines="$(TestRuntimeJsonContents)"
-      Overwrite="true" />
-
+    <GenerateDepsJson DepsJsonPath="$(_OriginalDepsJsonPath)"
+                      GenerateNewDepsJson="true"
+                      RuntimeDirectory="$(NETCoreAppTestSharedFrameworkPath)"
+                      DepsExceptions="@(ExceptionForDepsJson)"
+                      OutputPath="$(_OutputTestSharedFrameworkDepsPath)"/>
   </Target>
-
-  <Target Name="RunPerfTests" Condition="'$(Performance)'=='true'">  
-    <Message Text="Executing steps for perf tests" Importance="High"/>  
-    
-    <!-- generate project.json for runtime dependency -->  
-    <MSBuild Projects="$(MSBuildProjectFile)"  
-             Targets="CreateTestRuntimeJsonFile"/>  
-     
-    <!-- generate project.lock.json file corresponding to above json file -->
-    <MSBuild Projects="src\Common\test_runtime\test_runtime.csproj"/>
-    
-    <!-- Package each perf test, upload it and trigger event to execute the tests -->  
-    <MSBuild Projects="$(MSBuildProjectFile)" Targets="UploadPerfAssemblies" />  
-  </Target>  
-
 
   <Target Name="Build">
 
-    <!-- generate project.json for runtime dependency -->
-    <MSBuild Projects="$(MSBuildProjectFile)"
-             Targets="CreateTestRuntimeJsonFile"
-             Condition=" '$(BuildWrappers)'=='true' " />
-
     <!-- generate project.lock.json file corresponding to above json file -->
-    <MSBuild Projects="src\Common\test_runtime\test_runtime.csproj"
+    <MSBuild Projects="src\Common\test_dependencies\test_dependencies.csproj"
              Condition=" '$(BuildWrappers)'=='true' " />
 
     <!-- Default for building -->
@@ -430,11 +420,15 @@ namespace $([System.String]::Copy($(Category)).Replace(".","_").Replace("\","").
              Targets="CreateTestOverlay"
              Condition=" '$(GenerateRuntimeLayout)'=='true' "/>
 
+    <MSBuild Projects="$(MSBuildProjectFile)"
+             Targets="CreateTestHost"
+             Condition=" '$(GenerateTestHost)'=='true' "/>
+
     <MSBuild Projects="$(MSBuildProjectFile)" Targets="RunTests"
              Condition=" '$(RunTests)'=='true' "/>
   </Target>
 
   <Target Name="Clean">
-    <RemoveDir Condition=" '$(BuildWrappers)'=='true'" Directories="$(XunitWrapperGeneratedCSDirBase);$(XunitWrapperOutputIntermediatedDirBase)" ContinueOnError="WarnAndContinue" /> 
+    <RemoveDir Condition=" '$(BuildWrappers)'=='true'" Directories="$(XunitWrapperGeneratedCSDirBase);" ContinueOnError="WarnAndContinue" />
   </Target>
 </Project>

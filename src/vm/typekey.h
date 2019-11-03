@@ -148,7 +148,6 @@ public:
         {
             NOTHROW;
             GC_NOTRIGGER;
-            SO_TOLERANT;
             MODE_ANY;
             SUPPORTS_DAC;
         }
@@ -296,11 +295,6 @@ public:
         return hash;
 #endif
     }
-
-    // Is this type part of an assembly loaded for introspection?
-    BOOL IsIntrospectionOnly();
-
-
 };
 
 

@@ -15,6 +15,9 @@
 #include <utilcode.h>
 #include <corhost.h>
 #include <configuration.h>
+#ifdef FEATURE_GDBJIT
+#include "../../vm/gdbjithelpers.h"
+#endif // FEATURE_GDBJIT
 
 typedef int (STDMETHODCALLTYPE *HostMain)(
     const int argc,
@@ -134,14 +137,19 @@ static void ConvertConfigPropertiesToUnicode(
 
 #if !defined(FEATURE_MERGE_JIT_AND_ENGINE)
 // Reference to the global holding the path to the JIT
-extern "C" LPCWSTR g_CLRJITPath;
+extern LPCWSTR g_CLRJITPath;
 #endif // !defined(FEATURE_MERGE_JIT_AND_ENGINE)
+
+#ifdef FEATURE_GDBJIT
+GetInfoForMethodDelegate getInfoForMethodDelegate = NULL;
+extern "C" int coreclr_create_delegate(void*, unsigned int, const char*, const char*, const char*, void**);
+#endif //FEATURE_GDBJIT
 
 //
 // Initialize the CoreCLR. Creates and starts CoreCLR host and creates an app domain
 //
 // Parameters:
-//  exePath                 - Absolute path of the executable that invoked the ExecuteAssembly
+//  exePath                 - Absolute path of the executable that invoked the ExecuteAssembly (the native host application)
 //  appDomainFriendlyName   - Friendly name of the app domain that will be created to execute the assembly
 //  propertyCount           - Number of properties (elements of the following two arguments)
 //  propertyKeys            - Keys of properties of the app domain
@@ -153,6 +161,7 @@ extern "C" LPCWSTR g_CLRJITPath;
 //  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
 //
 extern "C"
+DLLEXPORT
 int coreclr_initialize(
             const char* exePath,
             const char* appDomainFriendlyName,
@@ -175,9 +184,9 @@ int coreclr_initialize(
     }
 #endif
 
-    ReleaseHolder<ICLRRuntimeHost2> host;
+    ReleaseHolder<ICLRRuntimeHost4> host;
 
-    hr = CorHost2::CreateObject(IID_ICLRRuntimeHost2, (void**)&host);
+    hr = CorHost2::CreateObject(IID_ICLRRuntimeHost4, (void**)&host);
     IfFailRet(hr);
 
     ConstWStringHolder appDomainFriendlyNameW = StringToUnicode(appDomainFriendlyName);
@@ -238,8 +247,26 @@ int coreclr_initialize(
     {
         host.SuppressRelease();
         *hostHandle = host;
-    }
+#ifdef FEATURE_GDBJIT
+        HRESULT createDelegateResult;
+        createDelegateResult = coreclr_create_delegate(*hostHandle,
+                                                       *domainId,
+                                                       "SOS.NETCore",
+                                                       "SOS.SymbolReader",
+                                                       "GetInfoForMethod",
+                                                       (void**)&getInfoForMethodDelegate);
 
+#if defined(_DEBUG)
+        if (!SUCCEEDED(createDelegateResult))
+        {
+            fprintf(stderr,
+                    "Can't create delegate for 'SOS.SymbolReader.GetInfoForMethod' "
+                    "method - status: 0x%08x\n", createDelegateResult);
+        }
+#endif // _DEBUG
+
+#endif
+    }
     return hr;
 }
 
@@ -248,17 +275,18 @@ int coreclr_initialize(
 //
 // Parameters:
 //  hostHandle              - Handle of the host
-//  domainId                - Id of the domain 
+//  domainId                - Id of the domain
 //
 // Returns:
 //  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
 //
 extern "C"
+DLLEXPORT
 int coreclr_shutdown(
             void* hostHandle,
             unsigned int domainId)
 {
-    ReleaseHolder<ICLRRuntimeHost2> host(reinterpret_cast<ICLRRuntimeHost2*>(hostHandle));
+    ReleaseHolder<ICLRRuntimeHost4> host(reinterpret_cast<ICLRRuntimeHost4*>(hostHandle));
 
     HRESULT hr = host->UnloadAppDomain(domainId, true); // Wait until done
     IfFailRet(hr);
@@ -273,7 +301,39 @@ int coreclr_shutdown(
 }
 
 //
-// Create a native callable delegate for a managed method.
+// Shutdown CoreCLR. It unloads the app domain and stops the CoreCLR host.
+//
+// Parameters:
+//  hostHandle              - Handle of the host
+//  domainId                - Id of the domain
+//  latchedExitCode         - Latched exit code after domain unloaded
+//
+// Returns:
+//  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
+//
+extern "C"
+DLLEXPORT
+int coreclr_shutdown_2(
+            void* hostHandle,
+            unsigned int domainId,
+            int* latchedExitCode)
+{
+    ReleaseHolder<ICLRRuntimeHost4> host(reinterpret_cast<ICLRRuntimeHost4*>(hostHandle));
+
+    HRESULT hr = host->UnloadAppDomain2(domainId, true, latchedExitCode); // Wait until done
+    IfFailRet(hr);
+
+    hr = host->Stop();
+
+#ifdef FEATURE_PAL
+    PAL_Shutdown();
+#endif
+
+    return hr;
+}
+
+//
+// Create a native callable function pointer for a managed method.
 //
 // Parameters:
 //  hostHandle              - Handle of the host
@@ -281,12 +341,13 @@ int coreclr_shutdown(
 //  entryPointAssemblyName  - Name of the assembly which holds the custom entry point
 //  entryPointTypeName      - Name of the type which holds the custom entry point
 //  entryPointMethodName    - Name of the method which is the custom entry point
-//  delegate                - Output parameter, the function stores a pointer to the delegate at the specified address
+//  delegate                - Output parameter, the function stores a native callable function pointer to the delegate at the specified address
 //
 // Returns:
 //  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
 //
 extern "C"
+DLLEXPORT
 int coreclr_create_delegate(
             void* hostHandle,
             unsigned int domainId,
@@ -295,7 +356,7 @@ int coreclr_create_delegate(
             const char* entryPointMethodName,
             void** delegate)
 {
-    ICLRRuntimeHost2* host = reinterpret_cast<ICLRRuntimeHost2*>(hostHandle);
+    ICLRRuntimeHost4* host = reinterpret_cast<ICLRRuntimeHost4*>(hostHandle);
 
     ConstWStringHolder entryPointAssemblyNameW = StringToUnicode(entryPointAssemblyName);
     ConstWStringHolder entryPointTypeNameW = StringToUnicode(entryPointTypeName);
@@ -326,6 +387,7 @@ int coreclr_create_delegate(
 //  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
 //
 extern "C"
+DLLEXPORT
 int coreclr_execute_assembly(
             void* hostHandle,
             unsigned int domainId,
@@ -340,7 +402,7 @@ int coreclr_execute_assembly(
     }
     *exitCode = -1;
 
-    ICLRRuntimeHost2* host = reinterpret_cast<ICLRRuntimeHost2*>(hostHandle);
+    ICLRRuntimeHost4* host = reinterpret_cast<ICLRRuntimeHost4*>(hostHandle);
 
     ConstWStringArrayHolder argvW;
     argvW.Set(StringArrayToUnicode(argc, argv), argc);

@@ -22,17 +22,6 @@ inline PTR_VOID Object::UnBox()       // if it is a value class, get the pointer
     return dac_cast<PTR_BYTE>(this) + sizeof(*this);
 }
 
-inline ADIndex Object::GetAppDomainIndex()
-{
-    WRAPPER_NO_CONTRACT;
-#ifndef _DEBUG
-    // ok to cast to AppDomain because we know it's a real AppDomain if it's not shared
-    if (!GetGCSafeMethodTable()->IsDomainNeutral())
-        return (dac_cast<PTR_AppDomain>(GetGCSafeMethodTable()->GetDomain())->GetIndex());
-#endif
-        return GetHeader()->GetAppDomainIndex();
-}
-
 inline DWORD Object::GetNumComponents()
 {
     LIMITED_METHOD_DAC_CONTRACT;
@@ -58,13 +47,35 @@ inline SIZE_T Object::GetSize()
     return s;
 }
 
+__forceinline /*static*/ DWORD StringObject::GetBaseSize()
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+
+    return OBJECT_BASESIZE + sizeof(DWORD) /* length */ + sizeof(WCHAR) /* null terminator */;
+}
+
 __forceinline /*static*/ SIZE_T StringObject::GetSize(DWORD strLen)
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    // Extra WCHAR for null terminator
-    return ObjSizeOf(StringObject) + sizeof(WCHAR) + strLen * sizeof(WCHAR);
+    return GetBaseSize() + strLen * sizeof(WCHAR);
 }
+
+#ifdef FEATURE_UTF8STRING
+__forceinline /*static*/ DWORD Utf8StringObject::GetBaseSize()
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+
+    return OBJECT_BASESIZE + sizeof(DWORD) /* length */ + sizeof(BYTE) /* null terminator */;
+}
+
+__forceinline /*static*/ SIZE_T Utf8StringObject::GetSize(DWORD strLen)
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+
+    return GetBaseSize() + strLen;
+}
+#endif // FEATURE_UTF8STRING
 
 #ifdef DACCESS_COMPILE
 
@@ -109,8 +120,39 @@ inline void Object::EnumMemoryRegions(void)
     // the enumeration to the MethodTable.
 }
 
-#endif // #ifdef DACCESS_COMPILE
-    
+#else // !DACCESS_COMPILE
+
+FORCEINLINE bool Object::TryEnterObjMonitorSpinHelper()
+{
+    CONTRACTL{
+        NOTHROW;
+        GC_NOTRIGGER;
+        MODE_COOPERATIVE;
+    } CONTRACTL_END;
+
+    Thread *pCurThread = GetThread();
+    if (pCurThread->CatchAtSafePointOpportunistic())
+    {
+        return false;
+    }
+
+    AwareLock::EnterHelperResult result = EnterObjMonitorHelper(pCurThread);
+    if (result == AwareLock::EnterHelperResult_Entered)
+    {
+        return true;
+    }
+    if (result == AwareLock::EnterHelperResult_Contention)
+    {
+        result = EnterObjMonitorHelperSpin(pCurThread);
+        if (result == AwareLock::EnterHelperResult_Entered)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+#endif // DACCESS_COMPILE
 
 inline TypeHandle ArrayBase::GetTypeHandle() const
 { 
@@ -125,7 +167,6 @@ inline /* static */ TypeHandle ArrayBase::GetTypeHandle(MethodTable * pMT)
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END
@@ -145,8 +186,6 @@ inline /* static */ TypeHandle ArrayBase::GetTypeHandle(MethodTable * pMT)
     // if we have allocated an array object of type T then the ArrayTypeDesc
     // for T[] is available and restored
 
-    // @todo  This should be turned into a probe with a hard SO when we have one
-    CONTRACT_VIOLATION(SOToleranceViolation);
     // == FailIfNotLoadedOrNotRestored
     TypeHandle arrayType = ClassLoader::LoadArrayTypeThrowing(pMT->GetApproxArrayElementTypeHandle(), kind, rank, ClassLoader::DontLoadTypes);  
     CONSISTENCY_CHECK(!arrayType.IsNull()); 
@@ -174,6 +213,32 @@ inline DWORD ArrayBase::GetNumComponents() const
     return m_NumComponents; 
 }
 
+#ifndef DACCESS_COMPILE
+inline void ArrayBase::SetArrayMethodTable(MethodTable *pArrayMT)
+{
+    LIMITED_METHOD_CONTRACT;
+
+    SetMethodTable(pArrayMT
+                   DEBUG_ARG(TRUE));
+
+#ifdef _DEBUG
+    AssertArrayTypeDescLoaded();
+#endif // _DEBUG
+}
+
+inline void ArrayBase::SetArrayMethodTableForLargeObject(MethodTable *pArrayMT)
+{
+    LIMITED_METHOD_CONTRACT;
+
+    SetMethodTableForLargeObject(pArrayMT
+                                 DEBUG_ARG(TRUE));
+
+#ifdef _DEBUG
+    AssertArrayTypeDescLoaded();
+#endif // _DEBUG
+}
+#endif // !DACCESS_COMPILE
+
 inline /* static */ unsigned ArrayBase::GetDataPtrOffset(MethodTable* pMT)
 {
     LIMITED_METHOD_CONTRACT;
@@ -182,7 +247,7 @@ inline /* static */ unsigned ArrayBase::GetDataPtrOffset(MethodTable* pMT)
     _ASSERTE(pMT->IsArray());
 #endif // DACCESS_COMPILE
     // The -sizeof(ObjHeader) is because of the sync block, which is before "this"
-    return pMT->GetBaseSize() - sizeof(ObjHeader);
+    return pMT->GetBaseSize() - OBJHEADER_SIZE;
 }
 
 inline /* static */ unsigned ArrayBase::GetBoundsOffset(MethodTable* pMT) 
@@ -190,9 +255,9 @@ inline /* static */ unsigned ArrayBase::GetBoundsOffset(MethodTable* pMT)
     WRAPPER_NO_CONTRACT;
     _ASSERTE(pMT->IsArray());
     if (!pMT->IsMultiDimArray()) 
-        return(offsetof(ArrayBase, m_NumComponents));
+        return OBJECT_SIZE /* offset(ArrayBase, m_NumComponents */;
     _ASSERTE(pMT->GetInternalCorElementType() == ELEMENT_TYPE_ARRAY);
-    return sizeof(ArrayBase);
+    return ARRAYBASE_SIZE;
 }
 inline /* static */ unsigned ArrayBase::GetLowerBoundsOffset(MethodTable* pMT) 
 {
@@ -211,7 +276,6 @@ inline /* static */ unsigned ArrayBase::GetLowerBoundsOffset(MethodTable* pMT)
 // type is stored in the array or not
 inline TypeHandle ArrayBase::GetArrayElementTypeHandle() const 
 {
-    STATIC_CONTRACT_SO_TOLERANT;
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
@@ -265,7 +329,6 @@ inline TypeHandle Object::GetTypeHandle()
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END
@@ -284,7 +347,6 @@ inline TypeHandle Object::GetGCSafeTypeHandle() const
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -296,6 +358,42 @@ inline TypeHandle Object::GetGCSafeTypeHandle() const
         return ArrayBase::GetTypeHandle(pMT);
     else 
         return TypeHandle(pMT);
+}
+
+template<class F>
+inline void FindByRefPointerOffsetsInByRefLikeObject(PTR_MethodTable pMT, SIZE_T baseOffset, const F processPointerOffset)
+{
+    WRAPPER_NO_CONTRACT;
+    _ASSERTE(pMT != nullptr);
+    _ASSERTE(pMT->IsByRefLike());
+
+    // TODO: TypedReference should ideally be implemented as a by-ref-like struct containing a ByReference<T> field,
+    // in which case the check for g_TypedReferenceMT below would not be necessary
+    if (pMT == g_TypedReferenceMT || pMT->HasSameTypeDefAs(g_pByReferenceClass))
+    {
+        processPointerOffset(baseOffset);
+        return;
+    }
+
+    ApproxFieldDescIterator fieldIterator(pMT, ApproxFieldDescIterator::INSTANCE_FIELDS);
+    for (FieldDesc *pFD = fieldIterator.Next(); pFD != NULL; pFD = fieldIterator.Next())
+    {
+        if (pFD->GetFieldType() != ELEMENT_TYPE_VALUETYPE)
+        {
+            continue;
+        }
+
+        // TODO: GetApproxFieldTypeHandleThrowing may throw. This is a potential stress problem for fragile NGen of non-CoreLib
+        // assemblies. It won't ever throw for CoreCLR with R2R. Figure out if anything needs to be done to deal with the
+        // exception.
+        PTR_MethodTable pFieldMT = pFD->GetApproxFieldTypeHandleThrowing().AsMethodTable();
+        if (!pFieldMT->IsByRefLike())
+        {
+            continue;
+        }
+
+        FindByRefPointerOffsetsInByRefLikeObject(pFieldMT, baseOffset + pFD->GetOffset(), processPointerOffset);
+    }
 }
 
 #endif  // _OBJECT_INL_

@@ -28,8 +28,11 @@ public:
         m_argLocDescForStructInRegs(argLocDescForStructInRegs)
     {
         LIMITED_METHOD_CONTRACT;
-#if defined(UNIX_AMD64_ABI) && defined(FEATURE_UNIX_AMD64_STRUCT_PASSING)
+#if defined(UNIX_AMD64_ABI)
         _ASSERTE((argLocDescForStructInRegs != NULL) || (offset != TransitionBlock::StructInRegsOffset));
+#elif defined(_TARGET_ARM64_)
+        // This assert is not interesting on arm64. argLocDescForStructInRegs could be
+        // initialized if the args are being enregistered.
 #else        
         _ASSERTE(argLocDescForStructInRegs == NULL);
 #endif        
@@ -42,7 +45,46 @@ public:
         return dac_cast<PTR_VOID>(dac_cast<TADDR>(m_base) + m_offset);
     }
 
-#if defined(UNIX_AMD64_ABI) && defined(FEATURE_UNIX_AMD64_STRUCT_PASSING)
+#if defined(_TARGET_ARM64_)
+#ifndef DACCESS_COMPILE
+
+    // Returns true if the ArgDestination represents an HFA struct
+    bool IsHFA()
+    {
+        return m_argLocDescForStructInRegs != NULL;
+    }
+
+    // Copy struct argument into registers described by the current ArgDestination.
+    // Arguments:
+    //  src = source data of the structure 
+    //  fieldBytes - size of the structure
+    void CopyHFAStructToRegister(void *src, int fieldBytes)
+    {
+        // We are copying a float, double or vector HFA/HVA and need to
+        // enregister each field.
+
+        int floatRegCount = m_argLocDescForStructInRegs->m_cFloatReg;
+        int hfaFieldSize = m_argLocDescForStructInRegs->m_hfaFieldSize;
+        UINT64* dest = (UINT64*) this->GetDestinationAddress();
+
+        for (int i = 0; i < floatRegCount; ++i) 
+        {
+            // Copy 4 or 8 bytes from src.
+            UINT64 val = (hfaFieldSize == 4) ? *((UINT32*)src) : *((UINT64*)src);
+            // Always store 8 bytes
+            *(dest++) = val;
+            // Either zero the next 8 bytes or get the next 8 bytes from src for 16-byte vector.
+            *(dest++) = (hfaFieldSize == 16) ? *((UINT64*)src + 1) : 0;
+
+            // Increment src by the appropriate amount.
+            src = (void*)((char*)src + hfaFieldSize);
+        }
+    }
+
+#endif // !DACCESS_COMPILE
+#endif // defined(_TARGET_ARM64_)
+
+#if defined(UNIX_AMD64_ABI)
 
     // Returns true if the ArgDestination represents a struct passed in registers.
     bool IsStructPassedInRegs()
@@ -86,7 +128,7 @@ public:
         // This function is used rarely and so the overhead of reading the zeros from
         // the stack is negligible.
         long long zeros[CLR_SYSTEMV_MAX_EIGHTBYTES_COUNT_TO_PASS_IN_REGISTERS] = {};
-        _ASSERTE(sizeof(zeros) >= fieldBytes);
+        _ASSERTE(sizeof(zeros) >= (size_t)fieldBytes);
 
         CopyStructToRegisters(zeros, fieldBytes, 0);
     }
@@ -136,7 +178,7 @@ public:
                     _ASSERTE(eightByteSize == 4);
                     *(UINT32*)floatRegDest = *(UINT32*)src;
                 }
-                floatRegDest += 8;
+                floatRegDest += 16;
             }
             else
             {
@@ -176,8 +218,10 @@ public:
     {
         LIMITED_METHOD_CONTRACT;
 
+        // SPAN-TODO: GC reporting - https://github.com/dotnet/coreclr/issues/8517
+
        _ASSERTE(IsStructPassedInRegs());
-     
+
         TADDR genRegDest = dac_cast<TADDR>(GetStructGenRegDestinationAddress());
         INDEBUG(int remainingBytes = fieldBytes;)
 
@@ -199,7 +243,8 @@ public:
                     _ASSERTE(eightByteSize == 8);
                     _ASSERTE(IS_ALIGNED((SIZE_T)genRegDest, 8));
 
-                    (*fn)(dac_cast<PTR_PTR_Object>(genRegDest), sc, 0);
+                    uint32_t flags = eightByteClassification == SystemVClassificationTypeIntegerByRef ? GC_CALL_INTERIOR : 0;
+                    (*fn)(dac_cast<PTR_PTR_Object>(genRegDest), sc, flags);
                 }
 
                 genRegDest += eightByteSize;
@@ -211,7 +256,7 @@ public:
         _ASSERTE(remainingBytes == 0);
     }
 
-#endif // UNIX_AMD64_ABI && FEATURE_UNIX_AMD64_STRUCT_PASSING
+#endif // UNIX_AMD64_ABI
 
 };
 

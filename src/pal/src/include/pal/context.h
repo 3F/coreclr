@@ -39,6 +39,16 @@ typedef ucontext_t native_context_t;
 #else   // HAVE_UCONTEXT_T
 #error Native context type is not known on this platform!
 #endif  // HAVE_UCONTEXT_T
+
+#if defined(XSTATE_SUPPORTED) && !HAVE_PUBLIC_XSTATE_STRUCT
+namespace asm_sigcontext
+{
+#include <asm/sigcontext.h>
+};
+using asm_sigcontext::_fpx_sw_bytes;
+using asm_sigcontext::_xstate;
+#endif // defined(XSTATE_SUPPORTED) && !HAVE_PUBLIC_XSTATE_STRUCT
+
 #else // !HAVE_MACH_EXCEPTIONS
 #include <mach/kern_return.h>
 #include <mach/mach_port.h>
@@ -121,19 +131,93 @@ typedef ucontext_t native_context_t;
 #define MCREG_R14(mc)       ((mc).gregs[REG_R14])
 #define MCREG_R15(mc)       ((mc).gregs[REG_R15])
 
-#define FPREG_Xmm(uc, index) *(M128A*)&((uc)->uc_mcontext.fpregs->_xmm[index])
+#define FPREG_Fpstate(uc) ((uc)->uc_mcontext.fpregs)
+#define FPREG_Xmm(uc, index) *(M128A*)&(FPREG_Fpstate(uc)->_xmm[index])
 
-#define FPREG_St(uc, index) *(M128A*)&((uc)->uc_mcontext.fpregs->_st[index])
+#define FPREG_St(uc, index) *(M128A*)&(FPREG_Fpstate(uc)->_st[index])
 
-#define FPREG_ControlWord(uc) ((uc)->uc_mcontext.fpregs->cwd)
-#define FPREG_StatusWord(uc) ((uc)->uc_mcontext.fpregs->swd)
-#define FPREG_TagWord(uc) ((uc)->uc_mcontext.fpregs->ftw)
-#define FPREG_ErrorOffset(uc) *(DWORD*)&((uc)->uc_mcontext.fpregs->rip)
-#define FPREG_ErrorSelector(uc) *(((WORD*)&((uc)->uc_mcontext.fpregs->rip)) + 2)
-#define FPREG_DataOffset(uc) *(DWORD*)&((uc)->uc_mcontext.fpregs->rdp)
-#define FPREG_DataSelector(uc) *(((WORD*)&((uc)->uc_mcontext.fpregs->rdp)) + 2)
-#define FPREG_MxCsr(uc) ((uc)->uc_mcontext.fpregs->mxcsr)
-#define FPREG_MxCsr_Mask(uc) ((uc)->uc_mcontext.fpregs->mxcr_mask)
+#define FPREG_ControlWord(uc) (FPREG_Fpstate(uc)->cwd)
+#define FPREG_StatusWord(uc) (FPREG_Fpstate(uc)->swd)
+#define FPREG_TagWord(uc) (FPREG_Fpstate(uc)->ftw)
+#define FPREG_ErrorOffset(uc) *(DWORD*)&(FPREG_Fpstate(uc)->rip)
+#define FPREG_ErrorSelector(uc) *(((WORD*)&(FPREG_Fpstate(uc)->rip)) + 2)
+#define FPREG_DataOffset(uc) *(DWORD*)&(FPREG_Fpstate(uc)->rdp)
+#define FPREG_DataSelector(uc) *(((WORD*)&(FPREG_Fpstate(uc)->rdp)) + 2)
+#define FPREG_MxCsr(uc) (FPREG_Fpstate(uc)->mxcsr)
+#define FPREG_MxCsr_Mask(uc) (FPREG_Fpstate(uc)->mxcr_mask)
+
+/////////////////////
+// Extended state
+
+#ifdef XSTATE_SUPPORTED
+
+#if HAVE_FPSTATE_GLIBC_RESERVED1
+#define FPSTATE_RESERVED __glibc_reserved1
+#else
+#define FPSTATE_RESERVED padding
+#endif
+
+// The mask for YMM registers presence flag stored in the xstate_bv. On current Linuxes, this definition is
+// only in internal headers, so we define it here. The xstate_bv is extracted from the processor xstate bit
+// vector register, so the value is OS independent.
+#ifndef XSTATE_YMM
+#define XSTATE_YMM 4
+#endif
+
+inline _fpx_sw_bytes *FPREG_FpxSwBytes(const ucontext_t *uc)
+{
+    // Bytes 464..511 in the FXSAVE format are available for software to use for any purpose. In this case, they are used to
+    // indicate information about extended state.
+    _ASSERTE(reinterpret_cast<UINT8 *>(&FPREG_Fpstate(uc)->FPSTATE_RESERVED[12]) - reinterpret_cast<UINT8 *>(FPREG_Fpstate(uc)) == 464);
+
+    _ASSERTE(FPREG_Fpstate(uc) != nullptr);
+
+    return reinterpret_cast<_fpx_sw_bytes *>(&FPREG_Fpstate(uc)->FPSTATE_RESERVED[12]);
+}
+
+inline UINT32 FPREG_ExtendedSize(const ucontext_t *uc)
+{
+    _ASSERTE(FPREG_FpxSwBytes(uc)->magic1 == FP_XSTATE_MAGIC1);
+    return FPREG_FpxSwBytes(uc)->extended_size;
+}
+
+inline bool FPREG_HasYmmRegisters(const ucontext_t *uc)
+{
+    // See comments in /usr/include/x86_64-linux-gnu/asm/sigcontext.h for info on how to detect if extended state is present
+    static_assert_no_msg(FP_XSTATE_MAGIC2_SIZE == sizeof(UINT32));
+
+    if (FPREG_FpxSwBytes(uc)->magic1 != FP_XSTATE_MAGIC1)
+    {
+        return false;
+    }
+
+    UINT32 extendedSize = FPREG_ExtendedSize(uc);
+    if (extendedSize < sizeof(_xstate))
+    {
+        return false;
+    }
+
+    _ASSERTE(extendedSize >= FP_XSTATE_MAGIC2_SIZE);
+    if (*reinterpret_cast<UINT32 *>(reinterpret_cast<UINT8 *>(FPREG_Fpstate(uc)) + (extendedSize - FP_XSTATE_MAGIC2_SIZE))
+        != FP_XSTATE_MAGIC2)
+    {
+        return false;
+    }
+
+    return (FPREG_FpxSwBytes(uc)->xstate_bv & XSTATE_YMM) != 0;
+}
+
+inline void *FPREG_Xstate_Ymmh(const ucontext_t *uc)
+{
+    static_assert_no_msg(sizeof(reinterpret_cast<_xstate *>(FPREG_Fpstate(uc))->ymmh.ymmh_space) == 16 * 16);
+    _ASSERTE(FPREG_HasYmmRegisters(uc));
+
+    return reinterpret_cast<_xstate *>(FPREG_Fpstate(uc))->ymmh.ymmh_space;
+}
+
+#endif // XSTATE_SUPPORTED
+
+/////////////////////
 
 #else // BIT64
 
@@ -192,8 +276,45 @@ typedef ucontext_t native_context_t;
 
 #define MCREG_Sp(mc)      ((mc).sp)
 #define MCREG_Pc(mc)      ((mc).pc)
-#define MCREG_PState(mc)  ((mc).pstate)
-#define MCREG_Cpsr(mc)    ((mc).cpsr)
+#define MCREG_Cpsr(mc)    ((mc).pstate)
+
+
+inline
+fpsimd_context* GetNativeSigSimdContext(native_context_t *mc)
+{
+    size_t size = 0;
+
+    do
+    {
+        fpsimd_context* fp = reinterpret_cast<fpsimd_context *>(&mc->uc_mcontext.__reserved[size]);
+
+        if(fp->head.magic == FPSIMD_MAGIC)
+        {
+            _ASSERTE(fp->head.size >= sizeof(fpsimd_context));
+            _ASSERTE(size + fp->head.size <= sizeof(mc->uc_mcontext.__reserved));
+
+            return fp;
+        }
+
+        if (fp->head.size == 0)
+        {
+            break;
+        }
+
+        size += fp->head.size;
+    } while (size + sizeof(fpsimd_context) <= sizeof(mc->uc_mcontext.__reserved));
+
+    _ASSERTE(false);
+
+    return nullptr;
+}
+
+inline
+const fpsimd_context* GetConstNativeSigSimdContext(const native_context_t *mc)
+{
+    return GetNativeSigSimdContext(const_cast<native_context_t*>(mc));
+}
+
 #else
     // For FreeBSD, as found in x86/ucontext.h
 #define MCREG_Rbp(mc)	    ((mc).mc_rbp)
@@ -253,6 +374,59 @@ typedef ucontext_t native_context_t;
 #define MCREG_Lr(mc)        ((mc).arm_lr)
 #define MCREG_Pc(mc)        ((mc).arm_pc)
 #define MCREG_Cpsr(mc)      ((mc).arm_cpsr)
+
+
+// Flatterned layout of the arm kernel struct vfp_sigframe
+struct VfpSigFrame
+{
+    DWORD   magic;
+    DWORD   size;
+    DWORD64 D[32]; // Some arm cpus have 16 D registers.  The kernel will ignore the extra.
+    DWORD   Fpscr;
+    DWORD   Padding;
+    DWORD   Fpexc;
+    DWORD   Fpinst;
+    DWORD   Fpinst2;
+    DWORD   Padding2;
+};
+
+inline
+VfpSigFrame* GetNativeSigSimdContext(native_context_t *mc)
+{
+    size_t size = 0;
+
+    const DWORD VfpMagic = 0x56465001; // VFP_MAGIC from arm kernel
+
+    do
+    {
+        VfpSigFrame* fp = reinterpret_cast<VfpSigFrame *>(&mc->uc_regspace[size]);
+
+        if (fp->magic == VfpMagic)
+        {
+            _ASSERTE(fp->size == sizeof(VfpSigFrame));
+            _ASSERTE(size + fp->size <= sizeof(mc->uc_regspace));
+
+            return fp;
+        }
+
+        if (fp->size == 0)
+        {
+            break;
+        }
+
+        size += fp->size;
+    } while (size + sizeof(VfpSigFrame) <= sizeof(mc->uc_regspace));
+
+    // VFP is not required on all armv7 processors, this structure may not be present
+
+    return nullptr;
+}
+
+inline
+const VfpSigFrame* GetConstNativeSigSimdContext(const native_context_t *mc)
+{
+    return GetNativeSigSimdContext(const_cast<native_context_t*>(mc));
+}
 
 #elif defined(_X86_)
 
@@ -398,10 +572,12 @@ inline static DWORD64 CONTEXTGetPC(LPCONTEXT pContext)
 {
 #if defined(_AMD64_)
     return pContext->Rip;
+#elif defined(_X86_)
+    return pContext->Eip;
 #elif defined(_ARM64_) || defined(_ARM_)
     return pContext->Pc;
 #else
-#error don't know how to get the program counter for this architecture
+#error "don't know how to get the program counter for this architecture"
 #endif
 }
 
@@ -409,10 +585,27 @@ inline static void CONTEXTSetPC(LPCONTEXT pContext, DWORD64 pc)
 {
 #if defined(_AMD64_)
     pContext->Rip = pc;
+#elif defined(_X86_)
+    pContext->Eip = pc;
 #elif defined(_ARM64_) || defined(_ARM_)
     pContext->Pc = pc;
 #else
-#error don't know how to set the program counter for this architecture
+#error "don't know how to set the program counter for this architecture"
+#endif
+}
+
+inline static DWORD64 CONTEXTGetFP(LPCONTEXT pContext)
+{
+#if defined(_AMD64_)
+    return pContext->Rbp;
+#elif defined(_X86_)
+    return pContext->Ebp;
+#elif defined(_ARM_)
+    return pContext->R7;
+#elif defined(_ARM64_)
+    return pContext->Fp;
+#else
+#error "don't know how to get the frame pointer for this architecture"
 #endif
 }
 
@@ -429,6 +622,7 @@ Parameters :
 
 --*/
 void
+PALAPI
 CONTEXT_CaptureContext(
     LPCONTEXT lpContext
     );
@@ -561,6 +755,21 @@ Return value :
 
 --*/
 LPVOID GetNativeContextPC(const native_context_t *context);
+
+/*++
+Function :
+    GetNativeContextSP
+
+    Returns the stack pointer from the native context.
+
+Parameters :
+    const native_context_t *native : native context
+
+Return value :
+    The stack pointer from the native context.
+
+--*/
+LPVOID GetNativeContextSP(const native_context_t *context);
 
 /*++
 Function :

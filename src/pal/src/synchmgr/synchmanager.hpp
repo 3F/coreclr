@@ -172,7 +172,7 @@ namespace CorUnix
 
     public:
         CSynchData() 
-            : m_ulcWaitingThreads(0), m_shridThis(NULLSharedID), m_lRefCount(1),
+            : m_ulcWaitingThreads(0), m_shridThis(NULL), m_lRefCount(1),
               m_lSignalCount(0), m_lOwnershipCount(0), m_dwOwnerPid(0),
               m_dwOwnerTid(0), m_pOwnerThread(NULL), 
               m_poolnOwnedObjectListNode(NULL), m_fAbandoned(false)
@@ -206,8 +206,8 @@ namespace CorUnix
             CPalThread * pthrCurrent,
             CPalThread * pthrTarget);
 
-        void WaiterEnqueue(WaitingThreadsListNode * pwtlnNewNode);
-        void SharedWaiterEnqueue(SharedID shridNewNode);
+        void WaiterEnqueue(WaitingThreadsListNode * pwtlnNewNode, bool fPrioritize);
+        void SharedWaiterEnqueue(SharedID shridNewNode, bool fPrioritize);
 
         // Object Domain accessor methods
         ObjectDomain GetObjectDomain(void)
@@ -464,7 +464,8 @@ namespace CorUnix
         virtual PAL_ERROR RegisterWaitingThread(
             WaitType wtWaitType,
             DWORD dwIndex,
-            bool fAlertable);
+            bool fAlertable,
+            bool fPrioritize);
 
         virtual void ReleaseController(void);
 
@@ -1015,7 +1016,8 @@ namespace CorUnix
 
         static PAL_ERROR GetAbsoluteTimeout(
             DWORD dwTimeout,
-            struct timespec * ptsAbsTmo);
+            struct timespec * ptsAbsTmo,
+            BOOL fPreferMonotonicClock);
     };
 }
 

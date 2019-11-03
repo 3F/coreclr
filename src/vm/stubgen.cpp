@@ -631,15 +631,7 @@ ILStubLinker::LogILStubWorker(
     }
 }
 
-static inline void LogOneFlag(DWORD flags, DWORD flag, LPCSTR str, DWORD facility, DWORD level)
-{
-    if (flags & flag)
-    {
-        LOG((facility, level, str));
-    }
-}
-
-static void LogJitFlags(DWORD facility, DWORD level, DWORD dwJitFlags)
+static void LogJitFlags(DWORD facility, DWORD level, CORJIT_FLAGS jitFlags)
 {
     CONTRACTL
     {
@@ -647,29 +639,28 @@ static void LogJitFlags(DWORD facility, DWORD level, DWORD dwJitFlags)
     }
     CONTRACTL_END;
 
-    LOG((facility, level, "dwJitFlags: 0x%08x\n", dwJitFlags));
+    LOG((facility, level, "jitFlags:\n"));
 
-#define LOG_FLAG(name)    LogOneFlag(dwJitFlags, name, "   " #name "\n", facility, level);
+#define LOG_FLAG(name) \
+    if (jitFlags.IsSet(name)) \
+    { \
+        LOG((facility, level, "   " #name "\n")); \
+        jitFlags.Clear(name); \
+    }
 
     // these are all we care about at the moment
-    LOG_FLAG(CORJIT_FLG_IL_STUB);
-    LOG_FLAG(CORJIT_FLG_PUBLISH_SECRET_PARAM);
+    LOG_FLAG(CORJIT_FLAGS::CORJIT_FLAG_IL_STUB);
+    LOG_FLAG(CORJIT_FLAGS::CORJIT_FLAG_PUBLISH_SECRET_PARAM);
 
 #undef LOG_FLAGS
 
-    DWORD dwKnownMask = 
-        CORJIT_FLG_IL_STUB                      |
-        CORJIT_FLG_PUBLISH_SECRET_PARAM         |
-        NULL;
-
-    DWORD dwUnknownFlags = dwJitFlags & ~dwKnownMask;
-    if (0 != dwUnknownFlags)
+    if (!jitFlags.IsEmpty())
     {
-        LOG((facility, level, "UNKNOWN FLAGS: 0x%08x\n", dwUnknownFlags));
+        LOG((facility, level, "UNKNOWN FLAGS also set\n"));
     }
 }
 
-void ILStubLinker::LogILStub(DWORD dwJitFlags, SString *pDumpILStubCode)
+void ILStubLinker::LogILStub(CORJIT_FLAGS jitFlags, SString *pDumpILStubCode)
 {
     CONTRACTL
     {
@@ -683,7 +674,7 @@ void ILStubLinker::LogILStub(DWORD dwJitFlags, SString *pDumpILStubCode)
     INT             iCurStack = 0;
 
     if (pDumpILStubCode == NULL)
-        LogJitFlags(LF_STUBS, LL_INFO1000, dwJitFlags);
+        LogJitFlags(LF_STUBS, LL_INFO1000, jitFlags);
 
     while (pCurrentStream)
     {
@@ -841,7 +832,7 @@ size_t ILStubLinker::Link(UINT* puMaxStack)
 #ifdef _DEBUG
     if (fStackUnderflow)
     {
-        LogILStub(NULL);
+        LogILStub(CORJIT_FLAGS());
         CONSISTENCY_CHECK_MSG(false, "IL stack underflow! -- see logging output");
     }
 #endif // _DEBUG
@@ -986,7 +977,7 @@ bool ILCodeStream::IsSupportedInstruction(ILInstrEnum instr)
     LIMITED_METHOD_CONTRACT;
     
     CONSISTENCY_CHECK_MSG(instr != CEE_SWITCH, "CEE_SWITCH is not supported currently due to InlineSwitch in s_rgbOpcodeSizes");
-    CONSISTENCY_CHECK_MSG(((instr >= CEE_BR_S) && (instr <= CEE_BLT_UN_S)) || (CEE_LEAVE), "we only use long-form branch opcodes");
+    CONSISTENCY_CHECK_MSG(((instr >= CEE_BR_S) && (instr <= CEE_BLT_UN_S)) || instr == CEE_LEAVE, "we only use long-form branch opcodes");
     return true;
 }
 #endif // _DEBUG
@@ -1323,6 +1314,11 @@ void ILCodeStream::EmitLDC_R8(UINT64 uConst)
 #endif // _WIN64
     Emit(CEE_LDC_R8, 1, (UINT_PTR)uConst);
 }
+void ILCodeStream::EmitLDELEMA(int token)
+{
+    WRAPPER_NO_CONTRACT;
+    Emit(CEE_LDELEMA, -1, token);
+}
 void ILCodeStream::EmitLDELEM_REF()
 {
     WRAPPER_NO_CONTRACT;
@@ -1387,11 +1383,21 @@ void ILCodeStream::EmitLDIND_T(LocalDesc* pType)
 {
     CONTRACTL
     {
-        PRECONDITION(pType->cbType == 1);
+        PRECONDITION(pType->cbType >= 1);
     }
     CONTRACTL_END;
+
+    CorElementType elementType = ELEMENT_TYPE_END;
+
+    bool onlyFoundModifiers = true;
+    for(size_t i = 0; i < pType->cbType && onlyFoundModifiers; i++)
+    {
+        elementType = (CorElementType)pType->ElementType[i];
+        onlyFoundModifiers = (elementType == ELEMENT_TYPE_PINNED);
+    }
     
-    switch (pType->ElementType[0])
+
+    switch (elementType)
     {
         case ELEMENT_TYPE_I1:       EmitLDIND_I1(); break;
         case ELEMENT_TYPE_BOOLEAN:  // fall through
@@ -1405,7 +1411,8 @@ void ILCodeStream::EmitLDIND_T(LocalDesc* pType)
         case ELEMENT_TYPE_U8:       EmitLDIND_I8(); break;
         case ELEMENT_TYPE_R4:       EmitLDIND_R4(); break;
         case ELEMENT_TYPE_R8:       EmitLDIND_R8(); break;
-        case ELEMENT_TYPE_FNPTR: // same as ELEMENT_TYPE_I
+        case ELEMENT_TYPE_PTR:      // same as ELEMENT_TYPE_I
+        case ELEMENT_TYPE_FNPTR:    // same as ELEMENT_TYPE_I
         case ELEMENT_TYPE_I:        EmitLDIND_I();  break;
         case ELEMENT_TYPE_U:        EmitLDIND_I();  break;
         case ELEMENT_TYPE_STRING:   // fall through
@@ -1523,7 +1530,7 @@ void ILCodeStream::EmitPOP()
 void ILCodeStream::EmitRET()
 {
     WRAPPER_NO_CONTRACT;
-    INT16 iStackDelta = m_pOwner->m_StubHasVoidReturnType ? 0 : -1;
+    INT16 iStackDelta = m_pOwner->ReturnOpcodePopsStack() ? -1 : 0;
     Emit(CEE_RET, iStackDelta, 0);
 }
 void ILCodeStream::EmitSHR_UN()
@@ -1585,10 +1592,18 @@ void ILCodeStream::EmitSTIND_T(LocalDesc* pType)
 {
     CONTRACTL
     {
-        PRECONDITION(pType->cbType == 1);
+        PRECONDITION(pType->cbType >= 1);
     }
     CONTRACTL_END;
-    
+
+    CorElementType elementType = ELEMENT_TYPE_END;
+
+    bool onlyFoundModifiers = true;
+    for(size_t i = 0; i < pType->cbType && onlyFoundModifiers; i++)
+    {
+        elementType = (CorElementType)pType->ElementType[i];
+        onlyFoundModifiers = (elementType == ELEMENT_TYPE_PINNED);
+    }
     switch (pType->ElementType[0])
     {
         case ELEMENT_TYPE_I1:       EmitSTIND_I1(); break;
@@ -1603,7 +1618,8 @@ void ILCodeStream::EmitSTIND_T(LocalDesc* pType)
         case ELEMENT_TYPE_U8:       EmitSTIND_I8(); break;
         case ELEMENT_TYPE_R4:       EmitSTIND_R4(); break;
         case ELEMENT_TYPE_R8:       EmitSTIND_R8(); break;
-        case ELEMENT_TYPE_FNPTR: // same as ELEMENT_TYPE_I
+        case ELEMENT_TYPE_PTR:      // same as ELEMENT_TYPE_I
+        case ELEMENT_TYPE_FNPTR:    // same as ELEMENT_TYPE_I
         case ELEMENT_TYPE_I:        EmitSTIND_I();  break;
         case ELEMENT_TYPE_U:        EmitSTIND_I();  break;
         case ELEMENT_TYPE_STRING:   // fall through
@@ -1667,11 +1683,6 @@ void ILCodeStream::EmitCALL(BinderMethodID id, int numInArgs, int numRetArgs)
     STANDARD_VM_CONTRACT;
     EmitCALL(GetToken(MscorlibBinder::GetMethod(id)), numInArgs, numRetArgs);
 }
-
-
-
-
-
 
 void ILStubLinker::SetHasThis (bool fHasThis)
 {
@@ -2140,14 +2151,15 @@ static BOOL SigHasVoidReturnType(const Signature &signature)
 
 
 ILStubLinker::ILStubLinker(Module* pStubSigModule, const Signature &signature, SigTypeContext *pTypeContext, MethodDesc *pMD,
-                           BOOL fTargetHasThis, BOOL fStubHasThis, BOOL fIsNDirectStub) :
+                           BOOL fTargetHasThis, BOOL fStubHasThis, BOOL fIsNDirectStub, BOOL fIsReverseStub) :
     m_pCodeStreamList(NULL),
     m_stubSig(signature),
     m_pTypeContext(pTypeContext),
     m_pCode(NULL),
     m_pStubSigModule(pStubSigModule),
     m_pLabelList(NULL),
-    m_StubHasVoidReturnType(0),
+    m_StubHasVoidReturnType(FALSE),
+    m_fIsReverseStub(fIsReverseStub),
     m_iTargetStackDelta(0),
     m_cbCurrentCompressedSigLen(1),
     m_nLocals(0),
@@ -2165,7 +2177,9 @@ ILStubLinker::ILStubLinker(Module* pStubSigModule, const Signature &signature, S
     m_managedSigPtr = signature.CreateSigPointer();
     if (!signature.IsEmpty())
     {
+        // Until told otherwise, assume that the stub has the same return type as the signature.
         m_StubHasVoidReturnType = SigHasVoidReturnType(signature);
+        m_StubTargetHasVoidReturnType = m_StubHasVoidReturnType;
         
         //
         // Get the stub's calling convention.  Set m_fHasThis to match
@@ -2461,10 +2475,13 @@ void ILStubLinker::SetStubTargetReturnType(LocalDesc* pLoc)
 
     m_nativeFnSigBuilder.SetReturnType(pLoc);
 
-    if ((1 != pLoc->cbType) || (ELEMENT_TYPE_VOID != pLoc->ElementType[0]))
+    // Update check for if a stub has a void return type based on the provided return type.
+    m_StubTargetHasVoidReturnType = ((1 == pLoc->cbType) && (ELEMENT_TYPE_VOID == pLoc->ElementType[0])) ? TRUE : FALSE;
+    if (!m_StubTargetHasVoidReturnType)
     {
         m_iTargetStackDelta++;
     }
+
 }
 
 DWORD ILStubLinker::SetStubTargetArgType(CorElementType typ, bool fConsumeStubArg /*= true*/)

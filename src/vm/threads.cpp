@@ -11,40 +11,30 @@
 
 #include "common.h"
 
-#include "tls.h"
 #include "frames.h"
 #include "threads.h"
 #include "stackwalk.h"
 #include "excep.h"
 #include "comsynchronizable.h"
 #include "log.h"
-#include "gc.h"
+#include "gcheaputilities.h"
 #include "mscoree.h"
 #include "dbginterface.h"
 #include "corprof.h"                // profiling
 #include "eeprofinterfaces.h"
 #include "eeconfig.h"
-#include "perfcounters.h"
 #include "corhost.h"
 #include "win32threadpool.h"
 #include "jitinterface.h"
-#include "appdomainstack.inl"
 #include "eventtrace.h"
-#ifdef FEATURE_REMOTING
-#include "appdomainhelper.h"
-#endif
 #include "comutilnative.h"
 #include "finalizerthread.h"
 #include "threadsuspend.h"
 
-#ifdef FEATURE_FUSION
-#include "fusion.h"
-#endif
 #include "wrappers.h"
 
 #include "nativeoverlapped.h"
 
-#include "mdaassistants.h"
 #include "appdomain.inl"
 #include "vmholder.h"
 #include "exceptmacros.h"
@@ -60,28 +50,41 @@
 #include "olecontexthelpers.h"
 #endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
 
-#ifdef FEATURE_UEF_CHAINMANAGER
-// This is required to register our UEF callback with the UEF chain manager
-#include <mscoruefwrapper.h>
-#endif // FEATURE_UEF_CHAINMANAGER
+#ifdef FEATURE_PERFTRACING
+#include "eventpipebuffermanager.h"
+#endif // FEATURE_PERFTRACING
 
+uint64_t Thread::dead_threads_non_alloc_bytes = 0;
 
 SPTR_IMPL(ThreadStore, ThreadStore, s_pThreadStore);
 CONTEXT *ThreadStore::s_pOSContext = NULL;
 CLREvent *ThreadStore::s_pWaitForStackCrawlEvent;
 
+PTR_ThreadLocalModule ThreadLocalBlock::GetTLMIfExists(ModuleIndex index)
+{
+    WRAPPER_NO_CONTRACT;
+    SUPPORTS_DAC;
+
+    if (index.m_dwIndex >= m_TLMTableSize)
+        return NULL;
+
+    return m_pTLMTable[index.m_dwIndex].pTLM;
+}
+
+PTR_ThreadLocalModule ThreadLocalBlock::GetTLMIfExists(MethodTable* pMT)
+{
+    WRAPPER_NO_CONTRACT;
+    ModuleIndex index = pMT->GetModuleForStatics()->GetModuleIndex();
+    return GetTLMIfExists(index);
+}
+
 #ifndef DACCESS_COMPILE
-
-#include "constrainedexecutionregion.h"
-
 
 BOOL Thread::s_fCleanFinalizedThread = FALSE;
 
-#ifdef ENABLE_GET_THREAD_GENERIC_FULL_CHECK
-BOOL Thread::s_fEnforceEEThreadNotRequiredContracts = FALSE;
-#endif
-
-Volatile<LONG> Thread::s_threadPoolCompletionCountOverflow = 0;
+UINT64 Thread::s_workerThreadPoolCompletionCountOverflow = 0;
+UINT64 Thread::s_ioThreadPoolCompletionCountOverflow = 0;
+UINT64 Thread::s_monitorLockContentionCountOverflow = 0;
 
 CrstStatic g_DeadlockAwareCrst;
 
@@ -129,7 +132,6 @@ template<> void GCAssert<FALSE>::BeginGCAssert()
     STATIC_CONTRACT_MODE_PREEMPTIVE;
 }
 #endif
-
 
 // #define     NEW_TLS     1
 
@@ -296,40 +298,28 @@ bool Thread::DetectHandleILStubsForDebugger()
     return false;
 }
 
-
-#ifdef FEATURE_IMPLICIT_TLS
-
 extern "C" {
-#ifndef __llvm__
+#ifndef __GNUC__
 __declspec(thread)
-#else // !__llvm__
+#else // !__GNUC__
 __thread 
-#endif // !__llvm__
+#endif // !__GNUC__
 ThreadLocalInfo gCurrentThreadInfo = 
                                               {
                                                   NULL,    // m_pThread
                                                   NULL,    // m_pAppDomain
                                                   NULL,    // m_EETlsData
-#if defined(FEATURE_MERGE_JIT_AND_ENGINE)
-                                                  NULL,    // m_pCompiler
-#endif
                                               };
 } // extern "C"
+
 // index into TLS Array. Definition added by compiler
 EXTERN_C UINT32 _tls_index;
 
-#else // FEATURE_IMPLICIT_TLS
-extern "C" {
-GVAL_IMPL_INIT(DWORD, gThreadTLSIndex, TLS_OUT_OF_INDEXES);      // index ( (-1) == uninitialized )
-GVAL_IMPL_INIT(DWORD, gAppDomainTLSIndex, TLS_OUT_OF_INDEXES);   // index ( (-1) == uninitialized )
-}
-#endif // FEATURE_IMPLICIT_TLS
-
 #ifndef DACCESS_COMPILE
-#ifdef FEATURE_IMPLICIT_TLS
+
 BOOL SetThread(Thread* t)
 {
-	LIMITED_METHOD_CONTRACT
+    LIMITED_METHOD_CONTRACT
 
     gCurrentThreadInfo.m_pThread = t;
     return TRUE;
@@ -337,51 +327,11 @@ BOOL SetThread(Thread* t)
 
 BOOL SetAppDomain(AppDomain* ad)
 {
-	LIMITED_METHOD_CONTRACT
+    LIMITED_METHOD_CONTRACT
 
     gCurrentThreadInfo.m_pAppDomain = ad;
     return TRUE;
 }
-
-#if defined(FEATURE_MERGE_JIT_AND_ENGINE)
-extern "C"
-{
-
-void* GetJitTls()
-{
-    LIMITED_METHOD_CONTRACT
-
-    return gCurrentThreadInfo.m_pJitTls;
-}
-
-void SetJitTls(void* v)
-{
-    LIMITED_METHOD_CONTRACT
-    gCurrentThreadInfo.m_pJitTls = v;
-}
-
-}
-#endif // defined(FEATURE_MERGE_JIT_AND_ENGINE)
-
-#define ThreadInited()          (TRUE)
-
-#else // FEATURE_IMPLICIT_TLS
-BOOL SetThread(Thread* t)
-{
-    WRAPPER_NO_CONTRACT
-    return UnsafeTlsSetValue(GetThreadTLSIndex(), t);
-}
-
-BOOL SetAppDomain(AppDomain* ad)
-{
-    WRAPPER_NO_CONTRACT
-    return UnsafeTlsSetValue(GetAppDomainTLSIndex(), ad);
-}
-
-#define ThreadInited()          (gThreadTLSIndex != TLS_OUT_OF_INDEXES)
-
-#endif // FEATURE_IMPLICIT_TLS
-
 
 BOOL Thread::Alert ()
 {
@@ -392,18 +342,6 @@ BOOL Thread::Alert ()
     CONTRACTL_END;
 
     BOOL fRetVal = FALSE;
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HostComHolder<IHostTask> pHostTask(GetHostTaskWithAddRef());
-    if (pHostTask && !HasThreadStateNC(TSNC_OSAlertableWait)) {
-        HRESULT hr;
-
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pHostTask->Alert();
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        fRetVal = SUCCEEDED(hr);
-    }
-    else
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
     {
         HANDLE handle = GetThreadHandle();
         if (handle != INVALID_HANDLE_VALUE && handle != SWITCHOUT_HANDLE_VALUE)
@@ -413,64 +351,6 @@ BOOL Thread::Alert ()
     }
 
     return fRetVal;
-}
-
-struct HostJoinOnThreadArgs
-{
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTask *pHostTask;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-    WaitMode mode;
-};
-
-DWORD HostJoinOnThread (void *args, DWORD timeout, DWORD option)
-{
-    CONTRACTL {
-        THROWS;
-        if (GetThread()) {GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
-    }
-    CONTRACTL_END;
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HostJoinOnThreadArgs *joinArgs = (HostJoinOnThreadArgs*) args;
-    IHostTask *pHostTask = joinArgs->pHostTask;
-    if ((joinArgs->mode & WaitMode_InDeadlock) == 0)
-    {
-        option |= WAIT_NOTINDEADLOCK;
-    }
-
-    HRESULT hr;
-    BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-    hr = pHostTask->Join(timeout, option);
-    END_SO_TOLERANT_CODE_CALLING_HOST;
-    if (hr == S_OK) {
-        return WAIT_OBJECT_0;
-    }
-    else if (hr == HOST_E_TIMEOUT) {
-        return WAIT_TIMEOUT;
-    }
-    else if (hr == HOST_E_INTERRUPTED) {
-        _ASSERTE (option & WAIT_ALERTABLE);
-        Thread *pThread = GetThread();
-        if (pThread)
-        {
-            Thread::UserInterruptAPC(APC_Code);
-        }
-        return WAIT_IO_COMPLETION;
-    }
-    else if (hr == HOST_E_ABANDONED)
-    {
-        // The task died.
-        return WAIT_OBJECT_0;
-    }
-    else if (hr == HOST_E_DEADLOCK)
-    {
-        _ASSERTE ((option & WAIT_NOTINDEADLOCK) == 0);
-        RaiseDeadLockException();
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-    _ASSERTE (!"Unknown host join status\n");
-    return E_FAIL;
 }
 
 
@@ -492,19 +372,6 @@ DWORD Thread::JoinEx(DWORD timeout, WaitMode mode)
     Thread *pCurThread = GetThread();
     _ASSERTE(pCurThread || dbgOnly_IsSpecialEEThread());
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HostComHolder<IHostTask> pHostTask (GetHostTaskWithAddRef());
-    if (pHostTask != NULL) {
-        HostJoinOnThreadArgs args = {pHostTask, mode};
-        if (pCurThread) {
-            return GetThread()->DoAppropriateWait(HostJoinOnThread, &args, timeout, mode);
-        }
-        else {
-            return HostJoinOnThread (&args,timeout,alertable?WAIT_ALERTABLE:0);
-        }
-    }
-    else
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
     {
         // We're not hosted, so WaitMode_InDeadlock is irrelevant.  Clear it, so that this wait can be
         // forwarded to a SynchronizationContext if needed.
@@ -537,15 +404,6 @@ BOOL Thread::SetThreadPriority(
     CONTRACTL_END;
 
     BOOL fRet;
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HostComHolder<IHostTask> pHostTask (GetHostTaskWithAddRef());
-    if (pHostTask != NULL) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        fRet = (pHostTask->SetPriority(nPriority) == S_OK);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-    }
-    else
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
     {
         if (GetThreadHandle() == INVALID_HANDLE_VALUE) {
             // When the thread starts running, we will set the thread priority.
@@ -577,19 +435,6 @@ int Thread::GetThreadPriority()
     CONTRACTL_END;
 
     int nRetVal = -1;
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HostComHolder<IHostTask> pHostTask(GetHostTaskWithAddRef());
-    if (pHostTask != NULL) {
-        int nPriority;
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pHostTask->GetPriority(&nPriority);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-
-        nRetVal = (hr == S_OK)?nPriority:THREAD_PRIORITY_ERROR_RETURN;
-    }
-    else
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
     if (GetThreadHandle() == INVALID_HANDLE_VALUE) {
         nRetVal = FALSE;
     }
@@ -607,19 +452,10 @@ void Thread::ChooseThreadCPUGroupAffinity()
         GC_TRIGGERS;
     }
     CONTRACTL_END;
-
 #ifndef FEATURE_PAL
     if (!CPUGroupInfo::CanEnableGCCPUGroups() || !CPUGroupInfo::CanEnableThreadUseAllCpuGroups()) 
          return;
 
-#ifndef FEATURE_CORECLR
-    // We only handle the non-hosted case here. If CLR is hosted, the hosting 
-    // process controls the physical OS Threads. If CLR is not hosted, we can 
-    // set thread group affinity on OS threads directly.
-    HostComHolder<IHostTask> pHostTask (GetHostTaskWithAddRef());
-    if (pHostTask != NULL)
-        return;
-#endif //!FEATURE_CORECLR
 
     //Borrow the ThreadStore Lock here: Lock ThreadStore before distributing threads
     ThreadStoreLockHolder TSLockHolder(TRUE);
@@ -647,19 +483,10 @@ void Thread::ClearThreadCPUGroupAffinity()
         GC_NOTRIGGER;
     }
     CONTRACTL_END;
-
 #ifndef FEATURE_PAL
     if (!CPUGroupInfo::CanEnableGCCPUGroups() || !CPUGroupInfo::CanEnableThreadUseAllCpuGroups()) 
          return;
 
-#ifndef FEATURE_CORECLR
-    // We only handle the non-hosted case here. If CLR is hosted, the hosting 
-    // process controls the physical OS Threads. If CLR is not hosted, we can 
-    // set thread group affinity on OS threads directly.
-    HostComHolder<IHostTask> pHostTask (GetHostTaskWithAddRef());
-    if (pHostTask != NULL)
-        return;
-#endif //!FEATURE_CORECLR
 
     ThreadStoreLockHolder TSLockHolder(TRUE);
 
@@ -692,27 +519,11 @@ DWORD Thread::StartThread()
     _ASSERTE (m_Creater.IsCurrentThread());
     m_Creater.Clear();
 #endif
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HostComHolder<IHostTask> pHostTask(GetHostTaskWithAddRef());
-    if (pHostTask)
-    {
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pHostTask->Start();
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (hr == S_OK) {
-            dwRetVal = 1;
-        }
-        else
-            dwRetVal = (DWORD) -1;
-    }
-    else
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-    {
-        _ASSERTE (GetThreadHandle() != INVALID_HANDLE_VALUE &&
-                  GetThreadHandle() != SWITCHOUT_HANDLE_VALUE);
-        dwRetVal = ::ResumeThread(GetThreadHandle());
-    }
+
+    _ASSERTE (GetThreadHandle() != INVALID_HANDLE_VALUE &&
+                GetThreadHandle() != SWITCHOUT_HANDLE_VALUE);
+    dwRetVal = ::ResumeThread(GetThreadHandle());
+
 
     return dwRetVal;
 }
@@ -734,7 +545,6 @@ Thread* SetupThreadNoThrow(HRESULT *pHR)
 {
     CONTRACTL {
         NOTHROW;
-        SO_TOLERANT;
         if (GetThread()) {GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
     }
     CONTRACTL_END;
@@ -824,20 +634,12 @@ Thread* SetupThread(BOOL fInternal)
     CONTRACTL {
         THROWS;
         if (GetThread()) {GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
-    _ASSERTE(ThreadInited());
     Thread* pThread;
     if ((pThread = GetThread()) != NULL)
         return pThread;
-
-#ifdef FEATURE_STACK_PROBE
-    RetailStackProbe(ADJUST_PROBE(DEFAULT_ENTRY_PROBE_AMOUNT), NULL);
-#endif //FEATURE_STACK_PROBE
-
-    CONTRACT_VIOLATION(SOToleranceViolation);
 
     // For interop debugging, we must mark that we're in a can't-stop region
     // b.c we may take Crsts here that may block the helper thread.
@@ -845,38 +647,6 @@ Thread* SetupThread(BOOL fInternal)
     CantStopHolder hCantStop;
 
     EnsurePreemptiveModeIfException ensurePreemptive;
-
-#ifdef _DEBUG
-    // Verify that for fiber mode, we do not have a thread that matches the current StackBase.
-    if (CLRTaskHosted()) {
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-            IHostTaskManager *provider = CorHost2::GetHostTaskManager();
-
-            IHostTask *pHostTask = NULL;
-
-            // Starting with SQL11 GetCurrentTask() may actually create a task if one does not 
-            // exist yet. To avoid an unbalanced BeginThreadAffinity/EndThreadAffinity assert 
-            // we must not call it inside a scope protected by ThreadStoreLockHolder (which calls
-            // BeginThreadAffinity/EndThreadAffinity in its constructor/destructor). Post SQL11, 
-            // SQL may  create the task in BeginThreadAffinity() but until then we have to be 
-            // able to run on CHK bits w/o tripping the ASSERT.
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-            provider->GetCurrentTask(&pHostTask);
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-
-            if (pHostTask)
-            {
-                ThreadStoreLockHolder TSLockHolder;
-                SafeComHolder<IHostTask> pHostTaskHolder(pHostTask);
-                while ((pThread = ThreadStore::s_pThreadStore->GetAllThreadList(pThread, 0, 0)) != NULL)
-                {
-                    _ASSERTE ((pThread->m_State&Thread::TS_Unstarted) || pThread->GetHostTask() != pHostTask);
-                }
-            }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-        }
-#endif
 
 #ifdef _DEBUG
     CHECK chk;
@@ -895,32 +665,11 @@ Thread* SetupThread(BOOL fInternal)
     if (ThreadStore::s_pThreadStore->m_PendingThreadCount != 0)
     {
         DWORD  ourOSThreadId = ::GetCurrentThreadId();
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        IHostTask *curHostTask = NULL;
-        IHostTaskManager *hostTaskManager = CorHost2::GetHostTaskManager();
-        if (hostTaskManager) {
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-            hostTaskManager->GetCurrentTask(&curHostTask);
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-        }
-
-        SafeComHolder<IHostTask> pHostTaskHolder(curHostTask);
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
         {
             ThreadStoreLockHolder TSLockHolder;
             _ASSERTE(pThread == NULL);
             while ((pThread = ThreadStore::s_pThreadStore->GetAllThreadList(pThread, Thread::TS_Unstarted | Thread::TS_FailStarted, Thread::TS_Unstarted)) != NULL)
             {
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-                if (curHostTask)
-                {
-                    if (curHostTask == pThread->GetHostTask())
-                    {
-                        break;
-                    }
-                }
-                else 
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
                 if (pThread->GetOSThreadId() == ourOSThreadId)
                 {
                     break;
@@ -982,18 +731,6 @@ Thread* SetupThread(BOOL fInternal)
         !pThread->PrepareApartmentAndContext())
         ThrowOutOfMemory();
 
-#ifndef FEATURE_IMPLICIT_TLS
-    // make sure we will not fail when we store in TLS in the future.
-    if (!UnsafeTlsSetValue(gThreadTLSIndex, NULL))
-    {
-        ThrowOutOfMemory();
-    }
-    if (!UnsafeTlsSetValue(GetAppDomainTLSIndex(), NULL))
-    {
-        ThrowOutOfMemory();
-    }
-#endif
-
     // reset any unstarted bits on the thread object
     FastInterlockAnd((ULONG *) &pThread->m_State, ~Thread::TS_Unstarted);
     FastInterlockOr((ULONG *) &pThread->m_State, Thread::TS_LegalToJoin);
@@ -1005,6 +742,11 @@ Thread* SetupThread(BOOL fInternal)
     fOK = SetAppDomain(pThread->GetDomain());
     _ASSERTE (fOK);
 
+#ifdef FEATURE_INTEROP_DEBUGGING
+    // Ensure that debugger word slot is allocated
+    TlsSetValue(g_debuggerWordTLSIndex, 0);
+#endif
+
     // We now have a Thread object visable to the RS. unmark special status.
     hCantStop.Release();
 
@@ -1013,10 +755,6 @@ Thread* SetupThread(BOOL fInternal)
     threadHolder.SuppressRelease();
 
     FastInterlockOr((ULONG *) &pThread->m_State, Thread::TS_FullyInitialized);
-
-#ifdef _DEBUG
-    pThread->AddFiberInfo(Thread::ThreadTrackInfo_Lifetime);
-#endif
 
 #ifdef DEBUGGING_SUPPORTED
     //
@@ -1070,33 +808,12 @@ Thread* SetupThread(BOOL fInternal)
         FastInterlockOr((ULONG *) &pThread->m_State, Thread::TS_TPWorkerThread);
     }
 
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    if (g_fEnableARM)
-    {
-        pThread->QueryThreadProcessorUsage();
-    }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
-
 #ifdef FEATURE_EVENT_TRACE
     ETW::ThreadLog::FireThreadCreated(pThread);
 #endif // FEATURE_EVENT_TRACE
 
     return pThread;
 }
-
-//-------------------------------------------------------------------------
-void STDMETHODCALLTYPE CorMarkThreadInThreadPool()
-{
-    LIMITED_METHOD_CONTRACT;
-    BEGIN_ENTRYPOINT_VOIDRET;
-    END_ENTRYPOINT_VOIDRET;
-
-    // this is no longer needed after our switch to
-    // the Win32 threadpool.
-    // keeping in mscorwks for compat reasons and to keep rotor sscoree and
-    // mscoree consistent.
-}
-
 
 //-------------------------------------------------------------------------
 // Public function: SetupUnstartedThread()
@@ -1115,27 +832,15 @@ Thread* SetupUnstartedThread(BOOL bRequiresTSL)
     }
     CONTRACTL_END;
 
-    _ASSERTE(ThreadInited());
     Thread* pThread = new Thread();
 
-    if (pThread)
-    {
-        FastInterlockOr((ULONG *) &pThread->m_State,
-                        (Thread::TS_Unstarted | Thread::TS_WeOwn));
+    FastInterlockOr((ULONG *) &pThread->m_State,
+                    (Thread::TS_Unstarted | Thread::TS_WeOwn));
 
-        ThreadStore::AddThread(pThread, bRequiresTSL);
-    }
+    ThreadStore::AddThread(pThread, bRequiresTSL);
 
     return pThread;
 }
-
-FCIMPL0(INT32, GetRuntimeId_Wrapper)
-{
-    FCALL_CONTRACT;
-
-    return GetRuntimeId();
-}
-FCIMPLEND
 
 //-------------------------------------------------------------------------
 // Public function: DestroyThread()
@@ -1152,15 +857,6 @@ void DestroyThread(Thread *th)
     _ASSERTE (th == GetThread());
 
     _ASSERTE(g_fEEShutDown || th->m_dwLockCount == 0 || th->m_fRudeAborted);
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    if (g_fEnableARM)
-    {
-        AppDomain* pDomain = th->GetDomain();
-        pDomain->UpdateProcessorUsage(th->QueryThreadProcessorUsage());
-        FireEtwThreadTerminated((ULONGLONG)th, (ULONGLONG)pDomain, GetClrInstanceId());
-    }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
 
     th->FinishSOWork();
 
@@ -1187,13 +883,7 @@ void DestroyThread(Thread *th)
 #endif // _TARGET_X86_
 #endif // WIN64EXCEPTIONS
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    // If CLR is hosted, don't call OnThreadTerminate here. Instead the host will call
-    // ExitTask which calls DetachThread.
-    if (th->GetHostTask() == NULL) 
-#else // !FEATURE_INCLUDE_ALL_INTERFACES
     if (g_fEEShutDown == 0) 
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
     {
         th->SetThreadState(Thread::TS_ReportDead);
         th->OnThreadTerminate(FALSE);
@@ -1212,9 +902,6 @@ HRESULT Thread::DetachThread(BOOL fDLLThreadDetach)
     // !!! and then GetThread()=NULL, and dtor of contract does not work any more.
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
-
-    // @todo .  We need to probe here, but can't introduce destructors etc.
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
 
     // Clear any outstanding stale EH state that maybe still active on the thread.
 #ifdef WIN64EXCEPTIONS
@@ -1263,14 +950,6 @@ HRESULT Thread::DetachThread(BOOL fDLLThreadDetach)
 
     _ASSERTE (this == GetThread());
 
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    if (g_fEnableARM && m_pDomain)
-    {
-        m_pDomain->UpdateProcessorUsage(QueryThreadProcessorUsage());
-        FireEtwThreadTerminated((ULONGLONG)this, (ULONGLONG)m_pDomain, GetClrInstanceId());
-    }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
-
     FinishSOWork();
 
     FastInterlockIncrement(&Thread::m_DetachCount);
@@ -1286,9 +965,24 @@ HRESULT Thread::DetachThread(BOOL fDLLThreadDetach)
         ThreadStore::CheckForEEShutdown();
     }
 
-    END_CONTRACT_VIOLATION;
+    HANDLE hThread = GetThreadHandle();
+    SetThreadHandle (SWITCHOUT_HANDLE_VALUE);
+    while (m_dwThreadHandleBeingUsed > 0)
+    {
+        // Another thread is using the handle now.
+#undef Sleep
+        // We can not call __SwitchToThread since we can not go back to host.
+        ::Sleep(10);
+#define Sleep(a) Dont_Use_Sleep(a)
+    }
+    if (m_WeOwnThreadHandle && m_ThreadHandleForClose == INVALID_HANDLE_VALUE)
+    {
+        m_ThreadHandleForClose = hThread;
+    }
 
-    InternalSwitchOut();
+    // We need to make sure that TLS are touched last here.
+    SetThread(NULL);
+    SetAppDomain(NULL);
 
 #ifdef ENABLE_CONTRACTS_DATA
     m_pClrDebugState = NULL;
@@ -1309,48 +1003,17 @@ HRESULT Thread::DetachThread(BOOL fDLLThreadDetach)
     return S_OK;
 }
 
-#ifndef FEATURE_IMPLICIT_TLS
-//---------------------------------------------------------------------------
-// Returns the TLS index for the Thread. This is strictly for the use of
-// our ASM stub generators that generate inline code to access the Thread.
-// Normally, you should use GetThread().
-//---------------------------------------------------------------------------
-DWORD GetThreadTLSIndex()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return gThreadTLSIndex;
-}
-
-//---------------------------------------------------------------------------
-// Returns the TLS index for the AppDomain. This is strictly for the use of
-// our ASM stub generators that generate inline code to access the AppDomain.
-// Normally, you should use GetAppDomain().
-//---------------------------------------------------------------------------
-DWORD GetAppDomainTLSIndex()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return gAppDomainTLSIndex;
-}
-#endif
-
 DWORD GetRuntimeId()
 {
     LIMITED_METHOD_CONTRACT;
 
-#ifndef FEATURE_IMPLICIT_TLS
-    _ASSERTE(GetThreadTLSIndex() != TLS_OUT_OF_INDEXES);
-    return GetThreadTLSIndex() + 3;
-#else
     return _tls_index;
-#endif
 }
 
 //---------------------------------------------------------------------------
 // Creates new Thread for reverse p-invoke calls.  
 //---------------------------------------------------------------------------
-Thread* __stdcall CreateThreadBlockThrow()
+Thread* WINAPI CreateThreadBlockThrow()
 {
 
     WRAPPER_NO_CONTRACT;
@@ -1361,14 +1024,6 @@ Thread* __stdcall CreateThreadBlockThrow()
     CONTRACT_VIOLATION(ThrowsViolation); // WON'T FIX - This enables catastrophic failure exception in reverse P/Invoke - the only way we can communicate an error to legacy code.
     Thread* pThread = NULL;
     BEGIN_ENTRYPOINT_THROWS;
-
-    if (!CanRunManagedCode())
-    {
-        // CLR is shutting down - someone's DllMain detach event may be calling back into managed code.
-        // It is misleading to use our COM+ exception code, since this is not a managed exception.  
-        ULONG_PTR arg = E_PROCESS_SHUTDOWN_REENTRY;
-        RaiseException(EXCEPTION_EXX, 0, 1, &arg);
-    }
 
     HRESULT hr = S_OK;
     pThread = SetupThreadNoThrow(&hr);
@@ -1388,165 +1043,6 @@ Thread* __stdcall CreateThreadBlockThrow()
 DWORD_PTR Thread::OBJREF_HASH = OBJREF_TABSIZE;
 #endif
 
-#ifndef FEATURE_IMPLICIT_TLS
-
-#ifdef ENABLE_GET_THREAD_GENERIC_FULL_CHECK
-
-// ----------------------------------------------------------------------------
-// GetThreadGenericFullCheck
-// 
-// Description:
-//     The non-PAL, x86 / x64 assembly versions of GetThreadGeneric call into this C
-//     function to optionally do some verification before returning the EE Thread object
-//     for the current thread. Currently the primary enforcement this function does is
-//     around the EE_THREAD_(NOT)_REQUIRED contracts. For a definition of these
-//     contracts, how they're used, and how temporary "safe" scopes may be created
-//     using BEGIN_GETTHREAD_ALLOWED / END_GETTHREAD_ALLOWED, see the comments at the top
-//     of contract.h.
-//     
-//     The EE_THREAD_(NOT)_REQUIRED contracts are enforced as follows:
-//         * code:EEContract::DoChecks enforces the following:
-//             * On entry to an EE_THREAD_REQUIRED function, GetThread() != NULL
-//             * An EE_THREAD_REQUIRED function may not be called from an
-//                 EE_THREAD_NOT_REQUIRED function, unless there is an intervening
-//                 BEGIN/END_GETTHREAD_ALLOWED scope
-//         * This function (GetThreadGenericFullCheck) enforces that an
-//             EE_THREAD_NOT_REQUIRED function may not call GetThread(), unless there is
-//             an intervening BEGIN/END_GETTHREAD_ALLOWED scope. While this enforcement
-//             is straightforward below, the tricky part is getting
-//             GetThreadGenericFullCheck() to actually be called when GetThread() is
-//             called, given the optimizations around GetThread():
-//             * code:InitThreadManager ensures that non-PAL, debug, x86/x64 builds that
-//                 run with COMPlus_EnforceEEThreadNotRequiredContracts set are forced to
-//                 use GetThreadGeneric instead of the dynamically generated optimized
-//                 TLS getter.
-//             * The non-PAL, debug, x86/x64 GetThreadGeneric() (implemented in the
-//                 processor-specific assembly files) knows to call
-//                 GetThreadGenericFullCheck() to do the enforcement.
-//    
-Thread * GetThreadGenericFullCheck()
-{
-    // Can not have a dynamic contract here.  Contract depends on GetThreadGeneric.
-    // Contract here causes stack overflow.
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_GC_NOTRIGGER;
-
-    if (!ThreadInited())
-    {
-        // #GTInfiniteRecursion
-        // 
-        // Normally, we'd want to assert here, but that could lead to infinite recursion.
-        // Bringing up the assert dialog requires a string lookup, which requires getting
-        // the Thread's UI culture ID, which, or course, requires getting the Thread. So
-        // we'll just break instead.
-        DebugBreak();
-    }
-
-    if (g_fEEStarted && 
-
-        // Using ShouldEnforceEEThreadNotRequiredContracts() instead
-        // of directly checking CLRConfig::GetConfigValue, as the latter contains a dynamic
-        // contract and therefore calls GetThread(), which would cause infinite recursion.
-        Thread::ShouldEnforceEEThreadNotRequiredContracts() &&
-
-        // The following verifies that it's safe to call GetClrDebugState() below without
-        // risk of its callees invoking extra error checking or fiber code that could
-        // recursively call GetThread() and overflow the stack
-        (CExecutionEngine::GetTlsData() != NULL))
-    {
-        // It's safe to peek into the debug state, so let's do so, to see if
-        // our caller is really allowed to be calling GetThread(). This enforces
-        // the EE_THREAD_NOT_REQUIRED contract.
-        ClrDebugState * pDbg = GetClrDebugState(FALSE);      // FALSE=don't allocate
-        if ((pDbg != NULL) && (!pDbg->IsGetThreadAllowed()))
-        {
-            // We need to bracket the ASSERTE with BEGIN/END_GETTHREAD_ALLOWED to avoid
-            // infinite recursion (see
-            // code:GetThreadGenericFullCheck#GTInfiniteRecursion). The ASSERTE here will
-            // cause us to reenter this function to get the thread (again). However,
-            // BEGIN/END_GETTHREAD_ALLOWED at least stops the recursion right then and
-            // there, as it prevents us from reentering this block yet again (since
-            // BEGIN/END_GETTHREAD_ALLOWED causes pDbg->IsGetThreadAllowed() to be TRUE).
-            // All such reentries to this function will quickly return the thread without
-            // executing the code below, so the original ASSERTE can proceed.
-            BEGIN_GETTHREAD_ALLOWED;
-            _ASSERTE(!"GetThread() called in a EE_THREAD_NOT_REQUIRED scope.  If the GetThread() call site has a clear code path for a return of NULL, then consider using GetThreadNULLOk() or BEGIN/END_GETTHREAD_ALLOWED");
-            END_GETTHREAD_ALLOWED;
-        }
-    }
-
-    Thread * pThread = (Thread *) UnsafeTlsGetValue(gThreadTLSIndex);
-
-    // set bogus last error to help find places that fail to save it across GetThread calls
-    ::SetLastError(LAST_ERROR_TRASH_VALUE);
-
-    return pThread;
-}
-
-#endif // ENABLE_GET_THREAD_GENERIC_FULL_CHECK
-
-#if defined(_TARGET_X86_) || defined(_TARGET_AMD64_)
-//
-// Some platforms have this implemented in assembly
-//
-EXTERN_C Thread* STDCALL GetThreadGeneric(VOID);
-EXTERN_C AppDomain* STDCALL GetAppDomainGeneric(VOID);
-#else
-Thread* STDCALL GetThreadGeneric()
-{
-    // Can not have contract here.  Contract depends on GetThreadGeneric.
-    // Contract here causes stack overflow.
-    //CONTRACTL {
-    //    NOTHROW;
-    //    GC_NOTRIGGER;
-    //}
-    //CONTRACTL_END;
-
-    // see code:GetThreadGenericFullCheck#GTInfiniteRecursion
-    _ASSERTE(ThreadInited());
-
-    Thread* pThread = (Thread*)UnsafeTlsGetValue(gThreadTLSIndex);
-
-    TRASH_LASTERROR;
-
-    return pThread;
-}
-
-AppDomain* STDCALL GetAppDomainGeneric()
-{
-    // No contract.  This function is called during ExitTask.
-    //CONTRACTL {
-    //    NOTHROW;
-    //    GC_NOTRIGGER;
-    //}
-    //CONTRACTL_END;
-
-    _ASSERTE(ThreadInited());
-
-    AppDomain* pAppDomain = (AppDomain*)UnsafeTlsGetValue(GetAppDomainTLSIndex());
-
-    TRASH_LASTERROR;
-
-    return pAppDomain;
-}
-#endif // defined(_TARGET_X86_) || defined(_TARGET_AMD64_)
-
-//
-// FLS getter to avoid unnecessary indirection via execution engine. It will be used if we get high TLS slot
-// from the OS where we cannot use the fast optimized assembly helpers. (It happens pretty often in hosted scenarios).
-//
-LPVOID* ClrFlsGetBlockDirect()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return (LPVOID*)UnsafeTlsGetValue(CExecutionEngine::GetTlsIndex());
-}
-
-extern "C" void * ClrFlsGetBlock();
-
-#endif // FEATURE_IMPLICIT_TLS
-
-
 extern "C" void STDCALL JIT_PatchedCodeStart();
 extern "C" void STDCALL JIT_PatchedCodeLast();
 
@@ -1562,9 +1058,11 @@ void InitThreadManager()
     }
     CONTRACTL_END;
 
+    InitializeYieldProcessorNormalizedCrst();
+
     // All patched helpers should fit into one page.
     // If you hit this assert on retail build, there is most likely problem with BBT script.
-    _ASSERTE_ALL_BUILDS("clr/src/VM/threads.cpp", (BYTE*)JIT_PatchedCodeLast - (BYTE*)JIT_PatchedCodeStart < PAGE_SIZE);
+    _ASSERTE_ALL_BUILDS("clr/src/VM/threads.cpp", (BYTE*)JIT_PatchedCodeLast - (BYTE*)JIT_PatchedCodeStart < (ptrdiff_t)GetOsPageSize());
 
     // I am using virtual protect to cover the entire range that this code falls in.
     // 
@@ -1581,99 +1079,30 @@ void InitThreadManager()
     }
 
 #ifndef FEATURE_PAL
-
-#ifdef FEATURE_IMPLICIT_TLS
     _ASSERTE(GetThread() == NULL);
 
-    // Mscordbi calculates the address of currentThread pointer using OFFSETOF__TLS__tls_CurrentThread. Ensure that
-    // value is correct.
+    PTEB Teb = NtCurrentTeb();
+    BYTE** tlsArray = (BYTE**)Teb->ThreadLocalStoragePointer;
+    BYTE* tlsData = (BYTE*)tlsArray[_tls_index];
 
-    PTEB Teb;
-    BYTE* tlsData;
-    BYTE** tlsArray;
+    size_t offsetOfCurrentThreadInfo = (BYTE*)&gCurrentThreadInfo - tlsData;
 
-    Teb = NtCurrentTeb();
-    tlsArray = (BYTE**)Teb->ThreadLocalStoragePointer;
-    tlsData = (BYTE*)tlsArray[_tls_index];
+    _ASSERTE(offsetOfCurrentThreadInfo < 0x8000);
+    _ASSERTE(_tls_index < 0x10000);
 
-    Thread **ppThread = (Thread**) (tlsData + OFFSETOF__TLS__tls_CurrentThread);
-    _ASSERTE_ALL_BUILDS("clr/src/VM/Threads.cpp",
-                        (&(gCurrentThreadInfo.m_pThread) == ppThread) &&
-                        "Offset of m_pThread as specified by OFFSETOF__TLS__tls_CurrentThread is not correct. "
-                        "This can change due to addition/removal of declspec(Thread) thread local variables.");
+    // Save gCurrentThreadInfo location for debugger
+    g_TlsIndex = (DWORD)(_tls_index + (offsetOfCurrentThreadInfo << 16) + 0x80000000);
 
-   _ASSERTE_ALL_BUILDS("clr/src/VM/Threads.cpp",
-                       ((BYTE*)&(gCurrentThreadInfo.m_EETlsData) == tlsData + OFFSETOF__TLS__tls_EETlsData) &&
-                       "Offset of m_EETlsData as specified by OFFSETOF__TLS__tls_EETlsData is not correct. "
-                       "This can change due to addition/removal of declspec(Thread) thread local variables.");
-#else
-    _ASSERTE(gThreadTLSIndex == TLS_OUT_OF_INDEXES);
-#endif
     _ASSERTE(g_TrapReturningThreads == 0);
 #endif // !FEATURE_PAL
 
-    // Consult run-time switches that choose whether to use generic or optimized
-    // versions of GetThread and GetAppDomain
-
-    BOOL fUseGenericTlsGetters = FALSE;
-
-#ifdef ENABLE_GET_THREAD_GENERIC_FULL_CHECK
-    // Debug builds allow user to throw a switch to force use of the generic GetThread
-    // for the sole purpose of enforcing EE_THREAD_NOT_REQUIRED contracts
-    if (CLRConfig::GetConfigValue(CLRConfig::INTERNAL_EnforceEEThreadNotRequiredContracts) != 0)
-    {
-        // Set this static on Thread so this value can be safely read later on by
-        // code:GetThreadGenericFullCheck
-        Thread::s_fEnforceEEThreadNotRequiredContracts = TRUE;
-
-        fUseGenericTlsGetters = TRUE;
-    }
+#ifdef FEATURE_INTEROP_DEBUGGING
+    g_debuggerWordTLSIndex = TlsAlloc();
+    if (g_debuggerWordTLSIndex == TLS_OUT_OF_INDEXES)
+        COMPlusThrowWin32();
 #endif
 
-#ifndef FEATURE_IMPLICIT_TLS
-    // Now, we setup GetThread and GetAppDomain to point to their optimized or generic versions. Irrespective
-    // of the version they call into, we write opcode sequence into the dummy GetThread/GetAppDomain
-    // implementations (living in jithelp.s/.asm) via the MakeOptimizedTlsGetter calls below.
-    //
-    // For this to work, we must ensure that the dummy versions lie between the JIT_PatchedCodeStart
-    // and JIT_PatchedCodeLast code range (which lies in the .text section) so that when we change the protection
-    // above, we do so for GetThread and GetAppDomain as well.
-     
-    //---------------------------------------------------------------------------
-    // INITIALIZE GetThread
-    //---------------------------------------------------------------------------
-
-    // No backout necessary - part of the one time global initialization
-    gThreadTLSIndex = UnsafeTlsAlloc();
-    if (gThreadTLSIndex == TLS_OUT_OF_INDEXES)
-        COMPlusThrowWin32();
-
-    MakeOptimizedTlsGetter(gThreadTLSIndex, (PVOID)GetThread, TLS_GETTER_MAX_SIZE, (POPTIMIZEDTLSGETTER)GetThreadGeneric, fUseGenericTlsGetters);
-
-    //---------------------------------------------------------------------------
-    // INITIALIZE GetAppDomain
-    //---------------------------------------------------------------------------
-
-    // No backout necessary - part of the one time global initialization
-    gAppDomainTLSIndex = UnsafeTlsAlloc();
-    if (gAppDomainTLSIndex == TLS_OUT_OF_INDEXES)
-        COMPlusThrowWin32();
-
-    MakeOptimizedTlsGetter(gAppDomainTLSIndex, (PVOID)GetAppDomain, TLS_GETTER_MAX_SIZE, (POPTIMIZEDTLSGETTER)GetAppDomainGeneric, fUseGenericTlsGetters);
-
-    //---------------------------------------------------------------------------
-    // Switch general purpose TLS getter to more efficient one if possible
-    //---------------------------------------------------------------------------
-
-    // Make sure that the TLS index is allocated
-    CExecutionEngine::CheckThreadState(0, FALSE);
-
-    DWORD masterSlotIndex = CExecutionEngine::GetTlsIndex();
-    CLRFLSGETBLOCK pGetter = (CLRFLSGETBLOCK)MakeOptimizedTlsGetter(masterSlotIndex, (PVOID)ClrFlsGetBlock, TLS_GETTER_MAX_SIZE);
-    __ClrFlsGetBlock = pGetter ? pGetter : ClrFlsGetBlockDirect;
-#else
     __ClrFlsGetBlock = CExecutionEngine::GetTlsData;
-#endif // FEATURE_IMPLICIT_TLS
 
     IfFailThrow(Thread::CLRSetThreadStackGuarantee(Thread::STSGuarantee_Force));
 
@@ -1774,11 +1203,11 @@ void Dbg_TrackSyncStack::EnterSync(UINT_PTR caller, void *pAwareLock)
 {
     LIMITED_METHOD_CONTRACT;
 
-    STRESS_LOG4(LF_SYNC, LL_INFO100, "Dbg_TrackSyncStack::EnterSync, IP=%p, Recursion=%d, MonitorHeld=%d, HoldingThread=%p.\n",
+    STRESS_LOG4(LF_SYNC, LL_INFO100, "Dbg_TrackSyncStack::EnterSync, IP=%p, Recursion=%u, LockState=%x, HoldingThread=%p.\n",
                     caller,
-                    ((AwareLock*)pAwareLock)->m_Recursion,
-                    ((AwareLock*)pAwareLock)->m_MonitorHeld,
-                    ((AwareLock*)pAwareLock)->m_HoldingThread );
+                    ((AwareLock*)pAwareLock)->GetRecursionLevel(),
+                    ((AwareLock*)pAwareLock)->GetLockState(),
+                    ((AwareLock*)pAwareLock)->GetHoldingThread());
 
     if (m_Active)
     {
@@ -1800,11 +1229,11 @@ void Dbg_TrackSyncStack::LeaveSync(UINT_PTR caller, void *pAwareLock)
 {
     WRAPPER_NO_CONTRACT;
 
-    STRESS_LOG4(LF_SYNC, LL_INFO100, "Dbg_TrackSyncStack::LeaveSync, IP=%p, Recursion=%d, MonitorHeld=%d, HoldingThread=%p.\n",
+    STRESS_LOG4(LF_SYNC, LL_INFO100, "Dbg_TrackSyncStack::LeaveSync, IP=%p, Recursion=%u, LockState=%x, HoldingThread=%p.\n",
                     caller,
-                    ((AwareLock*)pAwareLock)->m_Recursion,
-                    ((AwareLock*)pAwareLock)->m_MonitorHeld,
-                    ((AwareLock*)pAwareLock)->m_HoldingThread );
+                    ((AwareLock*)pAwareLock)->GetRecursionLevel(),
+                    ((AwareLock*)pAwareLock)->GetLockState(),
+                    ((AwareLock*)pAwareLock)->GetHoldingThread());
 
     if (m_Active)
     {
@@ -1838,57 +1267,6 @@ void Dbg_TrackSyncStack::LeaveSync(UINT_PTR caller, void *pAwareLock)
 
 static  DWORD dwHashCodeSeed = 123456789;
 
-#ifdef _DEBUG
-void CheckADValidity(AppDomain* pDomain, DWORD ADValidityKind)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        FORBID_FAULT;
-        GC_NOTRIGGER;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    //
-    // Note: this apparently checks if any one of the supplied conditions is satisified, rather
-    // than checking that *all* of them are satisfied.  One would have expected it to assert all of the
-    // conditions but it does not.
-    //
-
-    CONTRACT_VIOLATION(FaultViolation);
-    if  (::GetAppDomain()==pDomain)
-        return;
-    if ((ADValidityKind &  ADV_DEFAULTAD) &&
-        pDomain->IsDefaultDomain())
-       return;
-    if ((ADValidityKind &  ADV_ITERATOR) &&
-        pDomain->IsHeldByIterator())
-       return;
-    if ((ADValidityKind &  ADV_CREATING) &&
-        pDomain->IsBeingCreated())
-       return;
-    if ((ADValidityKind &  ADV_COMPILATION) &&
-        pDomain->IsCompilationDomain())
-       return;
-    if ((ADValidityKind &  ADV_FINALIZER) &&
-        IsFinalizerThread())
-       return;
-    if ((ADValidityKind &  ADV_ADUTHREAD) &&
-        IsADUnloadHelperThread())
-       return;
-    if ((ADValidityKind &  ADV_RUNNINGIN) &&
-        pDomain->IsRunningIn(GetThread()))
-       return;
-    if ((ADValidityKind &  ADV_REFTAKER) &&
-        pDomain->IsHeldByRefTaker())
-       return;
-
-    _ASSERTE(!"Appdomain* can be invalid");
-}
-#endif
-
-
 //--------------------------------------------------------------------
 // Thread construction
 //--------------------------------------------------------------------
@@ -1901,7 +1279,6 @@ Thread::Thread()
     CONTRACTL_END;
 
     m_pFrame                = FRAME_TOP;
-    m_pUnloadBoundaryFrame  = NULL;
 
     m_fPreemptiveGCDisabled = 0;
 
@@ -1915,18 +1292,8 @@ Thread::Thread()
     m_ulEnablePreemptiveGCCount  = 0;
 #endif
 
-    // Initialize data members related to thread statics
-    m_pTLBTable = NULL;
-    m_TLBTableSize = 0;
-    m_pThreadLocalBlock = NULL;
-
     m_dwLockCount = 0;
     m_dwBeginLockCount = 0;
-#ifndef FEATURE_CORECLR
-    m_dwBeginCriticalRegionCount = 0;
-    m_dwCriticalRegionCount = 0;
-    m_dwThreadAffinityCount = 0;
-#endif // !FEATURE_CORECLR
 
 #ifdef _DEBUG
     dbg_m_cSuspendedThreads = 0;
@@ -1988,27 +1355,21 @@ Thread::Thread()
 
     m_LastThrownObjectHandle = NULL;
     m_ltoIsUnhandled = FALSE;
-    #if HAS_TRACK_CXX_EXCEPTION_CODE_HACK // Is C++ exception code tracking turned on?vs 
-        m_LastCxxSEHExceptionCode = 0;
-    #endif // HAS_TRACK_CXX_EXCEPTION_CODE_HACK
-
-
-    m_AbortReason = NULL;
 
     m_debuggerFilterContext = NULL;
     m_debuggerCantStop = 0;
-    m_debuggerWord = NULL;
     m_fInteropDebuggingHijacked = FALSE;
     m_profilerCallbackState = 0;
-#ifdef FEATURE_PROFAPI_ATTACH_DETACH
+#if defined(PROFILING_SUPPORTED) || defined(PROFILING_SUPPORTED_DATA)
     m_dwProfilerEvacuationCounter = 0;
-#endif // FEATURE_PROFAPI_ATTACH_DETACH
+#endif // defined(PROFILING_SUPPORTED) || defined(PROFILING_SUPPORTED_DATA)
 
     m_pProfilerFilterContext = NULL;
 
     m_CacheStackBase = 0;
     m_CacheStackLimit = 0;
     m_CacheStackSufficientExecutionLimit = 0;
+    m_CacheStackStackAllocNonRiskyExecutionLimit = 0;
 
     m_LastAllowableStackAddress= 0;
     m_ProbeLimit = 0;
@@ -2025,8 +1386,10 @@ Thread::Thread()
     m_ppvHJRetAddrPtr = (VOID**) 0xCCCCCCCCCCCCCCCC;
     m_pvHJRetAddr = (VOID*) 0xCCCCCCCCCCCCCCCC;
 
+#ifndef PLATFORM_UNIX
     X86_ONLY(m_LastRedirectIP = 0);
     X86_ONLY(m_SpinCount = 0);
+#endif // PLATFORM_UNIX
 #endif // FEATURE_HIJACK
 
 #if defined(_DEBUG) && defined(TRACK_SYNC)
@@ -2042,7 +1405,7 @@ Thread::Thread()
 #ifdef FEATURE_COMINTEROP
     m_fDisableComObjectEagerCleanup = false;
 #endif //FEATURE_COMINTEROP
-    m_Context = NULL;
+    m_fHasDeadThreadBeenConsideredForGCTrigger = false;
     m_TraceCallCount = 0;
     m_ThrewControlForThread = 0;
     m_OSContext = NULL;
@@ -2054,22 +1417,12 @@ Thread::Thread()
     _ASSERTE((((size_t) &m_State) & 3) == 0);
     _ASSERTE((((size_t) &m_ThreadTasks) & 3) == 0);
 
-    // Track perf counter for the logical thread object.
-    COUNTER_ONLY(GetPerfCounters().m_LocksAndThreads.cCurrentThreadsLogical++);
-
     // On all callbacks, call the trap code, which we now have
     // wired to cause a GC.  Thus we will do a GC on all Transition Frame Transitions (and more).
    if (GCStress<cfg_transition>::IsEnabled())
    {
         m_State = (ThreadState) (m_State | TS_GCOnTransitions);
    }
-
-    //m_pSharedStaticData = NULL;
-    //m_pUnsharedStaticData = NULL;
-    //m_pStaticDataHash = NULL;
-    //m_pSDHCrst = NULL;
-
-    m_fSecurityStackwalk = FALSE;
 
     m_AbortType = EEPolicy::TA_None;
     m_AbortInfo = 0;
@@ -2086,52 +1439,16 @@ Thread::Thread()
     m_dwAbortPoint = 0;
 #endif
 
-#ifdef STRESS_THREAD
-    m_stressThreadCount = -1;
-#endif
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    m_pHostTask = NULL;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-    m_pFiberData = NULL;
-
-    m_TaskId = INVALID_TASK_ID;
-    m_dwConnectionId = INVALID_CONNECTION_ID;
-
-#ifdef _DEBUG
-    DWORD_PTR *ttInfo = NULL;
-    size_t nBytes = MaxThreadRecord *
-                  (sizeof(FiberSwitchInfo)-sizeof(size_t)+MaxStackDepth*sizeof(size_t));
-    if (CLRTaskHosted() || g_pConfig->SaveThreadInfo()) {
-        ttInfo = new DWORD_PTR[(nBytes/sizeof(DWORD_PTR))*ThreadTrackInfo_Max];
-        memset(ttInfo,0,nBytes*ThreadTrackInfo_Max);
-    }
-    for (DWORD i = 0; i < ThreadTrackInfo_Max; i ++)
-    {
-        m_FiberInfoIndex[i] = 0;
-        m_pFiberInfo[i] = (FiberSwitchInfo*)((DWORD_PTR)ttInfo + i*nBytes);
-    }
-    NewArrayHolder<DWORD_PTR> fiberInfoHolder(ttInfo);
-#endif
-
     m_OSContext = new CONTEXT();
     NewHolder<CONTEXT> contextHolder(m_OSContext);
 
-    if (CLRTaskHosted())
-    {
-        m_pSavedRedirectContext = new CONTEXT();
-    }
-    else
-    {
-        m_pSavedRedirectContext = NULL;
-    }
+    m_pSavedRedirectContext = NULL;
     NewHolder<CONTEXT> savedRedirectContextHolder(m_pSavedRedirectContext);
 
 #ifdef FEATURE_COMINTEROP
     m_pRCWStack = new RCWStackHeader();
 #endif
 
-    m_pCerPreparationState = NULL;
 #ifdef _DEBUG
     m_bGCStressing = FALSE;
     m_bUniqueStacking = FALSE;
@@ -2139,9 +1456,7 @@ Thread::Thread()
 
     m_pPendingTypeLoad = NULL;
 
-#ifdef FEATURE_PREJIT
     m_pIBCInfo = NULL;
-#endif
 
     m_dwAVInRuntimeImplOkayCount = 0;
 
@@ -2160,14 +1475,13 @@ Thread::Thread()
 #ifdef HAVE_GCCOVER
     m_pbDestCode = NULL;
     m_pbSrcCode = NULL;
-#ifdef _TARGET_X86_
+#if defined(GCCOVER_TOLERATE_SPURIOUS_AV)
     m_pLastAVAddress = NULL;
-#endif // _TARGET_X86_
+#endif // defined(GCCOVER_TOLERATE_SPURIOUS_AV)
 #endif // HAVE_GCCOVER
 
     m_fCompletionPortDrained = FALSE;
 
-    m_WorkingOnThreadContext = NULL;
     m_debuggerActivePatchSkipper = NULL;
     m_dwThreadHandleBeingUsed = 0;
     SetProfilerCallbacksAllowed(TRUE);
@@ -2182,20 +1496,12 @@ Thread::Thread()
     m_sfEstablisherOfActualHandlerFrame.Clear();
 #endif // WIN64EXCEPTIONS
 
-    m_threadPoolCompletionCount = 0;
+    m_workerThreadPoolCompletionCount = 0;
+    m_ioThreadPoolCompletionCount = 0;
+    m_monitorLockContentionCount = 0;
 
     Thread *pThread = GetThread();
-    _ASSERTE(SystemDomain::System()->DefaultDomain()->GetDefaultContext());
     InitContext();
-    _ASSERTE(m_Context);
-    if (pThread)
-    {
-        _ASSERTE(pThread->GetDomain() && pThread->GetDomain()->GetDefaultContext());
-        // Start off the new thread in the default context of
-        // the creating thread's appDomain. This could be changed by SetDelegate
-        SetKickOffDomainId(pThread->GetDomain()->GetId());
-    } else
-        SetKickOffDomainId((ADID)DefaultADID);
 
     // Do not expose thread until it is fully constructed
     g_pThinLockThreadIdDispenser->NewId(this, this->m_ThreadId);
@@ -2212,20 +1518,8 @@ Thread::Thread()
 #if defined(_DEBUG) && defined(TRACK_SYNC)
     trackSyncHolder.SuppressRelease();
 #endif
-#ifdef _DEBUG
-    fiberInfoHolder.SuppressRelease();
-#endif
     contextHolder.SuppressRelease();
     savedRedirectContextHolder.SuppressRelease();
-
-#ifndef FEATURE_LEAK_CULTURE_INFO
-    managedThreadCurrentCulture = NULL;
-    managedThreadCurrentUICulture = NULL;
-#endif // FEATURE_LEAK_CULTURE_INFO
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    m_ullProcessorUsageBaseline = 0;
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
 
 #ifdef FEATURE_COMINTEROP
     m_uliInitializeSpyCookie.QuadPart = 0ul;
@@ -2235,17 +1529,21 @@ Thread::Thread()
     
     m_fGCSpecial = FALSE;
 
-#if !defined(FEATURE_CORECLR)
+#ifndef FEATURE_PAL
     m_wCPUGroup = 0;
     m_pAffinityMask = 0;
-#endif
+#endif // !FEATURE_PAL
 
     m_pAllLoggedTypes = NULL;
-#ifdef FEATURE_UNIX_AMD64_STRUCT_PASSING
-    m_pHijackReturnTypeClass = NULL;
-#endif
-}
 
+#ifdef FEATURE_PERFTRACING
+    memset(&m_activityId, 0, sizeof(m_activityId));
+#endif // FEATURE_PERFTRACING
+    m_HijackReturnKind = RT_Illegal;
+    m_DeserializationTracker = NULL;
+
+    m_currentPrepareCodeConfig = nullptr;
+}
 
 //--------------------------------------------------------------------
 // Failable initialization occurs here.
@@ -2258,21 +1556,6 @@ BOOL Thread::InitThread(BOOL fInternal)
     }
     CONTRACTL_END;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *provider = CorHost2::GetHostTaskManager();
-    if (provider) {
-        if (m_pHostTask == NULL)
-        {
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-            provider->GetCurrentTask(&m_pHostTask);
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-        }
-        // workaround wwl: finalizer thread is not created by SQL
-        if (m_pHostTask == NULL && !fInternal) {
-            ThrowHR(HOST_E_INVALIDOPERATION);
-        }
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
     HANDLE  hDup = INVALID_HANDLE_VALUE;
     BOOL    ret = TRUE;
@@ -2284,18 +1567,8 @@ BOOL Thread::InitThread(BOOL fInternal)
         // log will not allocate memory at these critical times an avoid deadlock.
     STRESS_LOG2(LF_ALWAYS, LL_ALWAYS, "SetupThread  managed Thread %p Thread Id = %x\n", this, GetThreadId());
 
-    if ((m_State & TS_WeOwn) == 0)
-    {
-    COUNTER_ONLY(GetPerfCounters().m_LocksAndThreads.cRecognizedThreads++);
-    }
-    else
-    {
-        COUNTER_ONLY(GetPerfCounters().m_LocksAndThreads.cCurrentThreadsPhysical++);
-    }
-
 #ifndef FEATURE_PAL
     // workaround: Remove this when we flow impersonation token to host.
-    ThreadAffinityHolder affinityHolder(FALSE);
     BOOL    reverted = FALSE;
     HANDLE  threadToken = INVALID_HANDLE_VALUE;
 #endif // !FEATURE_PAL
@@ -2323,7 +1596,7 @@ BOOL Thread::InitThread(BOOL fInternal)
         // THREAD_SUSPEND_RESUME nor THREAD_GET_CONTEXT. We need to be able to suspend the thread, and we need to be
         // able to get its context. Therefore, if we're impersonating, we revert to self, dup the handle, then
         // re-impersonate before we leave this routine.
-        if (!RevertIfImpersonated(&reverted, &threadToken, &affinityHolder))
+        if (!RevertIfImpersonated(&reverted, &threadToken))
         {
             COMPlusThrowWin32();
         }
@@ -2381,10 +1654,7 @@ BOOL Thread::InitThread(BOOL fInternal)
 
     // Set floating point mode to round to nearest
 #ifndef FEATURE_PAL
-#ifndef _TARGET_ARM64_
-    //ARM64TODO: remove the ifdef
     (void) _controlfp_s( NULL, _RC_NEAR, _RC_CHOP|_RC_UP|_RC_DOWN|_RC_NEAR );
-#endif
 
     m_pTEB = (struct _NT_TIB*)NtCurrentTeb();
 
@@ -2396,14 +1666,6 @@ BOOL Thread::InitThread(BOOL fInternal)
         _ASSERTE(m_LastAllowableStackAddress == 0);
         _ASSERTE(m_ProbeLimit == 0);
         ret = SetStackLimits(fAll);
-        if (ret == FALSE)
-        {
-            ThrowOutOfMemory();
-        }
-
-        // We commit the thread's entire stack when it enters the runtime to allow us to be reliable in low me
-        // situtations. See the comments in front of Thread::CommitThreadStack() for mor information.
-        ret = Thread::CommitThreadStack(this);
         if (ret == FALSE)
         {
             ThrowOutOfMemory();
@@ -2426,28 +1688,17 @@ BOOL Thread::AllocHandles()
 {
     WRAPPER_NO_CONTRACT;
 
-    _ASSERTE(!m_SafeEvent.IsValid());
-    _ASSERTE(!m_UserSuspendEvent.IsValid());
     _ASSERTE(!m_DebugSuspendEvent.IsValid());
     _ASSERTE(!m_EventWait.IsValid());
 
     BOOL fOK = TRUE;
     EX_TRY {
         // create a manual reset event for getting the thread to a safe point
-        m_SafeEvent.CreateManualEvent(FALSE);
-        m_UserSuspendEvent.CreateManualEvent(FALSE);
         m_DebugSuspendEvent.CreateManualEvent(FALSE);
         m_EventWait.CreateManualEvent(TRUE);
     }
     EX_CATCH {
         fOK = FALSE;
-        if (!m_SafeEvent.IsValid()) {
-            m_SafeEvent.CloseEvent();
-        }
-
-        if (!m_UserSuspendEvent.IsValid()) {
-            m_UserSuspendEvent.CloseEvent();
-        }
 
         if (!m_DebugSuspendEvent.IsValid()) {
             m_DebugSuspendEvent.CloseEvent();
@@ -2472,12 +1723,8 @@ BOOL Thread::HasStarted(BOOL bRequiresTSL)
     CONTRACTL {
         NOTHROW;
         DISABLED(GC_NOTRIGGER);
-        SO_TOLERANT;
     }
     CONTRACTL_END;
-
-    // @todo  need a probe that tolerates not having a thread setup at all
-    CONTRACT_VIOLATION(SOToleranceViolation);
 
     _ASSERTE(!m_fPreemptiveGCDisabled);     // can't use PreemptiveGCDisabled() here
 
@@ -2503,15 +1750,6 @@ BOOL Thread::HasStarted(BOOL bRequiresTSL)
     BOOL    res = TRUE;
 
     res = SetStackLimits(fAll);
-    if (res == FALSE)
-    {
-        m_pExceptionDuringStartup = Exception::GetOOMException();
-        goto FAILURE;
-    }
-
-    // We commit the thread's entire stack when it enters the runtime to allow us to be reliable in low memory
-    // situtations. See the comments in front of Thread::CommitThreadStack() for mor information.
-    res = Thread::CommitThreadStack(this);
     if (res == FALSE)
     {
         m_pExceptionDuringStartup = Exception::GetOOMException();
@@ -2546,30 +1784,11 @@ BOOL Thread::HasStarted(BOOL bRequiresTSL)
             ThrowOutOfMemory();
         }
 
-#ifdef _DEBUG
-        AddFiberInfo(Thread::ThreadTrackInfo_Lifetime);
-#endif
-
         SetupThreadForHost();
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        if (m_pHostTask)
-        {
-            // If we have notify host of ICLRTask, host will call code:ExitTask to release
-            // its reference to ICLRTask.  Also host may call SwitchOut and SwitchIn.
-            // ExitTask needs Thread in TLS.
-            fKeepTLS = TRUE;
-        }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
         ThreadStore::TransferStartedThread(this, bRequiresTSL);
 
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-        if (g_fEnableARM)
-        {
-            QueryThreadProcessorUsage();
-        }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
 #ifdef FEATURE_EVENT_TRACE
         ETW::ThreadLog::FireThreadCreated(this);
 #endif // FEATURE_EVENT_TRACE
@@ -2669,30 +1888,8 @@ FAILURE:
         }
 #endif // PROFILING_SUPPORTED
 
-        // Is there a pending user suspension?
-        if (m_State & TS_SuspendUnstarted)
-        {
-            BOOL    doSuspend = FALSE;
-
-            {
-                ThreadStoreLockHolder TSLockHolder;
-
-                // Perhaps we got resumed before it took effect?
-                if (m_State & TS_SuspendUnstarted)
-                {
-                    FastInterlockAnd((ULONG *) &m_State, ~TS_SuspendUnstarted);
-                    SetupForSuspension(TS_UserSuspendPending);
-                    MarkForSuspension(TS_UserSuspendPending);
-                    doSuspend = TRUE;
-                }
-            }
-
-            if (doSuspend)
-            {
-                GCX_PREEMP();
-                WaitSuspendEvents();
-            }
-        }
+        // CoreCLR does not support user-requested thread suspension
+        _ASSERTE(!(m_State & TS_SuspendUnstarted));
     }
 
     return res;
@@ -2771,17 +1968,16 @@ void Thread::HandleThreadStartupFailure()
 }
 
 #ifndef FEATURE_PAL
-BOOL RevertIfImpersonated(BOOL *bReverted, HANDLE *phToken, ThreadAffinityHolder *pTAHolder)
+BOOL RevertIfImpersonated(BOOL *bReverted, HANDLE *phToken)
 {
     WRAPPER_NO_CONTRACT;
 
     BOOL bImpersonated = OpenThreadToken(GetCurrentThread(),    // we are assuming that if this call fails,
-                                                                        TOKEN_IMPERSONATE,     // we are not impersonating. There is no win32
-                                                                        TRUE,                  // api to figure this out. The only alternative
+                                         TOKEN_IMPERSONATE,     // we are not impersonating. There is no win32
+                                         TRUE,                  // api to figure this out. The only alternative
                                          phToken);              // is to use NtCurrentTeb->IsImpersonating().
     if (bImpersonated)
     {
-        pTAHolder->Acquire();
         *bReverted = RevertToSelf();
         return *bReverted;
 
@@ -2808,7 +2004,7 @@ void UndoRevert(BOOL bReverted, HANDLE hToken)
 // We don't want ::CreateThread() calls scattered throughout the source.  So gather
 // them all here.
 
-BOOL Thread::CreateNewThread(SIZE_T stackSize, LPTHREAD_START_ROUTINE start, void *args)
+BOOL Thread::CreateNewThread(SIZE_T stackSize, LPTHREAD_START_ROUTINE start, void *args, LPCWSTR pName)
 {
     CONTRACTL {
         NOTHROW;
@@ -2824,23 +2020,19 @@ BOOL Thread::CreateNewThread(SIZE_T stackSize, LPTHREAD_START_ROUTINE start, voi
     _ASSERTE(stackSize <= 0xFFFFFFFF);
 
 #ifndef FEATURE_PAL
-    ThreadAffinityHolder affinityHolder(FALSE);
     HandleHolder token;
     BOOL bReverted = FALSE;
-    bRet = RevertIfImpersonated(&bReverted, &token, &affinityHolder);
+    bRet = RevertIfImpersonated(&bReverted, &token);
     if (bRet != TRUE)
         return bRet;
 #endif // !FEATURE_PAL
 
     m_StateNC = (ThreadStateNoConcurrency)((ULONG)m_StateNC | TSNC_CLRCreatedThread);
-    if (!CLRTaskHosted()) {
-        bRet = CreateNewOSThread(stackSize, start, args);
-    }
-    else {
-        bRet = CreateNewHostTask(stackSize, start, args);
-    }
+    bRet = CreateNewOSThread(stackSize, start, args);
 #ifndef FEATURE_PAL
     UndoRevert(bReverted, token);
+    if (pName != NULL)
+        SetThreadName(m_ThreadHandle, pName);
 #endif // !FEATURE_PAL
 
     return bRet;
@@ -2849,12 +2041,12 @@ BOOL Thread::CreateNewThread(SIZE_T stackSize, LPTHREAD_START_ROUTINE start, voi
 
 // This is to avoid the 64KB/1MB aliasing problem present on Pentium 4 processors,
 // which can significantly impact performance with HyperThreading enabled
-DWORD __stdcall Thread::intermediateThreadProc(PVOID arg)
+DWORD WINAPI Thread::intermediateThreadProc(PVOID arg)
 {
     WRAPPER_NO_CONTRACT;
 
     m_offset_counter++;
-    if (m_offset_counter * offset_multiplier > PAGE_SIZE)
+    if (m_offset_counter * offset_multiplier > (int) GetOsPageSize())
         m_offset_counter = 0;
 
     (void)_alloca(m_offset_counter * offset_multiplier);
@@ -2868,7 +2060,7 @@ DWORD __stdcall Thread::intermediateThreadProc(PVOID arg)
     return ThreadFcnPtr(args);
 }
 
-HANDLE Thread::CreateUtilityThread(Thread::StackSizeBucket stackSizeBucket, LPTHREAD_START_ROUTINE start, void *args, DWORD flags, DWORD* pThreadId)
+HANDLE Thread::CreateUtilityThread(Thread::StackSizeBucket stackSizeBucket, LPTHREAD_START_ROUTINE start, void *args, LPCWSTR pName, DWORD flags, DWORD* pThreadId)
 {
     LIMITED_METHOD_CONTRACT;
 
@@ -2898,6 +2090,10 @@ HANDLE Thread::CreateUtilityThread(Thread::StackSizeBucket stackSizeBucket, LPTH
 
     DWORD threadId;
     HANDLE hThread = CreateThread(NULL, stackSize, start, args, flags, &threadId);
+#ifndef FEATURE_PAL
+    SetThreadName(hThread, pName);
+#endif // !FEATURE_PAL
+
 
     if (pThreadId)
         *pThreadId = threadId;
@@ -2905,106 +2101,48 @@ HANDLE Thread::CreateUtilityThread(Thread::StackSizeBucket stackSizeBucket, LPTH
     return hThread;
 }
 
-#ifndef FEATURE_CORECLR
-/*
-    The following are copied from MSDN:
-        http://msdn.microsoft.com/library/default.asp?url=/library/en-us/dllproc/base/thread_stack_size.asp
 
-    To change the initially committed stack space, use the dwStackSize parameter of the CreateThread,
-    CreateRemoteThread, or CreateFiber function. This value is rounded up to the nearest page.
-    Generally, the reserve size is the default reserve size specified in the executable header.
-    However, if the initially committed size specified by dwStackSize is larger than the default reserve size,
-    the reserve size is this new commit size rounded up to the nearest multiple of 1 MB.
+// Represent the value of DEFAULT_STACK_SIZE as passed in the property bag to the host during construction
+static unsigned long s_defaultStackSizeProperty = 0;
 
-    To change the reserved stack size, set the dwCreationFlags parameter of CreateThread or CreateRemoteThread
-    to STACK_SIZE_PARAM_IS_A_RESERVATION and use the dwStackSize parameter. In this case, the initially
-    committed size is the default size specified in the executable header.
-
-*/
-BOOL Thread::CheckThreadStackSize(SIZE_T *pSizeToCommitOrReserve,
-                                  BOOL   isSizeToReserve    // When TRUE, the previous argument is the stack size to reserve.
-                                                            // Otherwise, it is the size to commit.
-                                 )
+void ParseDefaultStackSize(LPCWSTR valueStr)
 {
-    CONTRACTL
+    if (valueStr)
     {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
+        LPWSTR end;
+        errno = 0;
+        unsigned long value = wcstoul(valueStr, &end, 16); // Base 16 without a prefix
 
-    //g_SystemInfo is global pointer to SYSTEM_INFO struct
-    SIZE_T dwAllocSize = (SIZE_T)g_SystemInfo.dwAllocationGranularity;
-    SIZE_T dwPageSize = (SIZE_T)g_SystemInfo.dwPageSize;
-
-    //Don't want users creating threads
-    //     with a stackSize request < 256K
-    //This value may change up or down as we see fit so don't doc to user
-    //
-    if(isSizeToReserve && 0x40000 > (*pSizeToCommitOrReserve))
-    {
-        *pSizeToCommitOrReserve = 0x40000;
-    }
-
-    *pSizeToCommitOrReserve = ALIGN(*pSizeToCommitOrReserve, dwAllocSize);
-
-    //
-    // Let's get the stack sizes from the PE file that started process.
-    //
-    SIZE_T ExeSizeOfStackReserve = 0;
-    SIZE_T ExeSizeOfStackCommit = 0;
-
-    if (!GetProcessDefaultStackSize(&ExeSizeOfStackReserve, &ExeSizeOfStackCommit))
-        return FALSE;
-
-    // Now let's decide which sizes OS are going to use.
-    SIZE_T sizeToReserve = 0;
-    SIZE_T sizeToCommit  = 0;
-
-    if (isSizeToReserve) {
-        // The passed-in *pSizeToCommitOrReserve is the stack size to reserve.
-        sizeToReserve = *pSizeToCommitOrReserve;
-        // OS will use ExeSizeOfStackCommit as the commited size.
-        sizeToCommit = ExeSizeOfStackCommit;
-    }
-    else {
-        // The passed-in *pSizeToCommitOrReserve is the stack size to commit.
-        sizeToCommit  = *pSizeToCommitOrReserve;
-        // OS will use ExeSizeOfStackReserve as the reserved size.
-        sizeToReserve = ExeSizeOfStackReserve;
-
-        // However, if the initially committed size specified by dwStackSize is larger than
-        // the default reserve size, the reserve size is this new commit size rounded up to
-        // the nearest multiple of 1 MB.
-        if (sizeToCommit > ExeSizeOfStackReserve) {
-            sizeToReserve = ALIGN(sizeToCommit, 0x1000000);
-        }
-
-        if (!g_pConfig->GetDisableCommitThreadStack())
+        if ((errno == ERANGE)     // Parsed value doesn't fit in an unsigned long
+            || (valueStr == end)  // No characters parsed
+            || (end == nullptr)   // Unexpected condition (should never happen)
+            || (end[0] != 0))     // Unprocessed terminal characters
         {
-            // We will commit the full stack when a thread starts.  But if the PageFile is full, we may hit
-            // stack overflow at random places during startup.
-            // Therefore if we are unlikely to obtain space from PageFile, we will fail creation of a thread.
-
-            *pSizeToCommitOrReserve = sizeToReserve - HARD_GUARD_REGION_SIZE;
-
-            // OS's behavior is not consistent on if guard page is marked when we ask OS to commit the stack
-            // up to 2nd to last page.
-            // On Win2k3, the 2nd to last page is marked with guard bit.
-            // On WinXP, the 2nd to last page is not marked with guard bit.
-            // To be safe, we will not commit the 2nd to last page.
-            *pSizeToCommitOrReserve -= HARD_GUARD_REGION_SIZE;
-            // To make it more interesting, on X64, if we request to commit stack except the last two pages,
-            // OS commit the whole stack, and mark the last two pages as guard page.
-            *pSizeToCommitOrReserve -= 2*HARD_GUARD_REGION_SIZE;
+            ThrowHR(E_INVALIDARG);
+        }
+        else
+        {
+            s_defaultStackSizeProperty = value;
         }
     }
-
-    // Ok, we now know what sizes OS will use to create the thread.
-    // Check to see if we have the room for guard pages.
-    return ThreadWillCreateGuardPage(sizeToReserve, sizeToCommit);
 }
-#endif // FEATURE_CORECLR
+
+SIZE_T GetDefaultStackSizeSetting()
+{
+    static DWORD s_defaultStackSizeEnv = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_DefaultStackSize);
+
+    uint64_t value = s_defaultStackSizeEnv ? s_defaultStackSizeEnv : s_defaultStackSizeProperty;
+
+    SIZE_T minStack = 0x10000;     // 64K - Somewhat arbitrary minimum thread stack size
+    SIZE_T maxStack = 0x80000000;  //  2G - Somewhat arbitrary maximum thread stack size
+
+    if ((value >= maxStack) || ((value != 0) && (value < minStack)))
+    {
+        ThrowHR(E_INVALIDARG);
+    }
+
+    return (SIZE_T) value;
+}
 
 BOOL Thread::GetProcessDefaultStackSize(SIZE_T* reserveSize, SIZE_T* commitSize)
 {
@@ -3022,6 +2160,18 @@ BOOL Thread::GetProcessDefaultStackSize(SIZE_T* reserveSize, SIZE_T* commitSize)
     static SIZE_T ExeSizeOfStackCommit = 0;
 
     static BOOL fSizesGot = FALSE;
+
+    if (!fSizesGot)
+    {
+        SIZE_T defaultStackSizeSetting = GetDefaultStackSizeSetting();
+
+        if (defaultStackSizeSetting != 0)
+        {
+            ExeSizeOfStackReserve = defaultStackSizeSetting;
+            ExeSizeOfStackCommit = defaultStackSizeSetting;
+            fSizesGot = TRUE;
+        }
+    }
 
 #ifndef FEATURE_PAL
     if (!fSizesGot)
@@ -3062,35 +2212,29 @@ BOOL Thread::CreateNewOSThread(SIZE_T sizeToCommitOrReserve, LPTHREAD_START_ROUT
     }
     CONTRACTL_END;
 
+#ifdef FEATURE_PAL
+    SIZE_T  ourId = 0;
+#else
     DWORD   ourId = 0;
+#endif
     HANDLE  h = NULL;
     DWORD dwCreationFlags = CREATE_SUSPENDED;
 
-#ifdef FEATURE_CORECLR
-    dwCreationFlags |=  STACK_SIZE_PARAM_IS_A_RESERVATION;
-#else
-    if(sizeToCommitOrReserve != 0)
-    {
-        dwCreationFlags |=  STACK_SIZE_PARAM_IS_A_RESERVATION;
+    dwCreationFlags |= STACK_SIZE_PARAM_IS_A_RESERVATION;
 
-        //
-        // In this case we also force CommitThreadStack to commit the whole stack, even if we're configured not to do so.
-        // The config value is used to reduce the resource usage for default stack allocations; for non-default allocations,
-        // we assume the user has given us the correct size (and they're really going to need it).  This way we don't
-        // need to offer a Thread constructor that takes a confusing "stack size param is a commit size" parameter.
-        //
-        SetThreadStateNC(TSNC_ForceStackCommit);
+    if (sizeToCommitOrReserve == 0)
+    {
+        sizeToCommitOrReserve = GetDefaultStackSizeSetting();
     }
 
-    // Check that we will have (reserved and never committed) guard pages at the end of the stack.
-    // If this call returns false then it will lead to an OOM exception on return.
-    // This is reasonable since a large stack was requested and we couldn't get it.
-    if(!CheckThreadStackSize(&sizeToCommitOrReserve, 
-        (sizeToCommitOrReserve != 0)))
+#ifndef FEATURE_PAL // the PAL does its own adjustments as necessary
+    if (sizeToCommitOrReserve != 0 && sizeToCommitOrReserve <= GetOsPageSize())
     {
-        return FALSE;
+        // On Windows, passing a value that is <= one page size bizarrely causes the OS to use the default stack size instead of
+        // a minimum, which is undesirable. This adjustment fixes that issue to use a minimum stack size (typically 64 KB).
+        sizeToCommitOrReserve = GetOsPageSize() + 1;
     }
-#endif
+#endif // !FEATURE_PAL
 
     intermediateThreadParam* lpThreadArgs = new (nothrow) intermediateThreadParam;
     if (lpThreadArgs == NULL)
@@ -3110,12 +2254,16 @@ BOOL Thread::CreateNewOSThread(SIZE_T sizeToCommitOrReserve, LPTHREAD_START_ROUT
     lpThreadArgs->lpThreadFunction = start;
     lpThreadArgs->lpArg = args;
 
-    h = ::CreateThread(NULL     /*=SECURITY_ATTRIBUTES*/,
-                       sizeToCommitOrReserve,
-                       intermediateThreadProc,
-                       lpThreadArgs,
-                       dwCreationFlags,
-                       &ourId);
+#ifdef FEATURE_PAL
+    h = ::PAL_CreateThread64(NULL     /*=SECURITY_ATTRIBUTES*/,
+#else
+    h = ::CreateThread(      NULL     /*=SECURITY_ATTRIBUTES*/,
+#endif
+                             sizeToCommitOrReserve,
+                             intermediateThreadProc,
+                             lpThreadArgs,
+                             dwCreationFlags,
+                             &ourId);
 
     if (h == NULL)
         return FALSE;
@@ -3145,65 +2293,6 @@ BOOL Thread::CreateNewOSThread(SIZE_T sizeToCommitOrReserve, LPTHREAD_START_ROUT
 #endif
 
     return TRUE;
-}
-
-
-
-BOOL Thread::CreateNewHostTask(SIZE_T stackSize, LPTHREAD_START_ROUTINE start, void *args)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_TRIGGERS;
-    }
-    CONTRACTL_END;
-
-    // Make sure we have all our handles, in case someone tries to suspend us
-    // as we are starting up.
-
-    if (!AllocHandles())
-    {
-        return FALSE;
-    }
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTask *pHostTask = NULL;
-
-    if (CorHost2::GetHostTaskManager()) {
-        //If you change this value to pass a SIZE_T stackSize you must
-        //   remove this _ASSERTE(stackSize <= 0xFFFFFFFF); from
-        //   CreateNewThread
-        //
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = CorHost2::GetHostTaskManager()->CreateTask((DWORD)stackSize, start, args, &pHostTask);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (hr != S_OK)
-        return FALSE;
-    }
-
-    _ASSERTE(!m_fPreemptiveGCDisabled);     // leave in preemptive until HasStarted.
-
-    // Before we do the resume, we need to take note of the new ThreadId.  This
-    // is necessary because -- before the thread starts executing at KickofThread --
-    // it may perform some DllMain DLL_THREAD_ATTACH notifications.  These could
-    // call into managed code.  During the consequent SetupThread, we need to
-    // perform the Thread::HasStarted call instead of going through the normal
-    // 'new thread' pathway.
-    _ASSERTE(m_pHostTask == NULL);
-    _ASSERTE(pHostTask != NULL);
-
-    m_pHostTask = pHostTask;
-
-    FastInterlockIncrement(&ThreadStore::s_pThreadStore->m_PendingThreadCount);
-
-#ifdef _DEBUG
-    m_Creater.SetToCurrentThread();
-#endif
-
-    return TRUE;
-#else // !FEATURE_INCLUDE_ALL_INTERFACES
-    return FALSE;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 }
 
 // 
@@ -3333,11 +2422,6 @@ int Thread::DecExternalCount(BOOL holdingLock)
             ::CloseHandle(h);
             SetThreadHandle(INVALID_HANDLE_VALUE);
         }
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        if (m_pHostTask) {
-            ReleaseHostTask();
-        }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
         // Switch back to cooperative mode to manipulate the thread.
         if (pCurThread)
         {
@@ -3356,9 +2440,6 @@ int Thread::DecExternalCount(BOOL holdingLock)
             m_ExceptionState.FreeAllStackTraces();
             if (SelfDelete) {
                 SetThread(NULL);
-#ifdef _DEBUG
-                AddFiberInfo(ThreadTrackInfo_Lifetime);
-#endif
             }
             delete this;
         }
@@ -3493,20 +2574,6 @@ Thread::~Thread()
     m_pFrame = (Frame *)POISONC;
 #endif
 
-    // Update Perfmon counters.
-    COUNTER_ONLY(GetPerfCounters().m_LocksAndThreads.cCurrentThreadsLogical--);
-
-    // Current recognized threads are non-runtime threads that are alive and ran under the
-    // runtime. Check whether this Thread was one of them.
-    if ((m_State & TS_WeOwn) == 0)
-    {
-        COUNTER_ONLY(GetPerfCounters().m_LocksAndThreads.cRecognizedThreads--);
-    }
-    else
-    {
-        COUNTER_ONLY(GetPerfCounters().m_LocksAndThreads.cCurrentThreadsPhysical--);
-    }
-
     // Normally we shouldn't get here with a valid thread handle; however if SetupThread
     // failed (due to an OOM for example) then we need to CloseHandle the thread
     // handle if we own it.
@@ -3515,14 +2582,6 @@ Thread::~Thread()
         CloseHandle(GetThreadHandle());
     }
 
-    if (m_SafeEvent.IsValid())
-    {
-        m_SafeEvent.CloseEvent();
-    }
-    if (m_UserSuspendEvent.IsValid())
-    {
-        m_UserSuspendEvent.CloseEvent();
-    }
     if (m_DebugSuspendEvent.IsValid())
     {
         m_DebugSuspendEvent.CloseEvent();
@@ -3560,34 +2619,20 @@ Thread::~Thread()
         // Destroy any handles that we're using to hold onto exception objects
         SafeSetThrowables(NULL);
 
+        if (m_DeserializationTracker != NULL)
+        {
+            DestroyGlobalStrongHandle(m_DeserializationTracker);
+        }
+
         DestroyShortWeakHandle(m_ExposedObject);
         DestroyStrongHandle(m_StrongHndToExposedObject);
     }
 
     g_pThinLockThreadIdDispenser->DisposeId(GetThreadId());
 
-    //Ensure DeleteThreadStaticData was executed
-    _ASSERTE(m_pThreadLocalBlock == NULL);
-    _ASSERTE(m_pTLBTable == NULL);
-    _ASSERTE(m_TLBTableSize == 0);
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    if (m_pHostTask) {
-        ReleaseHostTask();
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-#ifdef FEATURE_PREJIT
     if (m_pIBCInfo) {
         delete m_pIBCInfo;
     }
-#endif
-
-#ifdef _DEBUG
-    if (m_pFiberInfo != NULL) {
-        delete [] (DWORD_PTR*)m_pFiberInfo[0];
-    }
-#endif
 
 #ifdef FEATURE_EVENT_TRACE
     // Destruct the thread local type cache for allocation sampling
@@ -3606,17 +2651,11 @@ void Thread::BaseCoUninitialize()
 {
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_SO_INTOLERANT;
     STATIC_CONTRACT_MODE_PREEMPTIVE;
 
     _ASSERTE(GetThread() == this);
 
-    BEGIN_SO_TOLERANT_CODE(this);
-    // BEGIN_SO_TOLERANT_CODE wraps a __try/__except around this call, so if the OS were to allow
-    // an exception to leak through to us, we'll catch it.
     ::CoUninitialize();
-    END_SO_TOLERANT_CODE;
-
 }// BaseCoUninitialize
 
 #ifdef FEATURE_COMINTEROP
@@ -3624,16 +2663,13 @@ void Thread::BaseWinRTUninitialize()
 {
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_SO_INTOLERANT;
     STATIC_CONTRACT_MODE_PREEMPTIVE;
 
     _ASSERTE(WinRTSupported());
     _ASSERTE(GetThread() == this);
     _ASSERTE(IsWinRTInitialized());
 
-    BEGIN_SO_TOLERANT_CODE(this);
     RoUninitialize();
-    END_SO_TOLERANT_CODE;
 }
 #endif // FEATURE_COMINTEROP
 
@@ -3863,10 +2899,9 @@ void Thread::OnThreadTerminate(BOOL holdingLock)
 
     // The thread is no longer running.  It's important that we zero any general OBJECTHANDLE's
     // on this Thread object.  That's because we need the managed Thread object to be subject to
-    // GC and yet any HANDLE is opaque to the GC when it comes to collecting cycles.  If e.g. the
-    // Thread's AbortReason (which is an arbitrary object) contains transitively a reference back
-    // to the Thread, then we have an uncollectible cycle.  When the thread is executing, nothing
-    // can be collected anyway.  But now that we stop running the cycle concerns us.
+    // GC and yet any HANDLE is opaque to the GC when it comes to collecting cycles. When the
+    // thread is executing, nothing can be collected anyway.  But now that we stop running the
+    // cycle concerns us.
     //
     // It's important that we only use OBJECTHANDLE's that are retrievable while the thread is
     // still running.  That's what allows us to zero them here with impunity:
@@ -3879,33 +2914,22 @@ void Thread::OnThreadTerminate(BOOL holdingLock)
         // Destroy the LastThrown handle (and anything that violates the above assert).
         SafeSetThrowables(NULL);
 
-        // Cleaning up the AbortReason is tricky, since the handle is only valid if the ADID is valid
-        // ...and we can only perform this operation if other threads aren't racing to update these
-        // values on our thread asynchronously.
-        ClearAbortReason();
-
         // Free all structures related to thread statics for this thread
         DeleteThreadStaticData();
 
-#ifdef FEATURE_LEAK_CULTURE_INFO
-        //Clear the references which could create cycles
-        //  This allows the GC to collect them
-        THREADBASEREF thread = (THREADBASEREF) GetExposedObjectRaw();
-        if (thread != NULL)
-        {
-            thread->ResetCulture();
-        }
-#endif
     }
 
-    if  (GCHeap::IsGCHeapInitialized())
+    if  (GCHeapUtilities::IsGCHeapInitialized())
     {
         // Guaranteed to NOT be a shutdown case, because we tear down the heap before
         // we tear down any threads during shutdown.
         if (ThisThreadID == CurrentThreadID)
         {
             GCX_COOP();
-            GCHeap::GetGCHeap()->FixAllocContext(&m_alloc_context, FALSE, NULL, NULL);
+            // GetTotalAllocatedBytes reads dead_threads_non_alloc_bytes, but will suspend EE, being in COOP mode we cannot race with that
+            // however, there could be other threads terminating and doing the same Add.
+            FastInterlockExchangeAddLong((LONG64*)&dead_threads_non_alloc_bytes, m_alloc_context.alloc_limit - m_alloc_context.alloc_ptr);
+            GCHeapUtilities::GetGCHeap()->FixAllocContext(&m_alloc_context, NULL, NULL);
             m_alloc_context.init();
         }
     }
@@ -3956,26 +2980,20 @@ void Thread::OnThreadTerminate(BOOL holdingLock)
             LOG((LF_SYNC, INFO3, "OnThreadTerminate obtain lock\n"));
             ThreadSuspend::LockThreadStore(ThreadSuspend::SUSPEND_OTHER);
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-            if (ThisThreadID == CurrentThreadID && pCurrentThread)
-            {
-                // Before we call UnlockThreadStore, we remove out Thread from TLS
-                // Therefore we will not dec the lock count on thread.
-                DECTHREADLOCKCOUNTTHREAD(pCurrentThread);
-            }
-#endif
         }
 
-        if  (GCHeap::IsGCHeapInitialized() && ThisThreadID != CurrentThreadID)
+        if  (GCHeapUtilities::IsGCHeapInitialized() && ThisThreadID != CurrentThreadID)
         {
             // We must be holding the ThreadStore lock in order to clean up alloc context.
             // We should never call FixAllocContext during GC.
-            GCHeap::GetGCHeap()->FixAllocContext(&m_alloc_context, FALSE, NULL, NULL);
+            dead_threads_non_alloc_bytes += m_alloc_context.alloc_limit - m_alloc_context.alloc_ptr;
+            GCHeapUtilities::GetGCHeap()->FixAllocContext(&m_alloc_context, NULL, NULL);
             m_alloc_context.init();
         }
 
         FastInterlockOr((ULONG *) &m_State, TS_Dead);
         ThreadStore::s_pThreadStore->m_DeadThreadCount++;
+        ThreadStore::s_pThreadStore->IncrementDeadThreadCountForGCTrigger();
 
         if (IsUnstarted())
             ThreadStore::s_pThreadStore->m_UnstartedThreadCount--;
@@ -4000,8 +3018,8 @@ void Thread::OnThreadTerminate(BOOL holdingLock)
             if (m_State & TS_DebugSuspendPending)
                 UnmarkForSuspension(~TS_DebugSuspendPending);
 
-            if (m_State & TS_UserSuspendPending)
-                UnmarkForSuspension(~TS_UserSuspendPending);
+            // CoreCLR does not support user-requested thread suspension
+            _ASSERTE(!(m_State & TS_UserSuspendPending));
 
             if (CurrentThreadID == ThisThreadID && IsAbortRequested())
             {
@@ -4203,7 +3221,6 @@ DWORD MsgWaitHelper(int numWaiters, HANDLE* phEvent, BOOL bWaitAll, DWORD millis
     // The true contract for GC trigger should be the following.  But this puts a very strong restriction
     // on contract for functions that call EnablePreemptiveGC.
     //if (GetThread() && !ThreadStore::HoldingThreadStore(GetThread())) {GC_TRIGGERS;} else {GC_NOTRIGGER;}
-    STATIC_CONTRACT_SO_INTOLERANT;
     STATIC_CONTRACT_GC_TRIGGERS;
 
     DWORD flags = 0;
@@ -4215,7 +3232,6 @@ DWORD MsgWaitHelper(int numWaiters, HANDLE* phEvent, BOOL bWaitAll, DWORD millis
         _ASSERTE (g_fEEShutDown);
 
     DWORD lastError = 0;
-    BEGIN_SO_TOLERANT_CODE(pThread);
 
     // If we're going to pump, we cannot use WAIT_ALL.  That's because the wait would
     // only be satisfied if a message arrives while the handles are signalled.  If we
@@ -4234,10 +3250,6 @@ DWORD MsgWaitHelper(int numWaiters, HANDLE* phEvent, BOOL bWaitAll, DWORD millis
         // So on CoreCLR (where FEATURE_COMINTEROP is not currently defined) we can actually reach this point.
         // We can't fix this, because it's a breaking change, so we just won't assert here.
         // The result is that WaitAll on an STA thread in CoreCLR will behave stragely, as described above.
-#if defined(FEATURE_COMINTEROP) && !defined(FEATURE_CORECLR)
-        else
-            _ASSERTE(!"WaitAll in an STA with more than one handle will deadlock");
-#endif
     }
 
     if (bWaitAll)
@@ -4267,32 +3279,12 @@ DWORD MsgWaitHelper(int numWaiters, HANDLE* phEvent, BOOL bWaitAll, DWORD millis
 
     lastError = ::GetLastError();
 
-    END_SO_TOLERANT_CODE;
-
-    // END_SO_TOLERANT_CODE overwrites lasterror.  Let's reset it.
     ::SetLastError(lastError);
 
     return dwReturn;
 }
 
 #endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
-
-DWORD WaitForMultipleObjectsEx_SO_TOLERANT (DWORD nCount, HANDLE *lpHandles, BOOL bWaitAll,DWORD dwMilliseconds, BOOL bAlertable)
-{
-    STATIC_CONTRACT_SO_INTOLERANT;
-
-    DWORD dwRet = WAIT_FAILED;
-    DWORD lastError = 0;
-
-    BEGIN_SO_TOLERANT_CODE (GetThread ());
-    dwRet = ::WaitForMultipleObjectsEx (nCount, lpHandles, bWaitAll, dwMilliseconds, bAlertable);
-    lastError = ::GetLastError();
-    END_SO_TOLERANT_CODE;
-
-    // END_SO_TOLERANT_CODE overwrites lasterror.  Let's reset it.
-    ::SetLastError(lastError);
-    return dwRet;
-}
 
 //--------------------------------------------------------------------
 // Do appropriate wait based on apartment state (STA or MTA)
@@ -4302,7 +3294,6 @@ DWORD Thread::DoAppropriateAptStateWait(int numWaiters, HANDLE* pHandles, BOOL b
     CONTRACTL {
         THROWS;
         GC_TRIGGERS;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 
@@ -4319,7 +3310,7 @@ DWORD Thread::DoAppropriateAptStateWait(int numWaiters, HANDLE* pHandles, BOOL b
     }
 #endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
 
-    return WaitForMultipleObjectsEx_SO_TOLERANT(numWaiters, pHandles, bWaitAll, timeout, alertable);
+    return WaitForMultipleObjectsEx(numWaiters, pHandles, bWaitAll, timeout, alertable);
 }
 
 // A helper called by our two flavors of DoAppropriateWaitWorker
@@ -4351,7 +3342,7 @@ void Thread::DoAppropriateWaitWorkerAlertableHelper(WaitMode mode)
     }
     else
     {
-        HandleThreadInterrupt((mode & WaitMode_ADUnload) != 0);
+        HandleThreadInterrupt();
 
         // Safe to clear the interrupted state, no APC could have fired since we
         // reset m_UserInterrupt (which inhibits our APC callback from doing
@@ -4388,7 +3379,6 @@ DWORD Thread::DoAppropriateWaitWorker(int countHandles, HANDLE *handles, BOOL wa
     DWORD ret = 0;
 
     BOOL alertable = (mode & WaitMode_Alertable) != 0;
-#ifdef FEATURE_SYNCHRONIZATIONCONTEXT_WAIT
     // Waits from SynchronizationContext.WaitHelper are always just WaitMode_IgnoreSyncCtx.
     // So if we defer to a sync ctx, we will lose any extra bits.  We must therefore not
     // defer to a sync ctx if doing any non-default wait.  
@@ -4405,7 +3395,8 @@ DWORD Thread::DoAppropriateWaitWorker(int countHandles, HANDLE *handles, BOOL wa
     // since fundamental parts of the system (such as the GC) rely on non alertable
     // waits not running any managed code. Also if we are past the point in shutdown were we
     // are allowed to run managed code then we can't forward the call to the sync context.
-    if (!ignoreSyncCtx && alertable && CanRunManagedCode(LoaderLockCheck::None) 
+    if (!ignoreSyncCtx
+        && alertable
         && !HasThreadStateNC(Thread::TSNC_BlockedForShutdown))
     {
         GCX_COOP();
@@ -4430,7 +3421,6 @@ DWORD Thread::DoAppropriateWaitWorker(int countHandles, HANDLE *handles, BOOL wa
         if (fSyncCtxPresent)
             return ret;
     }
-#endif // #ifdef FEATURE_SYNCHRONIZATIONCONTEXT_WAIT
 
     // Before going to pre-emptive mode the thread needs to be flagged as waiting for
     // the debugger. This used to be accomplished by the TS_Interruptible flag but that
@@ -4447,7 +3437,6 @@ DWORD Thread::DoAppropriateWaitWorker(int countHandles, HANDLE *handles, BOOL wa
         DoAppropriateWaitWorkerAlertableHelper(mode);
     }
 
-    LeaveRuntimeHolder holder((size_t)WaitForMultipleObjectsEx);
     StateHolder<MarkOSAlertableWait,UnMarkOSAlertableWait> OSAlertableWait(alertable);
 
     ThreadStateHolder tsh(alertable, TS_Interruptible | TS_Interrupted);
@@ -4467,7 +3456,7 @@ retry:
 
         if (m_State & TS_Interrupted)
         {
-            HandleThreadInterrupt(mode & WaitMode_ADUnload);
+            HandleThreadInterrupt();
         }
         // We could be woken by some spurious APC or an EE APC queued to
         // interrupt us. In the latter case the TS_Interrupted bit will be set
@@ -4540,9 +3529,6 @@ retry:
         {
             // Probe all handles with a timeout of zero. When we find one that's
             // invalid, move it out of the list and retry the wait.
-#ifdef _DEBUG
-            BOOL fFoundInvalid = FALSE;
-#endif
             for (int i = 0; i < countHandles; i++)
             {
                 // WaitForSingleObject won't pump memssage; we already probe enough space
@@ -4555,12 +3541,8 @@ retry:
                 if ((countHandles - i - 1) > 0)
                     memmove(&handles[i], &handles[i+1], (countHandles - i - 1) * sizeof(HANDLE));
                 countHandles--;
-#ifdef _DEBUG
-                fFoundInvalid = TRUE;
-#endif
                 break;
             }
-            _ASSERTE(fFoundInvalid);
 
             // Compute the new timeout value by assume that the timeout
             // is not large enough for more than one wrap
@@ -4606,7 +3588,6 @@ retry:
                 _ASSERTE(subRet == WAIT_TIMEOUT);
                 ret++;
             }
-            _ASSERTE(i != countHandles);
         }
     }
 
@@ -4684,7 +3665,7 @@ retry:
 
         if ((m_State & TS_Interrupted))
         {
-            HandleThreadInterrupt(mode & WaitMode_ADUnload);
+            HandleThreadInterrupt();
         }
         if (millis != INFINITE)
         {
@@ -4713,7 +3694,6 @@ WaitCompleted:
     return ret;
 }
 
-#ifndef FEATURE_CORECLR
 //--------------------------------------------------------------------
 // Only one style of wait for DoSignalAndWait since we don't support this on STA Threads
 //--------------------------------------------------------------------
@@ -4776,7 +3756,6 @@ DWORD Thread::DoSignalAndWaitWorker(HANDLE* pHandles, DWORD millis,BOOL alertabl
         DoAppropriateWaitWorkerAlertableHelper(WaitMode_None);
     }
 
-    LeaveRuntimeHolder holder((size_t)WaitForMultipleObjectsEx);
     StateHolder<MarkOSAlertableWait,UnMarkOSAlertableWait> OSAlertableWait(alertable);
 
     ThreadStateHolder tsh(alertable, TS_Interruptible | TS_Interrupted);
@@ -4800,7 +3779,7 @@ retry:
         // in the thread state bits. Otherwise we just go back to sleep again.
         if ((m_State & TS_Interrupted))
         {
-            HandleThreadInterrupt(FALSE);
+            HandleThreadInterrupt();
         }
         if (INFINITE != millis)
         {
@@ -4860,9 +3839,7 @@ WaitCompleted:
 
     return ret;
 }
-#endif // FEATURE_CORECLR
 
-#ifdef FEATURE_SYNCHRONIZATIONCONTEXT_WAIT
 DWORD Thread::DoSyncContextWait(OBJECTREF *pSyncCtxObj, int countHandles, HANDLE *handles, BOOL waitAll, DWORD millis)
 {
     CONTRACTL
@@ -4892,7 +3869,6 @@ DWORD Thread::DoSyncContextWait(OBJECTREF *pSyncCtxObj, int countHandles, HANDLE
     
     return invokeWaitMethodHelper.Call_RetI4(args);
 }
-#endif // #ifdef FEATURE_SYNCHRONIZATIONCONTEXT_WAIT
 
 // Called out of SyncBlock::Wait() to block this thread until the Notify occurs.
 BOOL Thread::Block(INT32 timeOut, PendingSync *syncState)
@@ -5121,12 +4097,11 @@ void PendingSync::Restore(BOOL bRemoveFromSB)
 
 // This is the callback from the OS, when we queue an APC to interrupt a waiting thread.
 // The callback occurs on the thread we wish to interrupt.  It is a STATIC method.
-void __stdcall Thread::UserInterruptAPC(ULONG_PTR data)
+void WINAPI Thread::UserInterruptAPC(ULONG_PTR data)
 {
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5164,9 +4139,6 @@ void Thread::UserInterrupt(ThreadInterruptMode mode)
     if (HasValidThreadHandle() &&
         HasThreadState (TS_Interruptible))
     {
-#ifdef _DEBUG
-        AddFiberInfo(ThreadTrackInfo_Abort);
-#endif
         Alert();
     }
 }
@@ -5200,7 +4172,7 @@ void Thread::UserSleep(INT32 time)
     // If someone has interrupted us, we should not enter the wait.
     if (IsUserInterrupted())
     {
-        HandleThreadInterrupt(FALSE);
+        HandleThreadInterrupt();
     }
 
     ThreadStateHolder tsh(TRUE, TS_Interruptible | TS_Interrupted);
@@ -5221,7 +4193,7 @@ retry:
         // in the thread state bits. Otherwise we just go back to sleep again.
         if ((m_State & TS_Interrupted))
         {
-            HandleThreadInterrupt(FALSE);
+            HandleThreadInterrupt();
         }
 
         if (dwTime == INFINITE)
@@ -5290,9 +4262,6 @@ OBJECTREF Thread::GetExposedObject()
             // already hold the thread lock and IncExternalCount won't be able to take it.
             ULONG retVal = FastInterlockIncrement ((LONG*)&m_ExternalRefCount);
 
-#ifdef _DEBUG
-            AddFiberInfo(ThreadTrackInfo_Lifetime);
-#endif
             // Check to see if we need to store a strong pointer to the object.
             if (retVal > 1)
                 StoreObjectInHandle(m_StrongHndToExposedObject, (OBJECTREF) attempt);
@@ -5344,10 +4313,6 @@ void Thread::SetExposedObject(OBJECTREF exposed)
         StoreObjectInHandle(m_ExposedObject, exposed);
         // This makes sure the contexts on the backing thread
         // and the managed thread start off in sync with each other.
-#ifdef FEATURE_REMOTING        
-        _ASSERTE(m_Context);
-        ((THREADBASEREF)exposed)->SetExposedContext(m_Context->GetExposedObjectRaw());
-#endif        
         // BEWARE: the IncExternalCount call below may cause GC to happen.
 
         // IncExternalCount will store exposed in m_StrongHndToExposedObject which is in default domain.
@@ -5372,7 +4337,6 @@ void Thread::SetLastThrownObject(OBJECTREF throwable, BOOL isUnhandled)
         if ((throwable == NULL) || CLRException::IsPreallocatedExceptionObject(throwable)) NOTHROW; else THROWS; // From CreateHandle
         GC_NOTRIGGER;
         if (throwable == NULL) MODE_ANY; else MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5411,11 +4375,7 @@ void Thread::SetLastThrownObject(OBJECTREF throwable, BOOL isUnhandled)
         }
         else
         {
-            BEGIN_SO_INTOLERANT_CODE(GetThread());
-            {
-                m_LastThrownObjectHandle = GetDomain()->CreateHandle(throwable);
-            }
-            END_SO_INTOLERANT_CODE;
+            m_LastThrownObjectHandle = GetDomain()->CreateHandle(throwable);
         }
 
         _ASSERTE(m_LastThrownObjectHandle != NULL);
@@ -5434,7 +4394,6 @@ void Thread::SetSOForLastThrownObject()
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -5458,7 +4417,6 @@ OBJECTREF Thread::SafeSetLastThrownObject(OBJECTREF throwable)
         NOTHROW;
         GC_NOTRIGGER;
         if (throwable == NULL) MODE_ANY; else MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5496,7 +4454,6 @@ OBJECTREF Thread::SafeSetThrowables(OBJECTREF throwable DEBUG_ARG(ThreadExceptio
         NOTHROW;
         GC_NOTRIGGER;
         if (throwable == NULL) MODE_ANY; else MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5574,7 +4531,6 @@ void Thread::SetLastThrownObjectHandle(OBJECTHANDLE h)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5598,7 +4554,6 @@ void Thread::SafeUpdateLastThrownObject(void)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 
@@ -5608,9 +4563,12 @@ void Thread::SafeUpdateLastThrownObject(void)
     {
         EX_TRY
         {
-            // Using CreateDuplicateHandle here ensures that the AD of the last thrown object matches the domain of
-            // the current throwable.
-            SetLastThrownObjectHandle(CreateDuplicateHandle(hThrowable));
+            IGCHandleManager *pHandleTable = GCHandleUtilities::GetGCHandleManager();
+
+            // Creating a duplicate handle here ensures that the AD of the last thrown object
+            // matches the domain of the current throwable.
+            OBJECTHANDLE duplicateHandle = pHandleTable->CreateDuplicateHandle(hThrowable);
+            SetLastThrownObjectHandle(duplicateHandle);
         }
         EX_CATCH
         {
@@ -5760,7 +4718,11 @@ BOOL Thread::PrepareApartmentAndContext()
     }
     CONTRACTL_END;
 
+#ifdef FEATURE_PAL
+    m_OSThreadId = ::PAL_GetCurrentOSThreadId();
+#else
     m_OSThreadId = ::GetCurrentThreadId();
+#endif
 
 #ifdef FEATURE_COMINTEROP_APARTMENT_SUPPORT
     // Be very careful in here because we haven't set up e.g. TLS yet.
@@ -5841,11 +4803,7 @@ Thread::ApartmentState Thread::GetApartment()
         as = TS_TO_AS(maskedTs);
     }
 
-    if (
-#ifdef MDA_SUPPORTED
-        (NULL == MDA_GET_ASSISTANT(InvalidApartmentStateChange)) &&
-#endif
-        (as != AS_Unknown))
+    if (as != AS_Unknown)
     {
         return as;
     }
@@ -5867,33 +4825,6 @@ Thread::ApartmentState Thread::GetApartmentRare(Thread::ApartmentState as)
     {
         THDTYPE type;
         HRESULT hr = S_OK;
-
-#ifdef MDA_SUPPORTED
-        MdaInvalidApartmentStateChange* pProbe = MDA_GET_ASSISTANT(InvalidApartmentStateChange);
-        if (pProbe)
-        {
-            // Without notifications from OLE32, we cannot know when the apartment state of a
-            // thread changes.  But we have cached this fact and depend on it for all our
-            // blocking and COM Interop behavior to work correctly.  Using the CDH, log that it
-            // is not changing underneath us, on those platforms where it is relatively cheap for
-            // us to do so.
-            if (as != AS_Unknown)
-            {
-                hr = GetCurrentThreadTypeNT5(&type);
-                if (hr == S_OK)
-                {
-                    if (type == THDTYPE_PROCESSMESSAGES && as == AS_InMTA)
-                    {
-                        pProbe->ReportViolation(this, as, FALSE);
-                    }
-                    else if (type == THDTYPE_BLOCKMESSAGES && as == AS_InSTA)
-                    {
-                        pProbe->ReportViolation(this, as, FALSE);
-                    }
-                }
-            }
-        }
-#endif
 
         if (as == AS_Unknown)
         {
@@ -5954,7 +4885,6 @@ Thread::ApartmentState Thread::GetFinalApartment()
         NOTHROW;
         GC_TRIGGERS;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -6034,7 +4964,11 @@ Thread::ApartmentState Thread::SetApartment(ApartmentState state, BOOL fFireMDAO
             {
                 // We should never be attempting to CoUninitialize another thread than
                 // the currently running thread.
+#ifdef FEATURE_PAL
+                _ASSERTE(m_OSThreadId == ::PAL_GetCurrentOSThreadId());
+#else
                 _ASSERTE(m_OSThreadId == ::GetCurrentThreadId());
+#endif
 
                 // CoUninitialize the thread and reset the STA/MTA/CoInitialized state bits.
                 ::CoUninitialize();
@@ -6068,12 +5002,6 @@ Thread::ApartmentState Thread::SetApartment(ApartmentState state, BOOL fFireMDAO
     // MTA.
     if (m_State & TS_InSTA)
     {
-#ifdef MDA_SUPPORTED
-        if (state == AS_InMTA && fFireMDAOnMismatch)
-        {
-            MDA_TRIGGER_ASSISTANT(InvalidApartmentStateChange, ReportViolation(this, state, TRUE));
-        }
-#endif
         return AS_InSTA;
     }
 
@@ -6081,12 +5009,6 @@ Thread::ApartmentState Thread::SetApartment(ApartmentState state, BOOL fFireMDAO
     // STA.
     if (m_State & TS_InMTA)
     {
-#ifdef MDA_SUPPORTED
-        if (state == AS_InSTA && fFireMDAOnMismatch)
-        {
-            MDA_TRIGGER_ASSISTANT(InvalidApartmentStateChange, ReportViolation(this, state, TRUE));
-        }
-#endif
         return AS_InMTA;
     }
 
@@ -6096,7 +5018,11 @@ Thread::ApartmentState Thread::SetApartment(ApartmentState state, BOOL fFireMDAO
     // Don't use the TS_Unstarted state bit to check for this, it's cleared far
     // too late in the day for us. Instead check whether we're in the correct
     // thread context.
+#ifdef FEATURE_PAL
+    if (m_OSThreadId != ::PAL_GetCurrentOSThreadId())
+#else
     if (m_OSThreadId != ::GetCurrentThreadId())
+#endif
     {
         FastInterlockOr((ULONG *) &m_State, (state == AS_InSTA) ? TS_InSTA : TS_InMTA);
         return state;
@@ -6148,19 +5074,14 @@ Thread::ApartmentState Thread::SetApartment(ApartmentState state, BOOL fFireMDAO
         // we can work out what the state is now.  No need to actually do the CoInit --
         // obviously someone else already took care of that.
         FastInterlockOr((ULONG *) &m_State, ((state == AS_InSTA) ? TS_InMTA : TS_InSTA));
-
-#ifdef MDA_SUPPORTED
-        if (fFireMDAOnMismatch)
-        {
-            // Report via the customer debug helper that we failed to set the apartment type
-            // to the specified type.
-            MDA_TRIGGER_ASSISTANT(InvalidApartmentStateChange, ReportViolation(this, state, TRUE));
-        }
-#endif
     }
     else if (hr == E_OUTOFMEMORY)
     {
         COMPlusThrowOM();
+    }
+    else if (hr == E_NOTIMPL)
+    {
+        COMPlusThrow(kPlatformNotSupportedException, IDS_EE_THREAD_APARTMENT_NOT_SUPPORTED, (state == AS_InSTA) ? W("STA") : W("MTA"));
     }
     else
     {
@@ -6234,6 +5155,8 @@ ThreadStore::ThreadStore()
              m_BackgroundThreadCount(0),
              m_PendingThreadCount(0),
              m_DeadThreadCount(0),
+             m_DeadThreadCountForGCTrigger(0),
+             m_TriggerGCForDeadThreads(false),
              m_GuidCreated(FALSE),
              m_HoldingThread(0)
 {
@@ -6263,16 +5186,18 @@ void ThreadStore::InitThreadStore()
     ThreadSuspend::g_pGCSuspendEvent = new CLREvent();
     ThreadSuspend::g_pGCSuspendEvent->CreateManualEvent(FALSE);
 
-#ifdef _DEBUG
-    Thread::MaxThreadRecord = EEConfig::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_MaxThreadRecord,Thread::MaxThreadRecord);
-    Thread::MaxStackDepth = EEConfig::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_MaxStackDepth,Thread::MaxStackDepth);
-    if (Thread::MaxStackDepth > 100) {
-        Thread::MaxStackDepth = 100;
-    }
-#endif
-
     s_pWaitForStackCrawlEvent = new CLREvent();
     s_pWaitForStackCrawlEvent->CreateManualEvent(FALSE);
+
+    s_DeadThreadCountThresholdForGCTrigger =
+        static_cast<LONG>(CLRConfig::GetConfigValue(CLRConfig::INTERNAL_Thread_DeadThreadCountThresholdForGCTrigger));
+    if (s_DeadThreadCountThresholdForGCTrigger < 0)
+    {
+        s_DeadThreadCountThresholdForGCTrigger = 0;
+    }
+    s_DeadThreadGCTriggerPeriodMilliseconds =
+        CLRConfig::GetConfigValue(CLRConfig::INTERNAL_Thread_DeadThreadGCTriggerPeriodMilliseconds);
+    s_DeadThreadGenerationCounts = nullptr;
 }
 
 // Enter and leave the critical section around the thread store.  Clients should
@@ -6284,12 +5209,6 @@ DEBUG_NOINLINE void ThreadStore::Enter()
     ANNOTATION_SPECIAL_HOLDER_CALLER_NEEDS_DYNAMIC_CONTRACT;
     CHECK_ONE_STORE();
     m_Crst.Enter();
-
-    // Threadstore needs special shutdown handling.
-    if (g_fSuspendOnShutdown)
-    {
-        m_Crst.ReleaseAndBlockForShutdownIfNotSpecialThread();
-    }
 }
 
 DEBUG_NOINLINE void ThreadStore::Leave()
@@ -6359,13 +5278,6 @@ void ThreadStore::AddThread(Thread *newThread, BOOL bRequiresTSL)
 BOOL ThreadStore::CanAcquireLock()
 {
     WRAPPER_NO_CONTRACT;
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    if (!s_pThreadStore->m_Crst.IsOSCritSec())
-    {
-        return true;
-    }
-    else
-#endif 
     {
         return (s_pThreadStore->m_Crst.m_criticalsection.LockCount == -1 || (size_t)s_pThreadStore->m_Crst.m_criticalsection.OwningThread == (size_t)GetCurrentThreadId());
     }
@@ -6422,7 +5334,10 @@ BOOL ThreadStore::RemoveThread(Thread *target)
         s_pThreadStore->m_ThreadCount--;
 
         if (target->IsDead())
+        {
             s_pThreadStore->m_DeadThreadCount--;
+            s_pThreadStore->DecrementDeadThreadCountForGCTrigger();
+        }
 
         // Unstarted threads are not in the Background count:
         if (target->IsUnstarted())
@@ -6431,9 +5346,15 @@ BOOL ThreadStore::RemoveThread(Thread *target)
         if (target->IsBackground())
             s_pThreadStore->m_BackgroundThreadCount--;
 
-        FastInterlockExchangeAdd(
-            &Thread::s_threadPoolCompletionCountOverflow,
-            target->m_threadPoolCompletionCount);
+        FastInterlockExchangeAddLong(
+            (LONGLONG *)&Thread::s_workerThreadPoolCompletionCountOverflow,
+            target->m_workerThreadPoolCompletionCount);
+        FastInterlockExchangeAddLong(
+            (LONGLONG *)&Thread::s_ioThreadPoolCompletionCountOverflow,
+            target->m_ioThreadPoolCompletionCount);
+        FastInterlockExchangeAddLong(
+            (LONGLONG *)&Thread::s_monitorLockContentionCountOverflow,
+            target->m_monitorLockContentionCount);
 
         _ASSERTE(s_pThreadStore->m_ThreadCount >= 0);
         _ASSERTE(s_pThreadStore->m_BackgroundThreadCount >= 0);
@@ -6511,6 +5432,200 @@ void ThreadStore::TransferStartedThread(Thread *thread, BOOL bRequiresTSL)
     CheckForEEShutdown();
 }
 
+LONG ThreadStore::s_DeadThreadCountThresholdForGCTrigger = 0;
+DWORD ThreadStore::s_DeadThreadGCTriggerPeriodMilliseconds = 0;
+SIZE_T *ThreadStore::s_DeadThreadGenerationCounts = nullptr;
+
+void ThreadStore::IncrementDeadThreadCountForGCTrigger()
+{
+    CONTRACTL {
+        NOTHROW;
+        GC_NOTRIGGER;
+    }
+    CONTRACTL_END;
+
+    // Although all increments and decrements are usually done inside a lock, that is not sufficient to synchronize with a
+    // background GC thread resetting this value, hence the interlocked operation. Ignore overflow; overflow would likely never
+    // occur, the count is treated as unsigned, and nothing bad would happen if it were to overflow.
+    SIZE_T count = static_cast<SIZE_T>(FastInterlockIncrement(&m_DeadThreadCountForGCTrigger));
+
+    SIZE_T countThreshold = static_cast<SIZE_T>(s_DeadThreadCountThresholdForGCTrigger);
+    if (count < countThreshold || countThreshold == 0)
+    {
+        return;
+    }
+
+    IGCHeap *gcHeap = GCHeapUtilities::GetGCHeap();
+    if (gcHeap == nullptr)
+    {
+        return;
+    }
+
+    SIZE_T gcLastMilliseconds = gcHeap->GetLastGCStartTime(gcHeap->GetMaxGeneration());
+    SIZE_T gcNowMilliseconds = gcHeap->GetNow();
+    if (gcNowMilliseconds - gcLastMilliseconds < s_DeadThreadGCTriggerPeriodMilliseconds)
+    {
+        return;
+    }
+
+    if (!g_fEEStarted) // required for FinalizerThread::EnableFinalization() below
+    {
+        return;
+    }
+
+    // The GC is triggered on the finalizer thread since it's not safe to trigger it on DLL_THREAD_DETACH.
+    // TriggerGCForDeadThreadsIfNecessary() will determine which generation of GC to trigger, and may not actually trigger a GC.
+    // If a GC is triggered, since there would be a delay before the dead thread count is updated, clear the count and wait for
+    // it to reach the threshold again. If a GC would not be triggered, the count is still cleared here to prevent waking up the
+    // finalizer thread to do the work in TriggerGCForDeadThreadsIfNecessary() for every dead thread.
+    m_DeadThreadCountForGCTrigger = 0;
+    m_TriggerGCForDeadThreads = true;
+    FinalizerThread::EnableFinalization();
+}
+
+void ThreadStore::DecrementDeadThreadCountForGCTrigger()
+{
+    CONTRACTL {
+        NOTHROW;
+        GC_NOTRIGGER;
+    }
+    CONTRACTL_END;
+
+    // Although all increments and decrements are usually done inside a lock, that is not sufficient to synchronize with a
+    // background GC thread resetting this value, hence the interlocked operation.
+    if (FastInterlockDecrement(&m_DeadThreadCountForGCTrigger) < 0)
+    {
+        m_DeadThreadCountForGCTrigger = 0;
+    }
+}
+
+void ThreadStore::OnMaxGenerationGCStarted()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    // A dead thread may contribute to triggering a GC at most once. After a max-generation GC occurs, if some dead thread
+    // objects are still reachable due to references to the thread objects, they will not contribute to triggering a GC again.
+    // Synchronize the store with increment/decrement operations occurring on different threads, and make the change visible to
+    // other threads in order to prevent unnecessary GC triggers.
+    FastInterlockExchange(&m_DeadThreadCountForGCTrigger, 0);
+}
+
+bool ThreadStore::ShouldTriggerGCForDeadThreads()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    return m_TriggerGCForDeadThreads;
+}
+
+void ThreadStore::TriggerGCForDeadThreadsIfNecessary()
+{
+    CONTRACTL {
+        THROWS;
+        GC_TRIGGERS;
+    }
+    CONTRACTL_END;
+
+    if (!m_TriggerGCForDeadThreads)
+    {
+        return;
+    }
+    m_TriggerGCForDeadThreads = false;
+
+    if (g_fEEShutDown)
+    {
+        // Not safe to touch CLR state
+        return;
+    }
+
+    unsigned gcGenerationToTrigger = 0;
+    IGCHeap *gcHeap = GCHeapUtilities::GetGCHeap();
+    _ASSERTE(gcHeap != nullptr);
+    SIZE_T generationCountThreshold = static_cast<SIZE_T>(s_DeadThreadCountThresholdForGCTrigger) / 2;
+    unsigned maxGeneration = gcHeap->GetMaxGeneration();
+    if (!s_DeadThreadGenerationCounts)
+    {
+        // initialize this field on first use with an entry for every table.
+        s_DeadThreadGenerationCounts = new (nothrow) SIZE_T[maxGeneration + 1];
+        if (!s_DeadThreadGenerationCounts)
+        {
+            return;
+        }
+    }
+
+    memset(s_DeadThreadGenerationCounts, 0, sizeof(SIZE_T) * (maxGeneration + 1));
+    {
+        ThreadStoreLockHolder threadStoreLockHolder;
+        GCX_COOP();
+
+        // Determine the generation for which to trigger a GC. Iterate over all dead threads that have not yet been considered
+        // for triggering a GC and see how many are in which generations.
+        for (Thread *thread = ThreadStore::GetAllThreadList(NULL, Thread::TS_Dead, Thread::TS_Dead);
+            thread != nullptr;
+            thread = ThreadStore::GetAllThreadList(thread, Thread::TS_Dead, Thread::TS_Dead))
+        {
+            if (thread->HasDeadThreadBeenConsideredForGCTrigger())
+            {
+                continue;
+            }
+
+            Object *exposedObject = OBJECTREFToObject(thread->GetExposedObjectRaw());
+            if (exposedObject == nullptr)
+            {
+                continue;
+            }
+
+            unsigned exposedObjectGeneration = gcHeap->WhichGeneration(exposedObject);
+            SIZE_T newDeadThreadGenerationCount = ++s_DeadThreadGenerationCounts[exposedObjectGeneration];
+            if (exposedObjectGeneration > gcGenerationToTrigger && newDeadThreadGenerationCount >= generationCountThreshold)
+            {
+                gcGenerationToTrigger = exposedObjectGeneration;
+                if (gcGenerationToTrigger >= maxGeneration)
+                {
+                    break;
+                }
+            }
+        }
+
+        // Make sure that enough time has elapsed since the last GC of the desired generation. We don't want to trigger GCs
+        // based on this heuristic too often. Give it some time to let the memory pressure trigger GCs automatically, and only
+        // if it doesn't in the given time, this heuristic may kick in to trigger a GC.
+        SIZE_T gcLastMilliseconds = gcHeap->GetLastGCStartTime(gcGenerationToTrigger);
+        SIZE_T gcNowMilliseconds = gcHeap->GetNow();
+        if (gcNowMilliseconds - gcLastMilliseconds < s_DeadThreadGCTriggerPeriodMilliseconds)
+        {
+            return;
+        }
+
+        // For threads whose exposed objects are in the generation of GC that will be triggered or in a lower GC generation,
+        // mark them as having contributed to a GC trigger to prevent redundant GC triggers
+        for (Thread *thread = ThreadStore::GetAllThreadList(NULL, Thread::TS_Dead, Thread::TS_Dead);
+            thread != nullptr;
+            thread = ThreadStore::GetAllThreadList(thread, Thread::TS_Dead, Thread::TS_Dead))
+        {
+            if (thread->HasDeadThreadBeenConsideredForGCTrigger())
+            {
+                continue;
+            }
+
+            Object *exposedObject = OBJECTREFToObject(thread->GetExposedObjectRaw());
+            if (exposedObject == nullptr)
+            {
+                continue;
+            }
+
+            if (gcGenerationToTrigger < maxGeneration &&
+                gcHeap->WhichGeneration(exposedObject) > gcGenerationToTrigger)
+            {
+                continue;
+            }
+
+            thread->SetHasDeadThreadBeenConsideredForGCTrigger();
+        }
+    } // ThreadStoreLockHolder, GCX_COOP()
+
+    GCHeapUtilities::GetGCHeap()->GarbageCollect(gcGenerationToTrigger, FALSE, collection_non_blocking);
+}
+
 #endif // #ifndef DACCESS_COMPILE
 
 
@@ -6522,7 +5637,6 @@ Thread *ThreadStore::GetAllThreadList(Thread *cursor, ULONG mask, ULONG bits)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     SUPPORTS_DAC;
@@ -6552,7 +5666,6 @@ Thread *ThreadStore::GetThreadList(Thread *cursor)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     SUPPORTS_DAC;
@@ -6573,7 +5686,6 @@ Thread::ThreadState Thread::GetSnapshotState()
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END;
@@ -6728,8 +5840,8 @@ Retry:
         if (cur->m_State & Thread::TS_DebugSuspendPending)
             cntReturn++;
 
-        if (cur->m_State & Thread::TS_UserSuspendPending)
-            cntReturn++;
+        // CoreCLR does not support user-requested thread suspension
+        _ASSERTE(!(cur->m_State & Thread::TS_UserSuspendPending));
 
         if (cur->m_TraceCallCount > 0)
             cntReturn++;
@@ -6794,49 +5906,35 @@ Retry:
 
 #endif // _DEBUG
 
-void Thread::HandleThreadInterrupt (BOOL fWaitForADUnload)
+void Thread::HandleThreadInterrupt ()
 {
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     // If we're waiting for shutdown, we don't want to abort/interrupt this thread
     if (HasThreadStateNC(Thread::TSNC_BlockedForShutdown))
         return;
 
-    BEGIN_SO_INTOLERANT_CODE(this);
-
     if ((m_UserInterrupt & TI_Abort) != 0)
     {
-        // If the thread is waiting for AD unload to finish, and the thread is interrupted,
-        // we can start aborting.
-        HandleThreadAbort(fWaitForADUnload);
+        HandleThreadAbort();
     }
     if ((m_UserInterrupt & TI_Interrupt) != 0)
     {
-        if (ReadyForInterrupt())
-        {
-            ResetThreadState ((ThreadState)(TS_Interrupted | TS_Interruptible));
-            FastInterlockAnd ((DWORD*)&m_UserInterrupt, ~TI_Interrupt);
+        ResetThreadState ((ThreadState)(TS_Interrupted | TS_Interruptible));
+        FastInterlockAnd ((DWORD*)&m_UserInterrupt, ~TI_Interrupt);
 
-#ifdef _DEBUG
-            AddFiberInfo(ThreadTrackInfo_Abort);
-#endif
-
-            COMPlusThrow(kThreadInterruptedException);
-        }
+        COMPlusThrow(kThreadInterruptedException);
     }
-    END_SO_INTOLERANT_CODE;
 }
 
 #ifdef _DEBUG
-#define MAXSTACKBYTES (2 * PAGE_SIZE)
+#define MAXSTACKBYTES (2 * GetOsPageSize())
 void CleanStackForFastGCStress ()
 {
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -6853,25 +5951,15 @@ void CleanStackForFastGCStress ()
 
 void Thread::ObjectRefFlush(Thread* thread)
 {
+    // this is debug only code, so no need to validate
+    STATIC_CONTRACT_NOTHROW;
+    STATIC_CONTRACT_GC_NOTRIGGER;
+    STATIC_CONTRACT_ENTRY_POINT;
 
-    BEGIN_PRESERVE_LAST_ERROR;
-
-    // The constructor and destructor of AutoCleanupSONotMainlineHolder (allocated by SO_NOT_MAINLINE_FUNCTION below)
-    // may trash the last error, so we need to save and restore last error here.  Also, we need to add a scope here
-    // because we can't let the destructor run after we call SetLastError().
-    {
-        // this is debug only code, so no need to validate
-        STATIC_CONTRACT_NOTHROW;
-        STATIC_CONTRACT_GC_NOTRIGGER;
-        STATIC_CONTRACT_ENTRY_POINT;
-
-        _ASSERTE(thread->PreemptiveGCDisabled());  // Should have been in managed code
-        memset(thread->dangerousObjRefs, 0, sizeof(thread->dangerousObjRefs));
-        thread->m_allObjRefEntriesBad = FALSE;
-        CLEANSTACKFORFASTGCSTRESS ();
-    }
-
-    END_PRESERVE_LAST_ERROR;
+    _ASSERTE(thread->PreemptiveGCDisabled());  // Should have been in managed code
+    memset(thread->dangerousObjRefs, 0, sizeof(thread->dangerousObjRefs));
+    thread->m_allObjRefEntriesBad = FALSE;
+    CLEANSTACKFORFASTGCSTRESS ();
 }
 #endif
 
@@ -7142,7 +6230,6 @@ BOOL Thread::UniqueStack(void* stackStart)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_NOT_MAINLINE;
     }
     CONTRACTL_END;
 
@@ -7272,7 +6359,6 @@ void * Thread::GetStackLowerBound()
     // Called during fiber switch.  Can not have non-static contract.
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_SO_TOLERANT;
 
  #ifndef FEATURE_PAL
    MEMORY_BASIC_INFORMATION lowerBoundMemInfo;
@@ -7309,7 +6395,6 @@ void *Thread::GetStackUpperBound()
     // Called during fiber switch.  Can not have non-static contract.
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     return ClrTeb::GetStackBase();
 }
@@ -7320,7 +6405,6 @@ BOOL Thread::SetStackLimits(SetStackLimitScope scope)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -7334,11 +6418,39 @@ BOOL Thread::SetStackLimits(SetStackLimitScope scope)
             return FALSE;
         }
 
-        // Compute the limit used by EnsureSufficientExecutionStack and cache it on the thread. The limit
-        // is currently set at 50% of the stack, which should be sufficient to allow the average Framework
-        // function to run, and to allow us to throw and dispatch an exception up a reasonable call chain.
-        m_CacheStackSufficientExecutionLimit = reinterpret_cast<UINT_PTR>(m_CacheStackBase) - 
-            (reinterpret_cast<UINT_PTR>(m_CacheStackBase) - reinterpret_cast<UINT_PTR>(m_CacheStackLimit)) / 2;
+        // Compute the limit used by EnsureSufficientExecutionStack and cache it on the thread. This minimum stack size should
+        // be sufficient to allow a typical non-recursive call chain to execute, including potential exception handling and
+        // garbage collection. Used for probing for available stack space through RuntimeImports.EnsureSufficientExecutionStack,
+        // among other things.
+#ifdef BIT64
+        const UINT_PTR MinExecutionStackSize = 128 * 1024;
+#else // !BIT64
+        const UINT_PTR MinExecutionStackSize = 64 * 1024;
+#endif // BIT64
+        _ASSERTE(m_CacheStackBase >= m_CacheStackLimit);
+        if ((reinterpret_cast<UINT_PTR>(m_CacheStackBase) - reinterpret_cast<UINT_PTR>(m_CacheStackLimit)) >
+            MinExecutionStackSize)
+        {
+            m_CacheStackSufficientExecutionLimit = reinterpret_cast<UINT_PTR>(m_CacheStackLimit) + MinExecutionStackSize;
+        }
+        else
+        {
+            m_CacheStackSufficientExecutionLimit = reinterpret_cast<UINT_PTR>(m_CacheStackBase);
+        }
+
+        // Compute the limit used by CheckCanUseStackAllocand cache it on the thread. This minimum stack size should
+        // be sufficient to avoid all significant risk of a moderate size stack alloc interfering with application behavior
+        const UINT_PTR StackAllocNonRiskyExecutionStackSize = 512 * 1024;
+        _ASSERTE(m_CacheStackBase >= m_CacheStackLimit);
+        if ((reinterpret_cast<UINT_PTR>(m_CacheStackBase) - reinterpret_cast<UINT_PTR>(m_CacheStackLimit)) >
+            StackAllocNonRiskyExecutionStackSize)
+        {
+            m_CacheStackStackAllocNonRiskyExecutionLimit = reinterpret_cast<UINT_PTR>(m_CacheStackLimit) + StackAllocNonRiskyExecutionStackSize;
+        }
+        else
+        {
+            m_CacheStackStackAllocNonRiskyExecutionLimit = reinterpret_cast<UINT_PTR>(m_CacheStackBase);
+        }
     }
 
     // Ensure that we've setup the stack guarantee properly before we cache the stack limits
@@ -7377,7 +6489,6 @@ HRESULT Thread::CLRSetThreadStackGuarantee(SetThreadStackGuaranteeScope fScope)
     {
         WRAPPER(NOTHROW);
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -7390,8 +6501,7 @@ HRESULT Thread::CLRSetThreadStackGuarantee(SetThreadStackGuaranteeScope fScope)
         ULONG uGuardSize = SIZEOF_DEFAULT_STACK_GUARANTEE;
         int   EXTRA_PAGES = 0;
 #if defined(_WIN64)
-#if defined(_TARGET_AMD64_)
-        // AMD64 Free Build EH Stack Stats:
+        // Free Build EH Stack Stats:
         // --------------------------------
         // currently the maximum stack usage we'll face while handling a SO includes:
         //      4.3k for the OS (kernel32!RaiseException, Rtl EH dispatch code, RtlUnwindEx [second pass])
@@ -7403,51 +6513,29 @@ HRESULT Thread::CLRSetThreadStackGuarantee(SetThreadStackGuaranteeScope fScope)
         //
         // -plus we might need some more for debugger EH dispatch, Watson, etc...
         // -also need to take into account that we can lose up to 1 page of the guard region
-        // -additionally, we need to provide some region to hosts to allow for lock aquisition in a hosted scenario
+        // -additionally, we need to provide some region to hosts to allow for lock acquisition in a hosted scenario
         //
         EXTRA_PAGES = 3;
         INDEBUG(EXTRA_PAGES += 1);
 
-#endif // _TARGET_AMD64_
-
         int ThreadGuardPages = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_ThreadGuardPages);
         if (ThreadGuardPages == 0)
         {
-            uGuardSize += (EXTRA_PAGES * PAGE_SIZE);
+            uGuardSize += (EXTRA_PAGES * GetOsPageSize());
         }
         else
         {
-            uGuardSize += (ThreadGuardPages * PAGE_SIZE);
+            uGuardSize += (ThreadGuardPages * GetOsPageSize());
         }
 
 #else // _WIN64
 #ifdef _DEBUG
-        uGuardSize += (1 * PAGE_SIZE);    // one extra page for debug infrastructure
+        uGuardSize += (1 * GetOsPageSize());    // one extra page for debug infrastructure
 #endif // _DEBUG
 #endif // _WIN64
 
         LOG((LF_EH, LL_INFO10000, "STACKOVERFLOW: setting thread stack guarantee to 0x%x\n", uGuardSize));
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        if (CorHost2::GetHostTaskManager())
-        {
-            HRESULT hr;
-            ULONG uCurrentGuarantee = 0;
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-
-            // First, we'll see what the current guard size is.
-            hr = CorHost2::GetHostTaskManager()->GetStackGuarantee(&uCurrentGuarantee); 
-
-            // Call SetStackGuarantee only if the guard isn't big enough for us.
-            if (FAILED(hr) || uCurrentGuarantee < uGuardSize)
-                hr = CorHost2::GetHostTaskManager()->SetStackGuarantee(uGuardSize);
-                
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-
-            if (hr != E_NOTIMPL)
-                return hr;
-        }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
         if (!::SetThreadStackGuarantee(&uGuardSize))
         {
             return HRESULT_FROM_GetLastErrorNA();
@@ -7479,21 +6567,20 @@ UINT_PTR Thread::GetLastNormalStackAddress(UINT_PTR StackLimit)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
     UINT_PTR cbStackGuarantee = GetStackGuarantee();
 
     // Here we take the "hard guard region size", the "stack guarantee" and the "fault page" and add them
-    // all together.  Note that the "fault page" is the reason for the extra OS_PAGE_SIZE below.  The OS
+    // all together.  Note that the "fault page" is the reason for the extra GetOsPageSize() below.  The OS
     // will guarantee us a certain amount of stack remaining after a stack overflow.  This is called the
     // "stack guarantee".  But to do this, it has to fault on the page before that region as the app is
     // allowed to fault at the very end of that page.  So, as a result, the last normal stack address is
     // one page sooner.
     return StackLimit + (cbStackGuarantee 
 #ifndef FEATURE_PAL
-            + OS_PAGE_SIZE 
+            + GetOsPageSize()
 #endif // !FEATURE_PAL
             + HARD_GUARD_REGION_SIZE);
 }
@@ -7565,7 +6652,6 @@ static void DebugLogStackRegionMBIs(UINT_PTR uLowAddress, UINT_PTR uHighAddress)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -7594,7 +6680,7 @@ static void DebugLogStackRegionMBIs(UINT_PTR uLowAddress, UINT_PTR uHighAddress)
 
         UINT_PTR uRegionSize = uStartOfNextRegion - uStartOfThisRegion;
 
-        LOG((LF_EH, LL_INFO1000, "0x%p -> 0x%p (%d pg)  ", uStartOfThisRegion, uStartOfNextRegion - 1, uRegionSize / OS_PAGE_SIZE));
+        LOG((LF_EH, LL_INFO1000, "0x%p -> 0x%p (%d pg)  ", uStartOfThisRegion, uStartOfNextRegion - 1, uRegionSize / GetOsPageSize()));
         DebugLogMBIFlags(meminfo.State, meminfo.Protect);
         LOG((LF_EH, LL_INFO1000, "\n"));
 
@@ -7611,7 +6697,6 @@ void Thread::DebugLogStackMBIs()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -7633,7 +6718,7 @@ void Thread::DebugLogStackMBIs()
     UINT_PTR uStackSize         = uStackBase - uStackLimit;
 
     LOG((LF_EH, LL_INFO1000, "----------------------------------------------------------------------\n"));
-    LOG((LF_EH, LL_INFO1000, "Stack Snapshot 0x%p -> 0x%p (%d pg)\n", uStackLimit, uStackBase, uStackSize / OS_PAGE_SIZE));
+    LOG((LF_EH, LL_INFO1000, "Stack Snapshot 0x%p -> 0x%p (%d pg)\n", uStackLimit, uStackBase, uStackSize / GetOsPageSize()));
     if (pThread)
     {
         LOG((LF_EH, LL_INFO1000, "Last normal addr: 0x%p\n", pThread->GetLastNormalStackAddress()));
@@ -7671,7 +6756,7 @@ BOOL Thread::IsSPBeyondLimit()
     return FALSE;
 }
 
-__declspec(noinline) void AllocateSomeStack(){
+NOINLINE void AllocateSomeStack(){
     LIMITED_METHOD_CONTRACT;
 #ifdef _TARGET_X86_
     const size_t size = 0x200;
@@ -7686,103 +6771,6 @@ __declspec(noinline) void AllocateSomeStack(){
     VolatileStore<INT8>(mem, 0);
 }
 
-
-/*
- * CommitThreadStack
- *
- * Commit the thread's entire stack. A thread's stack is usually only reserved memory, not committed. The OS will
- * commit more pages as the thread's stack grows. But, if the system is low on memory and disk space, its possible
- * that the OS will not have enough memory to grow the stack. That causes a stack overflow exception at very random
- * times, and the CLR can't handle that.
- *
- * Parameters:
- *  The Thread object for this thread, if there is one.  NULL otherwise.
- *
- * Returns:
- *  TRUE if the function succeeded, FALSE otherwise.
- */
-/*static*/
-BOOL Thread::CommitThreadStack(Thread* pThreadOptional)
-{
-
-#ifndef FEATURE_CORECLR
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    if (FAILED(CLRSetThreadStackGuarantee(STSGuarantee_Force)))
-        return FALSE;
-
-    if (g_pConfig->GetDisableCommitThreadStack() && (pThreadOptional == NULL || !pThreadOptional->HasThreadStateNC(TSNC_ForceStackCommit)))
-        return TRUE;
-
-
-    // This is a temporary fix for VSWhidbey 259155.  In CommitThreadStack() we determine the bounds of the
-    // region between the guard page and the hard guard region for a thread's stack and then commit that
-    // region.  Sometimes we cross a page boundary while calculating the bounds or doing the commit (in
-    // VirtualQuery or VirtualAlloc), such that the guard page is moved after we've already gotten it's
-    // location.  When that happens we commit too many pages and destroy the guard page.  To fix this we
-    // do a small stack allocation that ensures that we have enough stack space for all of the
-    // CommitThreadStack() work
-
-    AllocateSomeStack();
-
-    // Grab the info about the first region of the stack. First, we grab the region where we are now (&tmpMBI),
-    // then we use the allocation base of that to grab the first region.
-    MEMORY_BASIC_INFORMATION tmpMBI;
-    SIZE_T dwRes;
-
-    dwRes = ClrVirtualQuery((const void *)&tmpMBI, &tmpMBI, sizeof(MEMORY_BASIC_INFORMATION));
-
-    if (sizeof(MEMORY_BASIC_INFORMATION) != dwRes)
-    {
-        return FALSE;
-    }
-
-    dwRes = ClrVirtualQuery((const void *)((BYTE*)tmpMBI.AllocationBase + HARD_GUARD_REGION_SIZE), &tmpMBI, sizeof(MEMORY_BASIC_INFORMATION));
-
-    if (sizeof(MEMORY_BASIC_INFORMATION) != dwRes)
-    {
-        return FALSE;
-    }
-
-    // We commit the reserved part of the stack, if necessary, minus one page for the "hard" guard page.
-    if (tmpMBI.State == MEM_RESERVE)
-    {
-        // Note: we leave the "hard" guard region uncommitted.
-        void *base = (BYTE*)tmpMBI.AllocationBase + HARD_GUARD_REGION_SIZE;
-
-        // We are committing a page on stack.  If we call host for this operation,
-        // host needs to avoid adding it to the memory consumption.  Therefore
-        // we call into OS directly.
-#undef VirtualAlloc
-        void *p = VirtualAlloc(base,
-                               tmpMBI.RegionSize,
-                               MEM_COMMIT,
-                               PAGE_READWRITE);
-#define VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect) \
-        Dont_Use_VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect)
-
-        if (p != base )
-        {
-            DWORD err = GetLastError();
-            STRESS_LOG2(LF_EH, LL_ALWAYS,
-                        "Thread::CommitThreadStack: failed to commit stack for TID 0x%x with error 0x%x\n",
-                        ::GetCurrentThreadId(), err);
-
-            return FALSE;
-        }
-    }
-
-    INDEBUG(DebugLogStackMBIs());
-
-#endif 
-    return TRUE;
-}
-
 #ifndef FEATURE_PAL
 
 // static // private
@@ -7792,7 +6780,6 @@ BOOL Thread::DoesRegionContainGuardPage(UINT_PTR uLowAddress, UINT_PTR uHighAddr
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -7853,7 +6840,6 @@ BOOL Thread::DetermineIfGuardPagePresent()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -7897,101 +6883,6 @@ UINT_PTR Thread::GetLastNormalStackAddress()
     return GetLastNormalStackAddress((UINT_PTR)m_CacheStackLimit);
 }
 
-
-#ifdef FEATURE_STACK_PROBE
-/*
- * CanResetStackTo
- *
- * Given a target stack pointer, this function will tell us whether or not we could restore the guard page if we
- * unwound the stack that far.
- *
- * Parameters:
- *  stackPointer -- stack pointer that we want to try to reset the thread's stack up to.
- *
- * Returns:
- *  TRUE if there's enough room to reset the stack, false otherwise.
- */
-BOOL Thread::CanResetStackTo(LPCVOID stackPointer)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    // How much space between the given stack pointer and the first guard page?
-    //
-    // This must be signed since the stack pointer might be in the guard region,
-    // which is at a lower address than GetLastNormalStackAddress will return.
-    INT_PTR iStackSpaceLeft = (INT_PTR)stackPointer - GetLastNormalStackAddress();
-    
-    // We need to have enough space to call back into the EE from the handler, so we use the twice the entry point amount.
-    // We need enough to do work and enough that partway through that work we won't probe and COMPlusThrowSO.
-
-    const INT_PTR iStackSizeThreshold        = (ADJUST_PROBE(DEFAULT_ENTRY_PROBE_AMOUNT * 2) * OS_PAGE_SIZE);
-
-    if (iStackSpaceLeft > iStackSizeThreshold)
-    {
-        return TRUE;
-    }
-    else
-    {
-        return FALSE;
-    }
-}
-
-/*
- * IsStackSpaceAvailable
- *
- * Given a number of stack pages, this function will tell us whether or not we have that much space
- * before the top of the stack. If we are in the guard region we must be already handling an SO,
- * so we report how much space is left in the guard region
- *
- * Parameters:
- *  numPages -- the number of pages that we need.  This can be a fractional amount.
- *
- * Returns:
- *  TRUE if there's that many pages of stack available
- */
-BOOL Thread::IsStackSpaceAvailable(float numPages)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    // How much space between the current stack pointer and the first guard page?
-    //
-    // This must be signed since the stack pointer might be in the guard region,
-    // which is at a lower address than GetLastNormalStackAddress will return.
-    float iStackSpaceLeft = static_cast<float>((INT_PTR)GetCurrentSP() - (INT_PTR)GetLastNormalStackAddress());
-
-    // If we have access to the stack guarantee (either in the guard region or we've tripped the guard page), then
-    // use that.
-    if ((iStackSpaceLeft/OS_PAGE_SIZE) < numPages && !DetermineIfGuardPagePresent()) 
-    {    
-        UINT_PTR stackGuarantee = GetStackGuarantee();
-        // GetLastNormalStackAddress actually returns the 2nd to last stack page on the stack. We'll add that to our available
-        // amount of stack, in addition to any sort of stack guarantee we might have.
-        //
-        // All these values are OS supplied, and will never overflow. (If they do, that means the stack is on the order
-        // over GB, which isn't possible.
-        iStackSpaceLeft += stackGuarantee + OS_PAGE_SIZE;
-    }
-    if ((iStackSpaceLeft/OS_PAGE_SIZE) < numPages)
-    {
-        return FALSE;
-    }
-
-    return TRUE;
-}
-
-#endif // FEATURE_STACK_PROBE
 
 /*
  * GetStackGuarantee
@@ -8044,7 +6935,6 @@ BOOL Thread::MarkPageAsGuard(UINT_PTR uGuardPageBase)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -8090,13 +6980,9 @@ VOID Thread::RestoreGuardPage()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
-
-    // Need a hard SO probe here.
-    CONTRACT_VIOLATION(SOToleranceViolation);
 
     BOOL bStackGuarded = DetermineIfGuardPagePresent();
 
@@ -8119,13 +7005,13 @@ VOID Thread::RestoreGuardPage()
     // to change the size of the guard region, we'll just go ahead and protect the next page down from where we are
     // now. The guard page will get pushed forward again, just like normal, until the next stack overflow.
         approxStackPointer   = (UINT_PTR)GetCurrentSP();
-        guardPageBase        = (UINT_PTR)ALIGN_DOWN(approxStackPointer, OS_PAGE_SIZE) - OS_PAGE_SIZE;
+        guardPageBase        = (UINT_PTR)ALIGN_DOWN(approxStackPointer, GetOsPageSize()) - GetOsPageSize();
 
         // OS uses soft guard page to update the stack info in TEB.  If our guard page is not beyond the current stack, the TEB
         // will not be updated, and then OS's check of stack during exception will fail.
         if (approxStackPointer >= guardPageBase)
         {
-            guardPageBase -= OS_PAGE_SIZE;
+            guardPageBase -= GetOsPageSize();
         }
     // If we're currently "too close" to the page we want to mark as a guard then the call to VirtualProtect to set
     // PAGE_GUARD will fail, but it won't return an error. Therefore, we protect the page, then query it to make
@@ -8155,13 +7041,12 @@ VOID Thread::RestoreGuardPage()
             }
             else
             {
-                guardPageBase -= OS_PAGE_SIZE;
+                guardPageBase -= GetOsPageSize();
             }
         }
     }
 
     FinishSOWork();
-    //GetAppDomain()->EnableADUnloadWorker(EEPolicy::ADU_Rude);
 
     INDEBUG(DebugLogStackMBIs());
 
@@ -8251,18 +7136,20 @@ void Thread::FillRegDisplay(const PREGDISPLAY pRD, PT_CONTEXT pctx)
 }
 
 
-#if defined(DEBUG_REGDISPLAY) && !defined(_TARGET_X86_)
+#ifdef DEBUG_REGDISPLAY
 
 void CheckRegDisplaySP (REGDISPLAY *pRD)
 {
     if (pRD->SP && pRD->_pThread)
     {
+#ifndef NO_FIXED_STACK_LIMIT
         _ASSERTE(PTR_VOID(pRD->SP) >= pRD->_pThread->GetCachedStackLimit());
+#endif // NO_FIXED_STACK_LIMIT
         _ASSERTE(PTR_VOID(pRD->SP) <  pRD->_pThread->GetCachedStackBase());
     }
 }
 
-#endif // defined(DEBUG_REGDISPLAY) && !defined(_TARGET_X86_)
+#endif // DEBUG_REGDISPLAY
 
 //                      Trip Functions
 //                      ==============
@@ -8281,11 +7168,6 @@ void CommonTripThread()
     Thread  *thread = GetThread();
 
     thread->HandleThreadAbort ();
-
-    if (thread->IsYieldRequested())
-    {
-        __SwitchToThread(0, CALLER_LIMITS_SPINNING);
-    }
 
     if (thread->CatchAtSafePoint())
     {
@@ -8356,156 +7238,6 @@ bool Thread::GetDebugCantStop(void)
     return m_debuggerCantStop != 0;
 }
 
-
-//-----------------------------------------------------------------------------
-// Call w/a  wrapper.
-// We've already transitioned AppDomains here. This just places a 1st-pass filter to sniff
-// for catch-handler found callbacks for the debugger.
-//-----------------------------------------------------------------------------
-void MakeADCallDebuggerWrapper(
-    FPAPPDOMAINCALLBACK fpCallback,
-    CtxTransitionBaseArgs * args,
-    ContextTransitionFrame* pFrame)
-{
-    STATIC_CONTRACT_THROWS;
-    STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_MODE_ANY;
-
-    BYTE * pCatcherStackAddr = (BYTE*) pFrame;
-
-    struct Param : NotifyOfCHFFilterWrapperParam
-    {
-        FPAPPDOMAINCALLBACK fpCallback;
-        CtxTransitionBaseArgs *args;
-    } param;
-    param.pFrame = pCatcherStackAddr;
-    param.fpCallback = fpCallback;
-    param.args = args;
-
-    PAL_TRY(Param *, pParam, &param)
-    {
-        pParam->fpCallback(pParam->args);
-    }
-    PAL_EXCEPT_FILTER(AppDomainTransitionExceptionFilter)
-    {
-        // Should never reach here b/c handler should always continue search.
-        _ASSERTE(false);
-    }
-    PAL_ENDTRY
-}
-
-
-// Invoke a callback in another appdomain.
-// Caller should have checked that we're actually transitioning domains here.
-void MakeCallWithAppDomainTransition(
-    ADID TargetDomain,
-    FPAPPDOMAINCALLBACK fpCallback,
-    CtxTransitionBaseArgs * args)
-{
-    DEBUG_ASSURE_NO_RETURN_BEGIN(MAKECALL)
-
-    Thread*     _ctx_trans_pThread          = GetThread();
-    TESTHOOKCALL(EnteringAppDomain((TargetDomain.m_dwId)));     
-    AppDomainFromIDHolder pTargetDomain(TargetDomain, TRUE);
-    pTargetDomain.ThrowIfUnloaded();
-    _ASSERTE(_ctx_trans_pThread != NULL);
-    _ASSERTE(_ctx_trans_pThread->GetDomain()->GetId()!= TargetDomain);
-
-    bool        _ctx_trans_fRaiseNeeded     = false;
-    Exception* _ctx_trans_pTargetDomainException=NULL;                   \
-
-    FrameWithCookie<ContextTransitionFrame>  _ctx_trans_Frame;
-    ContextTransitionFrame* _ctx_trans_pFrame = &_ctx_trans_Frame;
-
-    _ctx_trans_pThread->EnterContextRestricted(
-        pTargetDomain->GetDefaultContext(),
-        _ctx_trans_pFrame);
-
-    pTargetDomain.Release();
-    args->pCtxFrame = _ctx_trans_pFrame;
-    TESTHOOKCALL(EnteredAppDomain((TargetDomain.m_dwId))); 
-    /* work around unreachable code warning */
-    EX_TRY
-    {
-        // Invoke the callback
-        if (CORDebuggerAttached())
-        {
-            // If a debugger is attached, do it through a wrapper that will sniff for CHF callbacks.
-            MakeADCallDebuggerWrapper(fpCallback, args, GET_CTX_TRANSITION_FRAME());
-        }
-        else
-        {
-            // If no debugger is attached, call directly.
-            fpCallback(args);
-        }
-    }
-    EX_CATCH
-    {
-        LOG((LF_EH|LF_APPDOMAIN, LL_INFO1000, "ENTER_DOMAIN(%s, %s, %d): exception in flight\n",
-            __FUNCTION__, __FILE__, __LINE__));
-
-        _ctx_trans_pTargetDomainException=EXTRACT_EXCEPTION();
-        _ctx_trans_fRaiseNeeded = true;
-    }
-    /* SwallowAllExceptions is fine because we don't get to this point */
-    /* unless fRaiseNeeded = true or no exception was thrown */
-    EX_END_CATCH(SwallowAllExceptions);
-    TESTHOOKCALL(LeavingAppDomain((TargetDomain.m_dwId)));     
-    if (_ctx_trans_fRaiseNeeded)
-    {
-        LOG((LF_EH, LL_INFO1000, "RaiseCrossContextException(%s, %s, %d)\n",
-            __FUNCTION__, __FILE__, __LINE__));
-        _ctx_trans_pThread->RaiseCrossContextException(_ctx_trans_pTargetDomainException,_ctx_trans_pFrame);
-    }
-
-    LOG((LF_APPDOMAIN, LL_INFO1000, "LEAVE_DOMAIN(%s, %s, %d)\n",
-            __FUNCTION__, __FILE__, __LINE__));
-
-    _ctx_trans_pThread->ReturnToContext(_ctx_trans_pFrame);
-
-#ifdef FEATURE_TESTHOOKS
-        TESTHOOKCALL(LeftAppDomain(TargetDomain.m_dwId));
-#endif
-    
-    DEBUG_ASSURE_NO_RETURN_END(MAKECALL)
-}
-
-
-#ifdef FEATURE_REMOTING
-void Thread::SetExposedContext(Context *c)
-{
-
-    // Set the ExposedContext ...
-
-    // Note that we use GetxxRaw() here to cover our bootstrap case
-    // for AppDomain proxy creation
-    // Leaving the exposed object NULL lets us create the default
-    // managed context just before we marshal a new AppDomain in
-    // RemotingServices::CreateProxyForDomain.
-
-    Thread* pThread = GetThread();
-    if (!pThread)
-        return;
-
-    CONTRACTL {
-        NOTHROW;
-        MODE_COOPERATIVE;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    if(m_ExposedObject != NULL) {
-        THREADBASEREF threadObj = (THREADBASEREF) ObjectFromHandle(m_ExposedObject);
-        if(threadObj != NULL)
-        if (!c)
-            threadObj->SetExposedContext(NULL);
-        else
-            threadObj->SetExposedContext(c->GetExposedObjectRaw());
-
-    }
-}
-#endif
-
 void Thread::InitContext()
 {
     CONTRACTL {
@@ -8515,19 +7247,9 @@ void Thread::InitContext()
     CONTRACTL_END;
 
     // this should only be called when initializing a thread
-    _ASSERTE(m_Context == NULL);
     _ASSERTE(m_pDomain == NULL);
     GCX_COOP_NO_THREAD_BROKEN();
-    m_Context = SystemDomain::System()->DefaultDomain()->GetDefaultContext();
-#ifdef FEATURE_REMOTING    
-    SetExposedContext(m_Context);
-#endif
-    m_pDomain = m_Context->GetDomain();
-    _ASSERTE(m_pDomain);
-    m_pDomain->ThreadEnter(this, NULL);
-
-    // Every thread starts in the default domain, so push it here.
-    PushDomain((ADID)DefaultADID);
+    m_pDomain = SystemDomain::System()->DefaultDomain();
 }
 
 void Thread::ClearContext()
@@ -8538,921 +7260,17 @@ void Thread::ClearContext()
     }
     CONTRACTL_END;
 
-    // if one is null, both must be
-    _ASSERTE(m_pDomain && m_Context || ! (m_pDomain && m_Context));
-
     if (!m_pDomain)
         return;
 
-    m_pDomain->ThreadExit(this, NULL);
-
     // must set exposed context to null first otherwise object verification
     // checks will fail AV when m_Context is null
-#ifdef FEATURE_REMOTING        
-    SetExposedContext(NULL);
-#endif
     m_pDomain = NULL;
 #ifdef FEATURE_COMINTEROP
     m_fDisableComObjectEagerCleanup = false;
 #endif //FEATURE_COMINTEROP
-    m_Context = NULL;
-    m_ADStack.ClearDomainStack();
 }
 
-
-void Thread::DoContextCallBack(ADID appDomain, Context *pContext, Context::ADCallBackFcnType pTarget, LPVOID args)
-{
-    //Do not deference pContext if it's not from the current appdomain
-
-#ifdef _DEBUG
-    TADDR espVal = (TADDR)GetCurrentSP();
-
-    LOG((LF_APPDOMAIN, LL_INFO100, "Thread::DoADCallBack Calling %p at esp %p in [%d]\n",
-            pTarget, espVal, appDomain.m_dwId));
-#endif
-    _ASSERTE(GetThread()->GetContext() != pContext);
-    Thread* pThread  = GetThread();
-
-    // Get the default context for the current domain as well as for the
-    // destination domain.
-    AppDomain*  pCurrDomain     = pThread->GetContext()->GetDomain();
-    Context*    pCurrDefCtx     = pCurrDomain->GetDefaultContext();
-    BOOL  bDefaultTargetCtx=FALSE;
-
-    {
-        AppDomainFromIDHolder ad(appDomain, TRUE);
-        ad.ThrowIfUnloaded();
-        bDefaultTargetCtx=(ad->GetDefaultContext()==pContext);
-    }
-
-    if (pCurrDefCtx == pThread->GetContext() && bDefaultTargetCtx)
-    {
-        ENTER_DOMAIN_ID(appDomain);
-        (pTarget)(args);
-        END_DOMAIN_TRANSITION;
-    }
-    else
-    {
-#ifdef FEATURE_REMOTING    
-        _ASSERTE(pContext->GetDomain()==::GetAppDomain());
-        Context::ADCallBackArgs callTgtArgs = {pTarget, args};
-        Context::CallBackInfo callBackInfo = {Context::ADTransition_callback, (void*) &callTgtArgs};
-        Context::RequestCallBack(appDomain,pContext, (void*) &callBackInfo);
-#else
-        UNREACHABLE();
-#endif
-    }
-    LOG((LF_APPDOMAIN, LL_INFO100, "Thread::DoADCallBack Done at esp %p\n", espVal));
-}
-
-
-void Thread::DoADCallBack(AppDomain* pDomain , Context::ADCallBackFcnType pTarget, LPVOID args, DWORD dwADV,
-                          BOOL fSetupEHAtTransition /* = TRUE */)
-{
-
-
-#ifdef _DEBUG
-    TADDR espVal = (TADDR)GetCurrentSP();
-
-    LOG((LF_APPDOMAIN, LL_INFO100, "Thread::DoADCallBack Calling %p at esp %p in [%d]\n",
-            pTarget, espVal, pDomain->GetId().m_dwId));
-#endif
-    Thread* pThread  = GetThread();
-
-    // Get the default context for the current domain as well as for the
-    // destination domain.
-    AppDomain*  pCurrDomain     = pThread->GetContext()->GetDomain();
-
-    if (pCurrDomain!=pDomain)
-    {
-        // use the target domain's default context as the target context
-        // so that the actual call to a transparent proxy would enter the object into the correct context.
-
-        BOOL fThrow = FALSE;
-
-#ifdef FEATURE_PAL
-        // FEATURE_PAL must setup EH at AD transition - the option to omit the setup
-        // is only for regular Windows builds. 
-        _ASSERTE(fSetupEHAtTransition);
-#endif // FEATURE_PAL
-        
-        LOG((LF_APPDOMAIN, LL_INFO10, "Thread::DoADCallBack - performing AD transition with%s EH at transition boundary.\n",
-            (fSetupEHAtTransition == FALSE)?"out":""));
-
-        if (fSetupEHAtTransition)
-        {
-            ENTER_DOMAIN_PTR(pDomain,dwADV)
-            {
-                (pTarget)(args);
-
-                // unloadBoundary is cleared by ReturnToContext, so get it now.
-                Frame* unloadBoundaryFrame = pThread->GetUnloadBoundaryFrame();
-                fThrow = pThread->ShouldChangeAbortToUnload(GET_CTX_TRANSITION_FRAME(), unloadBoundaryFrame);
-            }
-            END_DOMAIN_TRANSITION;
-        }
-#ifndef FEATURE_PAL
-        else
-        {
-            ENTER_DOMAIN_PTR_NO_EH_AT_TRANSITION(pDomain,dwADV)
-            {
-                (pTarget)(args);
-
-                // unloadBoundary is cleared by ReturnToContext, so get it now.
-                Frame* unloadBoundaryFrame = pThread->GetUnloadBoundaryFrame();
-                fThrow = pThread->ShouldChangeAbortToUnload(GET_CTX_TRANSITION_FRAME(), unloadBoundaryFrame);
-            }
-            END_DOMAIN_TRANSITION_NO_EH_AT_TRANSITION;
-        }
-#endif // !FEATURE_PAL
-
-        // if someone caught the abort before it got back out to the AD transition (like DispatchEx_xxx does)
-        // then need to turn the abort into an unload, as they're gonna keep seeing it anyway
-        if (fThrow)
-        {
-            LOG((LF_APPDOMAIN, LL_INFO10, "Thread::DoADCallBack turning abort into unload\n"));
-            COMPlusThrow(kAppDomainUnloadedException, W("Remoting_AppDomainUnloaded_ThreadUnwound"));
-        }
-    }
-    else
-    {
-#ifdef FEATURE_REMOTING
-        Context::ADCallBackArgs callTgtArgs = {pTarget, args};
-        Context::CallBackInfo callBackInfo = {Context::ADTransition_callback, (void*) &callTgtArgs};
-        Context::RequestCallBack(CURRENT_APPDOMAIN_ID, pCurrDomain->GetDefaultContext(), (void*) &callBackInfo);
-#else
-        UNREACHABLE();
-#endif
-    }
-    LOG((LF_APPDOMAIN, LL_INFO100, "Thread::DoADCallBack Done at esp %p\n", espVal));
-}
-
-void Thread::DoADCallBack(ADID appDomainID , Context::ADCallBackFcnType pTarget, LPVOID args, BOOL fSetupEHAtTransition /* = TRUE */)
-{
-
-
-#ifdef _DEBUG
-    TADDR espVal = (TADDR)GetCurrentSP();
-
-    LOG((LF_APPDOMAIN, LL_INFO100, "Thread::DoADCallBack Calling %p at esp %p in [%d]\n",
-            pTarget, espVal, appDomainID.m_dwId));
-#endif
-    Thread* pThread  = GetThread();
-
-    // Get the default context for the current domain as well as for the
-    // destination domain.
-    AppDomain*  pCurrDomain     = pThread->GetContext()->GetDomain();
-
-    if (pCurrDomain->GetId()!=appDomainID)
-    {
-        // use the target domain's default context as the target context
-        // so that the actual call to a transparent proxy would enter the object into the correct context.
-
-        BOOL fThrow = FALSE;
-
-#ifdef FEATURE_PAL
-        // FEATURE_PAL must setup EH at AD transition - the option to omit the setup
-        // is only for regular Windows builds. 
-        _ASSERTE(fSetupEHAtTransition);
-#endif // FEATURE_PAL
-
-        LOG((LF_APPDOMAIN, LL_INFO10, "Thread::DoADCallBack - performing AD transition with%s EH at transition boundary.\n",
-            (fSetupEHAtTransition == FALSE)?"out":""));
-
-        if (fSetupEHAtTransition)
-        {
-            ENTER_DOMAIN_ID(appDomainID)
-            {
-                (pTarget)(args);
-
-                // unloadBoundary is cleared by ReturnToContext, so get it now.
-                Frame* unloadBoundaryFrame = pThread->GetUnloadBoundaryFrame();
-                fThrow = pThread->ShouldChangeAbortToUnload(GET_CTX_TRANSITION_FRAME(), unloadBoundaryFrame);
-            }
-            END_DOMAIN_TRANSITION;
-        }
-#ifndef FEATURE_PAL
-        else
-        {
-            ENTER_DOMAIN_ID_NO_EH_AT_TRANSITION(appDomainID)
-            {
-                (pTarget)(args);
-
-                // unloadBoundary is cleared by ReturnToContext, so get it now.
-                Frame* unloadBoundaryFrame = pThread->GetUnloadBoundaryFrame();
-                fThrow = pThread->ShouldChangeAbortToUnload(GET_CTX_TRANSITION_FRAME(), unloadBoundaryFrame);
-            }
-            END_DOMAIN_TRANSITION_NO_EH_AT_TRANSITION;
-        }
-#endif // !FEATURE_PAL
-
-        // if someone caught the abort before it got back out to the AD transition (like DispatchEx_xxx does)
-        // then need to turn the abort into an unload, as they're gonna keep seeing it anyway
-        if (fThrow)
-        {
-            LOG((LF_APPDOMAIN, LL_INFO10, "Thread::DoADCallBack turning abort into unload\n"));
-            COMPlusThrow(kAppDomainUnloadedException, W("Remoting_AppDomainUnloaded_ThreadUnwound"));
-        }
-    }
-    else
-    {
-#ifdef FEATURE_REMOTING    
-        Context::ADCallBackArgs callTgtArgs = {pTarget, args};
-        Context::CallBackInfo callBackInfo = {Context::ADTransition_callback, (void*) &callTgtArgs};
-        Context::RequestCallBack(CURRENT_APPDOMAIN_ID, pCurrDomain->GetDefaultContext(), (void*) &callBackInfo);
-#else
-        UNREACHABLE();
-#endif
-    }
-    LOG((LF_APPDOMAIN, LL_INFO100, "Thread::DoADCallBack Done at esp %p\n", espVal));
-}
-
-void Thread::EnterContextRestricted(Context *pContext, ContextTransitionFrame *pFrame)
-{
-    CONTRACTL {
-        THROWS;
-        MODE_COOPERATIVE;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    _ASSERTE(GetThread() == this);
-    _ASSERTE(pContext);     // should never enter a null context
-    _ASSERTE(m_Context);    // should always have a current context
-
-    AppDomain *pPrevDomain = m_pDomain;
-    AppDomain *pDomain = pContext->GetDomain();
-    // and it should always have an AD set
-    _ASSERTE(pDomain);
-
-    if (m_pDomain != pDomain && !pDomain->CanThreadEnter(this))
-    {
-        pFrame->SetReturnContext(NULL);
-        COMPlusThrow(kAppDomainUnloadedException);
-    }
-
-    pFrame->SetReturnContext(m_Context);
-    pFrame->SetReturnExecutionContext(NULL);
-
-    if (pPrevDomain != pDomain)
-    {
-        pFrame->SetLockCount(m_dwBeginLockCount);
-        m_dwBeginLockCount = m_dwLockCount;
-#ifndef FEATURE_CORECLR
-        pFrame->SetCriticalRegionCount(m_dwBeginCriticalRegionCount);
-        m_dwBeginCriticalRegionCount = m_dwCriticalRegionCount;
-#endif // !FEATURE_CORECLR
-    }
-
-    if (m_Context == pContext) {
-        _ASSERTE(m_Context->GetDomain() == pContext->GetDomain());
-        return;
-    }
-
-    LOG((LF_APPDOMAIN, LL_INFO1000, "%sThread::EnterContext from (%p) [%d] (count %d)\n",
-            FinalizerThread::IsCurrentThreadFinalizer() ? "FT: " : "",
-            m_Context, m_Context->GetDomain()->GetId().m_dwId,
-            m_Context->GetDomain()->GetThreadEnterCount()));
-    LOG((LF_APPDOMAIN, LL_INFO1000, "                     into (%p) [%d] (count %d)\n", pContext,
-                pContext->GetDomain()->GetId().m_dwId,
-                pContext->GetDomain()->GetThreadEnterCount()));
-
-#ifdef _DEBUG_ADUNLOAD
-    printf("Thread::EnterContext %x from (%8.8x) [%d]\n", GetThreadId(), m_Context,
-        m_Context ? m_Context->GetDomain()->GetId() : -1);
-    printf("                     into (%8.8x) [%d] %S\n", pContext,
-                pContext->GetDomain()->GetId());
-#endif
-
-    CantStopHolder hCantStop;
-
-    bool fChangedDomains = m_pDomain != pDomain;
-    if (fChangedDomains)
-    {
-
-#ifdef FEATURE_STACK_PROBE
-        if (pDomain == SystemDomain::System()->DefaultDomain() &&
-            GetEEPolicy()->GetActionOnFailure(FAIL_StackOverflow) == eRudeUnloadAppDomain)
-        {
-            // Make sure default domain does not see SO.
-            // probe for our entry point amount and throw if not enough stack
-            RetailStackProbe(ADJUST_PROBE(DEFAULT_ENTRY_PROBE_AMOUNT*2), this);
-        }
-#endif
-
-        _ASSERTE(pFrame);
-
-        PushDomain(pDomain->GetId());
-        STRESS_LOG1(LF_APPDOMAIN, LL_INFO100000, "Entering into ADID=%d\n", pDomain->GetId().m_dwId);
-
-#ifndef FEATURE_CORECLR
-        //
-        // Push execution contexts (that could contain call context) into frame to avoid leaks
-        //
-
-        if (IsExposedObjectSet())
-        {
-            THREADBASEREF ref = (THREADBASEREF) ObjectFromHandle(m_ExposedObject);
-            _ASSERTE(ref != NULL);
-            if (ref->GetExecutionContext() != NULL)
-            {
-                pFrame->SetReturnExecutionContext(ref->GetExecutionContext());
-                ref->SetExecutionContext(NULL);
-            }
-        }
-#endif //!FEATURE_CORECLR
-
-        //
-        // Store the last thrown object in the ContextTransitionFrame before we null it out
-        // to prevent it from leaking into the domain we are transitionning into.
-        //
-        
-        pFrame->SetLastThrownObjectInParentContext(LastThrownObject());
-        SafeSetLastThrownObject(NULL);
-    }
-
-    m_Context = pContext;
-    pFrame->Push();
-
-#ifdef _DEBUG_ADUNLOAD
-    printf("Thread::EnterContext %x,%8.8x push? %d current frame is %8.8x\n", GetThreadId(), this, 1, GetFrame());
-#endif
-
-    if (fChangedDomains)
-    {
-        pDomain->ThreadEnter(this, pFrame);
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-        if (g_fEnableARM)
-        {
-            // Update previous AppDomain's count of processor usage by threads executing within it.
-            pPrevDomain->UpdateProcessorUsage(QueryThreadProcessorUsage());
-            FireEtwThreadDomainEnter((ULONGLONG)this, (ULONGLONG)pDomain, GetClrInstanceId());
-        }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
-        
-        // NULL out the Thread's pointer to the current ThreadLocalBlock. On the next
-        // access to thread static data, the Thread's pointer to the current ThreadLocalBlock
-        // will be updated correctly.
-        m_pThreadLocalBlock = NULL;
-
-        m_pDomain = pDomain;
-        SetAppDomain(m_pDomain);
-    }
-#ifdef FEATURE_REMOTING
-    SetExposedContext(pContext);
-#endif
-}
-
-// main difference between EnterContext and ReturnToContext is that are allowed to return
-// into a domain that is unloading but cannot enter a domain that is unloading
-void Thread::ReturnToContext(ContextTransitionFrame *pFrame)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-    _ASSERTE(GetThread() == this);
-
-    Context *pReturnContext = pFrame->GetReturnContext();
-    _ASSERTE(pReturnContext);
-
-    ADID pADOnStack;
-
-    AppDomain *pReturnDomain = pReturnContext->GetDomain();
-    AppDomain* pCurrentDomain = m_pDomain;
-
-    bool fChangedDomains = m_pDomain != pReturnDomain;
-
-    if (fChangedDomains)
-    {
-        if (HasLockInCurrentDomain())
-        {
-            if (GetAppDomain()->IsDefaultDomain() || // We should never orphan a lock in default domain.
-                !IsRudeAbort())                      // If rudeabort, managed backout may not be run.
-            {
-                // One would like to assert that this case never occurs, but
-                // a rude abort can easily leave unreachable locked objects,
-                // which we have to allow.
-                STRESS_LOG2(LF_SYNC, LL_INFO1000, "Locks are orphaned while exiting a domain (enter: %d, exit: %d)\n", m_dwBeginLockCount, m_dwLockCount);
-#ifdef _DEBUG
-            STRESS_LOG0 (LF_APPDOMAIN, LL_INFO10, "Thread::ReturnToContext Lock not released\n");
-#endif
-        }
-
-            AppDomain *pFromDomain = GetAppDomain();
-
-            // There is a race when EE Thread for a new thread is allocated in the place of the old EE Thread.
-            // The lock accounting will get confused if there are orphaned locks. Set the flag that allows us to relax few asserts.
-            SetThreadStateNC(TSNC_UnbalancedLocks);
-            pFromDomain->SetOrphanedLocks();
-
-            if (!pFromDomain->IsDefaultDomain())
-            {
-                // If a Thread orphaned a lock, we don't want a host to recycle the Thread object,
-                // since the lock count is reset when the thread leaves this domain.
-                SetThreadStateNC(TSNC_CannotRecycle);
-            }
-
-            // It is a disaster if a lock leaks in default domain.  We can never unload default domain.
-            // _ASSERTE (!pFromDomain->IsDefaultDomain());
-            EPolicyAction action = GetEEPolicy()->GetActionOnFailure(FAIL_OrphanedLock);
-            switch (action)
-            {
-            case eUnloadAppDomain:
-                if (!pFromDomain->IsDefaultDomain())
-                {
-                    pFromDomain->EnableADUnloadWorker(EEPolicy::ADU_Safe);
-                }
-                break;
-            case eRudeUnloadAppDomain:
-                if (!pFromDomain->IsDefaultDomain())
-                {
-                    pFromDomain->EnableADUnloadWorker(EEPolicy::ADU_Rude);
-                }
-                break;
-            case eExitProcess:
-            case eFastExitProcess:
-            case eRudeExitProcess:
-            case eDisableRuntime:
-                GetEEPolicy()->HandleExitProcessFromEscalation(action,HOST_E_EXITPROCESS_ADUNLOAD);
-                break;
-            default:
-                break;
-            }
-        }
-
-        m_dwLockCount = m_dwBeginLockCount;
-        m_dwBeginLockCount = pFrame->GetLockCount();
-#ifndef FEATURE_CORECLR
-        m_dwCriticalRegionCount = m_dwBeginCriticalRegionCount;
-        m_dwBeginCriticalRegionCount = pFrame->GetCriticalRegionCount();
-#endif // !FEATURE_CORECLR
-
-    }
-
-    if (m_Context == pReturnContext)
-    {
-        _ASSERTE(m_Context->GetDomain() == pReturnContext->GetDomain());
-        return;
-    }
-
-    GCX_COOP();
-
-    LOG((LF_APPDOMAIN, LL_INFO1000, "%sThread::ReturnToContext from (%p) [%d] (count %d)\n",
-                FinalizerThread::IsCurrentThreadFinalizer() ? "FT: " : "",
-                m_Context, m_Context->GetDomain()->GetId().m_dwId,
-                m_Context->GetDomain()->GetThreadEnterCount()));
-    LOG((LF_APPDOMAIN, LL_INFO1000, "                        into (%p) [%d] (count %d)\n", pReturnContext,
-                pReturnContext->GetDomain()->GetId().m_dwId,
-                pReturnContext->GetDomain()->GetThreadEnterCount()));
-
-#ifdef _DEBUG_ADUNLOAD
-    printf("Thread::ReturnToContext %x from (%p) [%d]\n", GetThreadId(), m_Context,
-                m_Context->GetDomain()->GetId(),
-    printf("                        into (%p) [%d]\n", pReturnContext,
-                pReturnContext->GetDomain()->GetId(),
-                m_Context->GetDomain()->GetThreadEnterCount());
-#endif
-
-    CantStopHolder hCantStop;
-
-    m_Context = pReturnContext;
-#ifdef FEATURE_REMOTING        
-    SetExposedContext(pReturnContext);
-#endif
-
-    if (fChangedDomains)
-    {
-        pADOnStack = m_ADStack.PopDomain();
-        STRESS_LOG2(LF_APPDOMAIN, LL_INFO100000, "Returning from %d to %d\n", pADOnStack.m_dwId, pReturnContext->GetDomain()->GetId().m_dwId);
-
-        _ASSERTE(pADOnStack == m_pDomain->GetId());
-
-        _ASSERTE(pFrame);
-        //_ASSERTE(!fLinkFrame || pThread->GetFrame() == pFrame);
-
-        FlushIBCInfo();
-
-        // NULL out the Thread's pointer to the current ThreadLocalBlock. On the next
-        // access to thread static data, the Thread's pointer to the current ThreadLocalBlock
-        // will be updated correctly.
-        m_pThreadLocalBlock = NULL;
-
-        m_pDomain = pReturnDomain;
-        SetAppDomain(pReturnDomain);
-
-        if (pFrame == m_pUnloadBoundaryFrame)
-        {
-                m_pUnloadBoundaryFrame = NULL;      
-            if (IsAbortRequested())
-            {
-                EEResetAbort(TAR_ADUnload);
-            }
-            ResetBeginAbortedForADUnload();
-        }
-
-        // Restore the last thrown object to what it was before the AD transition. Note that if
-        // an exception was thrown out of the AD we transitionned into, it will be raised in
-        // RaiseCrossContextException and the EH system will store it as the last thrown 
-        // object if it gets handled by an EX_CATCH.
-        SafeSetLastThrownObject(pFrame->GetLastThrownObjectInParentContext());
-    }
-
-    pFrame->Pop();
-
-    if (fChangedDomains)
-    {
-#ifndef FEATURE_CORECLR
-        //
-        // Pop execution contexts (could contain call context) from frame if applicable
-        //
-
-        if (IsExposedObjectSet())
-        {
-            THREADBASEREF ref = (THREADBASEREF) ObjectFromHandle(m_ExposedObject);
-            _ASSERTE(ref != NULL);
-            ref->SetExecutionContext(pFrame->GetReturnExecutionContext());
-        }
-#endif //!FEATURE_CORECLR
-
-        // Do this last so that thread is not labeled as out of the domain until all cleanup is done.
-        ADID adid=pCurrentDomain->GetId();
-        pCurrentDomain->ThreadExit(this, pFrame);
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-        if (g_fEnableARM)
-        {
-            // Update the old AppDomain's count of processor usage by threads executing within it.
-            pCurrentDomain->UpdateProcessorUsage(QueryThreadProcessorUsage());
-            FireEtwThreadDomainEnter((ULONGLONG)this, (ULONGLONG)pReturnDomain, GetClrInstanceId());
-        }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    }
-
-    if (fChangedDomains && IsAbortRequested() && HasLockInCurrentDomain())
-    {
-        EPolicyAction action = GetEEPolicy()->GetActionOnFailure(FAIL_CriticalResource);
-        // It is a disaster if a lock leaks in default domain.  We can never unload default domain.
-        // _ASSERTE (action == eThrowException || !pReturnDomain->IsDefaultDomain());
-        switch (action)
-        {
-        case eUnloadAppDomain:
-            if (!pReturnDomain->IsDefaultDomain())
-            {
-                pReturnDomain->EnableADUnloadWorker(EEPolicy::ADU_Safe);
-            }
-            break;
-        case eRudeUnloadAppDomain:
-            if (!pReturnDomain->IsDefaultDomain())
-            {
-                pReturnDomain->EnableADUnloadWorker(EEPolicy::ADU_Rude);
-            }
-            break;
-        case eExitProcess:
-        case eFastExitProcess:
-        case eRudeExitProcess:
-        case eDisableRuntime:
-            GetEEPolicy()->HandleExitProcessFromEscalation(action,HOST_E_EXITPROCESS_ADUNLOAD);
-            break;
-        default:
-            break;
-        }
-    }
-
-#ifdef _DEBUG_ADUNLOAD
-    printf("Thread::ReturnToContext %x,%8.8x pop? %d current frame is %8.8x\n", GetThreadId(), this, 1, GetFrame());
-#endif
-
-    return;
-}
-
-
-void Thread::ReturnToContextAndThrow(ContextTransitionFrame* pFrame, EEException* pEx, BOOL* pContextSwitched)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        PRECONDITION(CheckPointer(pContextSwitched));
-    }
-    CONTRACTL_END;
-#ifdef FEATURE_TESTHOOKS
-    ADID adid=GetAppDomain()->GetId();
-#endif
-    ReturnToContext(pFrame);
-    *pContextSwitched=TRUE;
-#ifdef FEATURE_TESTHOOKS
-        TESTHOOKCALL(LeftAppDomain(adid.m_dwId));
-#endif
-    
-    COMPlusThrow(CLRException::GetThrowableFromException(pEx));
-}
-
-void Thread::ReturnToContextAndOOM(ContextTransitionFrame* pFrame)
-{
-
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-    }
-    CONTRACTL_END;
-#ifdef FEATURE_TESTHOOKS
-    ADID adid=GetAppDomain()->GetId();
-#endif
-
-    ReturnToContext(pFrame);
-#ifdef FEATURE_TESTHOOKS
-        TESTHOOKCALL(LeftAppDomain(adid.m_dwId));
-#endif
-    
-    COMPlusThrowOM();
-}
-
-
-#ifdef FEATURE_CORECLR
-
-//---------------------------------------------------------------------------------------
-// Allocates an agile CrossAppDomainMarshaledException whose ToString() and ErrorCode
-// matches the original exception.
-//
-// This is our "remoting" story for exceptions that leak across appdomains in Telesto.
-//---------------------------------------------------------------------------------------
-static OBJECTREF WrapThrowableInCrossAppDomainMarshaledException(OBJECTREF pOriginalThrowable)
-{
-    CONTRACTL
-    {
-        GC_TRIGGERS;
-        THROWS;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-    _ASSERTE(GetThread() != NULL);
-
-
-    struct _gc
-    {
-        OBJECTREF pOriginalThrowable;
-        OBJECTREF pThrowable;
-        STRINGREF pOriginalMessage;
-    }
-    prot;
-
-
-    memset(&prot, 0, sizeof(prot));
-
-    GCPROTECT_BEGIN(prot);
-    prot.pOriginalThrowable = pOriginalThrowable;
-    prot.pOriginalMessage   = GetExceptionMessage(prot.pOriginalThrowable);
-    HRESULT originalHResult = GetExceptionHResult(prot.pOriginalThrowable);
-
-    MethodTable *pMT = MscorlibBinder::GetClass(CLASS__CROSSAPPDOMAINMARSHALEDEXCEPTION);
-    prot.pThrowable = AllocateObject(pMT);
-
-    MethodDescCallSite exceptionCtor(METHOD__CROSSAPPDOMAINMARSHALEDEXCEPTION__STR_INT_CTOR);
-
-    ARG_SLOT args1[] = { 
-        ObjToArgSlot(prot.pThrowable),
-        ObjToArgSlot(prot.pOriginalMessage),
-        (ARG_SLOT)originalHResult,
-    };
-    exceptionCtor.Call(args1);
-
-#ifndef FEATURE_PAL
-    // Since, on CoreCLR, we dont have serialization of exceptions going across
-    // AD transition boundaries, we will copy over the bucket details to the 
-    // CrossAppDomainMarshalledException object from the original exception object 
-    // if it isnt a preallocated exception.
-    if (IsWatsonEnabled() && (!CLRException::IsPreallocatedExceptionObject(prot.pOriginalThrowable)))
-    {
-        // If the watson buckets are present, then copy them over.
-        // They maybe missing if the original throwable couldnt get them from Watson helper functions
-        // during SetupInitialThrowBucketDetails due to OOM.
-        if (((EXCEPTIONREF)prot.pOriginalThrowable)->AreWatsonBucketsPresent())
-        {
-            _ASSERTE(prot.pThrowable != NULL);
-            // Copy them to CrossADMarshalledException object
-            CopyWatsonBucketsBetweenThrowables(prot.pOriginalThrowable, prot.pThrowable);
-
-            // The exception object should now have the buckets inside it
-            _ASSERTE(((EXCEPTIONREF)prot.pThrowable)->AreWatsonBucketsPresent());
-        }
-    }
-#endif // !FEATURE_PAL
-
-    GCPROTECT_END(); //Prot
-
-
-    return prot.pThrowable;
-}
-
-
-
-#endif
-
-
-// for cases when marshaling is not needed
-// throws it is able to take a shortcut, otherwise just returns
-void Thread::RaiseCrossContextExceptionHelper(Exception* pEx, ContextTransitionFrame* pFrame)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-#ifndef FEATURE_PAL
-    // Ensure that IP for WatsonBucketing has been collected if the exception is preallocated.
-#ifdef _DEBUG
-
-#ifdef FEATURE_CORECLR
-    // On CoreCLR, Watson may not be enabled. Thus, we should
-    // skip this.
-    if (IsWatsonEnabled())
-#endif // FEATURE_CORECLR
-    {
-        if (CLRException::IsPreallocatedExceptionObject(CLRException::GetThrowableFromException(pEx)))
-        {
-            // If a preallocated exception escapes unhandled till the AD Transition boundary, then
-            // AppDomainTransitionExceptionFilter will capture the watson buckets and stick them
-            // in the UE Watson bucket tracker.
-            //
-            // This is done *only* for exceptions escaping AD transition boundaries that are NOT
-            // at the thread base.
-            PTR_EHWatsonBucketTracker pUEWatsonBucketTracker = GetThread()->GetExceptionState()->GetUEWatsonBucketTracker();
-            if(pUEWatsonBucketTracker->RetrieveWatsonBuckets() != NULL)
-            {
-                _ASSERTE(pUEWatsonBucketTracker->CapturedAtADTransition() || pUEWatsonBucketTracker->CapturedForThreadAbort());
-            }
-        }
-    }
-#endif // _DEBUG
-#endif // !FEATURE_PAL
-
-#ifdef FEATURE_TESTHOOKS
-    ADID adid=GetAppDomain()->GetId();
-#endif
-
-#define RETURNANDTHROWNEWEXCEPTION(pOldException, Type, ExArgs)                 \
-    {                                                                           \
-    Exception::Delete(pOldException);                                           \
-    SetLastThrownObject(NULL);                                                  \
-    ReturnToContext(pFrame);                                                    \
-    CONTRACT_VIOLATION(ThrowsViolation);                                        \
-    TESTHOOKCALL(LeftAppDomain(adid.m_dwId));                                   \
-    Type ex ExArgs;                                                             \
-    COMPlusThrow(CLRException::GetThrowableFromException(&ex));                 \
-    }
-
-#define RETURNANDRETHROW(ex)                                                    \
-    {                                                                           \
-        SafeSetLastThrownObject (NULL);                                         \
-        ReturnToContext(pFrame);                                                \
-        CONTRACT_VIOLATION(ThrowsViolation);                                    \
-        TESTHOOKCALL(LeftAppDomain(adid.m_dwId));                               \
-        PAL_CPP_THROW(Exception*,ex);                                           \
-    }
-
-    CANNOTTHROWCOMPLUSEXCEPTION(); //no exceptions until returning to context
-
-    Frame* pUnloadBoundary = GetUnloadBoundaryFrame();
-
-    LOG((LF_EH, LL_INFO100, "Exception crossed into another context.  Rethrowing in new context.\n"));
-
-
-    // will throw a kAppDomainUnloadedException if necessary
-    if (ShouldChangeAbortToUnload(pFrame, pUnloadBoundary))
-        RETURNANDTHROWNEWEXCEPTION(pEx,EEResourceException,(kAppDomainUnloadedException, W("Remoting_AppDomainUnloaded_ThreadUnwound")));
-
-    // Can't marshal return value from unloaded appdomain.  Haven't
-    // yet hit the boundary.  Throw a generic exception instead.
-    // ThreadAbort is more consistent with what goes on elsewhere --
-    // the AppDomainUnloaded is only introduced at the top-most boundary.
-    //
-
-    if (GetDomain() == SystemDomain::AppDomainBeingUnloaded()
-        && GetThread()!=SystemDomain::System()->GetUnloadingThread() &&
-            GetThread()!=FinalizerThread::GetFinalizerThread())
-    {
-        if (pUnloadBoundary)
-            RETURNANDTHROWNEWEXCEPTION(pEx,EEException,(kThreadAbortException))            
-        else
-            RETURNANDTHROWNEWEXCEPTION(pEx,EEResourceException,(kAppDomainUnloadedException, W("Remoting_AppDomainUnloaded_ThreadUnwound")));            
-    }
-
-    if (IsRudeAbort())
-        RETURNANDTHROWNEWEXCEPTION(pEx,EEException,(kThreadAbortException));            
-
-
-    // There are a few classes that have the potential to create
-    // infinite loops if we try to marshal them.  For ThreadAbort,
-    // ExecutionEngine, StackOverflow, and
-    // OutOfMemory, throw a new exception of the same type.
-    //
-    // <TODO>@NICE: We lose the inner stack trace.  A little better
-    // would be to at least check if the inner exceptions are
-    // all the same type as the outer.  They could be
-    // rethrown if this were true.</TODO>
-    //
-
-    if(pEx && !pEx->IsDomainBound())
-    {
-        RETURNANDRETHROW(pEx);
-    }
-#undef RETURNANDTHROWNEWEXCEPTION
-#undef RETURNANDRETHROW
-}
-
-Thread::RaiseCrossContextResult
-Thread::TryRaiseCrossContextException(Exception **ppExOrig,
-                                      Exception *pException,
-                                      RuntimeExceptionKind *pKind,
-                                      OBJECTREF *ppThrowable,
-                                      ORBLOBREF *pOrBlob)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        WRAPPER(GC_TRIGGERS);
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-    BOOL bIsClassInitException = FALSE;
-    RaiseCrossContextResult result = RaiseCrossContextSuccess;
-    int alreadyMarshaling = StartedMarshalingException();
- 
-    EX_TRY
-    {
-        bIsClassInitException = (pException->GetHR() == COR_E_TYPEINITIALIZATION);        
-
-        //just in case something throws
-        //!!!should be released before any call to ReturnToContext !!!
-        ExceptionHolder exception(*ppExOrig);
-        
-        if (IsExceptionOfType(kOutOfMemoryException, pException))
-            *pKind = kOutOfMemoryException;
-        else
-        if (IsExceptionOfType(kThreadAbortException, pException))
-            *pKind = kThreadAbortException;
-        else
-        if (IsExceptionOfType(kStackOverflowException, pException))
-            *pKind = kStackOverflowException;
-        else
-        if (alreadyMarshaling)
-        {
-            // If we started marshaling already, something went wrong
-            // This should only happen in case of busted ResourceManager
-            _ASSERTE(!"Already marshalling the exception for cross AD transition - perhaps ResourceManager issue?");
-
-            // ASK: Instead of throwing ExecutionEngineException from here, is there a better
-            // ResourceManager related exception that can be thrown instead? If none, can
-            // kContextMarshalException be thrown? Its obsolete but comes close to the usage
-            // context.
-            *pKind = kContextMarshalException;
-        }
-            
-        // Serialize the exception
-        if (*pKind == kLastException)
-        {
-            *ppThrowable = CLRException::GetThrowableFromException(exception);
-            _ASSERTE(*ppThrowable != NULL);
-
-#ifdef FEATURE_CORECLR
-            (*pOrBlob) = WrapThrowableInCrossAppDomainMarshaledException(*ppThrowable);
-#if CHECK_APP_DOMAIN_LEAKS 
-            (*pOrBlob)->SetAppDomainAgile();
-#endif //CHECK_APP_DOMAIN_LEAKS 
-#else
-            AppDomainHelper::MarshalObject(ppThrowable, pOrBlob);
-#endif //FEATURE_CORECLR
-        
-        }
-    }
-    EX_CATCH
-    {
-        // We got a new Exception in original domain
-        *ppExOrig = EXTRACT_EXCEPTION();
-        // Got ClassInitException while marshaling ClassInitException. Class is unusable. Do not attempt anymore.
-        if (bIsClassInitException && *ppExOrig && ((*ppExOrig)->GetHR() == COR_E_TYPEINITIALIZATION))
-            result = RaiseCrossContextClassInit;
-        else
-            result = RaiseCrossContextRetry;
-    }
-    EX_END_CATCH(SwallowAllExceptions);
-
-    FinishedMarshalingException();
-
-    return result;
-}
-
-// * pEx should be deleted before popping the frame, except for one case
-// * SafeSetLastThrownObject is called after pEx is deleted
 void DECLSPEC_NORETURN Thread::RaiseCrossContextException(Exception* pExOrig, ContextTransitionFrame* pFrame)
 {
     CONTRACTL
@@ -9462,353 +7280,24 @@ void DECLSPEC_NORETURN Thread::RaiseCrossContextException(Exception* pExOrig, Co
     }
     CONTRACTL_END;
 
-    // <TODO>@TODO: Set the IsInUnmanagedHandler bits (aka IgnoreThreadAbort bits) appropriately.</TODO>
-    
-    GCX_COOP();
-
-    // These are the only data transfered between the appdomains
-    // Make sure that anything added here is appdomain agile
-    RuntimeExceptionKind kind = kLastException;
-    RaiseCrossContextResult result = RaiseCrossContextSuccess;
-    ORBLOBREF orBlob = NULL;
-
-    // Get the corruption severity for the exception caught at AppDomain transition boundary.
-#ifdef FEATURE_CORRUPTING_EXCEPTIONS
-    CorruptionSeverity severity = GetThread()->GetExceptionState()->GetLastActiveExceptionCorruptionSeverity();
-    if (severity == NotSet)
-    {
-        // No severity set at this point implies the exception was not corrupting
-        severity = NotCorrupting;
-    }
-#endif // FEATURE_CORRUPTING_EXCEPTIONS
-
-#ifdef FEATURE_TESTHOOKS
-    ADID adid=GetAppDomain()->GetId();
-#endif
-
-#define MAX_RAISE_RETRY_COUNT  256
-
-    DWORD dwRaiseRetryCount;
-    for (dwRaiseRetryCount = 0; dwRaiseRetryCount < MAX_RAISE_RETRY_COUNT; dwRaiseRetryCount++)
-    {
-        // pEx is NULL means that the exception is CLRLastThrownObjectException
-        CLRLastThrownObjectException lastThrown;
-        Exception* pException = pExOrig?pExOrig:&lastThrown;
-
-        // Set the current frame
-        SetFrame(pFrame);
-        RaiseCrossContextExceptionHelper(pExOrig, pFrame);
-        _ASSERTE(pFrame->GetReturnContext());
-
-        struct _gc {
-            OBJECTREF pThrowable;
-            ORBLOBREF orBlob;
-        } gc;
-        ZeroMemory(&gc, sizeof(_gc));
-
-        GCPROTECT_BEGIN(gc);
-        result = Thread::TryRaiseCrossContextException(&pExOrig, pException, &kind, &gc.pThrowable, &gc.orBlob);
-        GCPROTECT_END();
-
-        if (result != RaiseCrossContextRetry)
-        {
-            orBlob = gc.orBlob;
-            break;
-        }
- 
-        // We got a new exception and therefore need to retry marshaling it.
-        GCX_COOP_NO_DTOR();
-    }
-
-    // Set the exception kind if we exceed MAX_RAISE_RETRY_COUNT, something is really wrong.
-    if (dwRaiseRetryCount == MAX_RAISE_RETRY_COUNT)
-    {
-        LOG((LF_EH, LL_INFO100, "Unable to marshal the exception event after maximum retries (%d). Using ContextMarshalException instead.\n", MAX_RAISE_RETRY_COUNT));
-        // This might be a good place to use ContextMarshalException type. However, it is marked obsolete.
-        kind = kContextMarshalException;
-    }
-
-    // Return to caller domain
-    {
-        // ReturnToContext does not work inside GC_PROTECT and has GC_NOTRIGGER contract.
-        // GCX_FORBID() ensures that the formerly protected values remain intact.
-        GCX_FORBID();
-        ReturnToContext(pFrame);
-    }
-
-    {
-        struct _gc {
-            OBJECTREF pMarshaledInit;
-            OBJECTREF pMarshaledThrowable;
-            ORBLOBREF orBlob;
-        } gc;
-        ZeroMemory(&gc, sizeof(_gc));
-
-        gc.orBlob = orBlob;
-
-        // Create the appropriate exception
-        GCPROTECT_BEGIN(gc);
-#ifdef FEATURE_TESTHOOKS
-        TESTHOOKCALL(LeftAppDomain(adid.m_dwId));
-#endif        
-        if (result == RaiseCrossContextClassInit)
-        {
-            HRESULT hr=S_OK;
-            EX_TRY
-            {
-                WCHAR wszTemplate[30];
-                IfFailThrow(UtilLoadStringRC(IDS_EE_NAME_UNKNOWN,
-                                             wszTemplate,
-                                             sizeof(wszTemplate)/sizeof(wszTemplate[0]),
-                                             FALSE));
-                
-                CreateTypeInitializationExceptionObject(wszTemplate, NULL, &gc.pMarshaledInit, &gc.pMarshaledThrowable);
-            }
-            EX_CATCH
-            {
-                // Unable to create ClassInitException in caller domain
-                hr=COR_E_TYPEINITIALIZATION;
-            }
-            EX_END_CATCH(RethrowTransientExceptions);
-            IfFailThrow(hr);
-        }
-        else
-        {
-            switch (kind)
-            {
-            case kLastException:
-#ifdef FEATURE_CORECLR
-                gc.pMarshaledThrowable = gc.orBlob;
-#else
-                AppDomainHelper::UnmarshalObject(GetAppDomain(), &gc.orBlob, &gc.pMarshaledThrowable);
-#endif //FEATURE_CORECLR
-
-                break;
-            case kOutOfMemoryException:
-                COMPlusThrowOM();
-                break;
-            case kStackOverflowException:
-                gc.pMarshaledThrowable = CLRException::GetPreallocatedStackOverflowException();
-                break;
-            default:
-                {
-                    EEException ex(kind);
-                    gc.pMarshaledThrowable = CLRException::GetThrowableFromException(&ex);
-                }
-            }
-        }
-
-        // ... and throw it.
-        VALIDATEOBJECTREF(gc.pMarshaledThrowable);
-        COMPlusThrow(gc.pMarshaledThrowable
-#ifdef FEATURE_CORRUPTING_EXCEPTIONS
-            , severity
-#endif // FEATURE_CORRUPTING_EXCEPTIONS
-            );
-
-        GCPROTECT_END();
-    }
+    // pEx is NULL means that the exception is CLRLastThrownObjectException
+    CLRLastThrownObjectException lastThrown;
+    Exception* pException = pExOrig ? pExOrig : &lastThrown;
+    COMPlusThrow(CLRException::GetThrowableFromException(pException));
 }
 
-struct FindADCallbackType {
-    AppDomain *pSearchDomain;
-    AppDomain *pPrevDomain;
-    Frame *pFrame;
-    int count;
-    enum TargetTransition
-        {fFirstTransitionInto, fMostRecentTransitionInto}
-    fTargetTransition;
-
-    FindADCallbackType() : pSearchDomain(NULL), pPrevDomain(NULL), pFrame(NULL)
-    {
-        LIMITED_METHOD_CONTRACT;
-    }
-};
-
-StackWalkAction StackWalkCallback_FindAD(CrawlFrame* pCF, void* data)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    FindADCallbackType *pData = (FindADCallbackType *)data;
-
-    Frame *pFrame = pCF->GetFrame();
-
-    if (!pFrame)
-        return SWA_CONTINUE;
-
-    AppDomain *pReturnDomain = pFrame->GetReturnDomain();
-    if (!pReturnDomain || pReturnDomain == pData->pPrevDomain)
-        return SWA_CONTINUE;
-
-    LOG((LF_APPDOMAIN, LL_INFO100, "StackWalkCallback_FindAD transition frame %8.8x into AD [%d]\n",
-            pFrame, pReturnDomain->GetId().m_dwId));
-
-    if (pData->pPrevDomain == pData->pSearchDomain) {
-                ++pData->count;
-        // this is a transition into the domain we are unloading, so save it in case it is the first
-        pData->pFrame = pFrame;
-        if (pData->fTargetTransition == FindADCallbackType::fMostRecentTransitionInto)
-            return SWA_ABORT;   // only need to find last transition, so bail now
-    }
-
-    pData->pPrevDomain = pReturnDomain;
-    return SWA_CONTINUE;
-}
-
-// This determines if a thread is running in the given domain at any point on the stack
-Frame *Thread::IsRunningIn(AppDomain *pDomain, int *count)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    FindADCallbackType fct;
-    fct.pSearchDomain = pDomain;
-    if (!fct.pSearchDomain)
-        return FALSE;
-
-    // set prev to current so if are currently running in the target domain,
-    // we will detect the transition
-    fct.pPrevDomain = m_pDomain;
-    fct.fTargetTransition = FindADCallbackType::fMostRecentTransitionInto;
-    fct.count = 0;
-
-    // when this returns, if there is a transition into the AD, it will be in pFirstFrame
-    StackWalkAction res;
-    res = StackWalkFrames(StackWalkCallback_FindAD, (void*) &fct, ALLOW_ASYNC_STACK_WALK);
-    if (count)
-        *count = fct.count;
-    return fct.pFrame;
-}
-
-// This finds the very first frame on the stack where the thread transitioned into the given domain
-Frame *Thread::GetFirstTransitionInto(AppDomain *pDomain, int *count)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    FindADCallbackType fct;
-    fct.pSearchDomain = pDomain;
-    // set prev to current so if are currently running in the target domain,
-    // we will detect the transition
-    fct.pPrevDomain = m_pDomain;
-    fct.fTargetTransition = FindADCallbackType::fFirstTransitionInto;
-    fct.count = 0;
-
-    // when this returns, if there is a transition into the AD, it will be in pFirstFrame
-    StackWalkAction res;
-    res = StackWalkFrames(StackWalkCallback_FindAD, (void*) &fct, ALLOW_ASYNC_STACK_WALK);
-    if (count)
-        *count = fct.count;
-    return fct.pFrame;
-}
-
-// Get outermost (oldest) AppDomain for this thread (not counting the default
-// domain every one starts in).
-AppDomain *Thread::GetInitialDomain()
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    AppDomain *pDomain = m_pDomain;
-    AppDomain *pPrevDomain = NULL;
-    Frame *pFrame = GetFrame();
-    while (pFrame != FRAME_TOP)
-    {
-        if (pFrame->GetVTablePtr() == ContextTransitionFrame::GetMethodFrameVPtr())
-        {
-            if (pPrevDomain)
-                pDomain = pPrevDomain;
-            pPrevDomain = pFrame->GetReturnDomain();
-        }
-        pFrame = pFrame->Next();
-    }
-    return pDomain;
-}
-
-#ifndef DACCESS_COMPILE
-void  Thread::SetUnloadBoundaryFrame(Frame *pFrame)
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE((this == GetThread() && PreemptiveGCDisabled()) ||
-             ThreadStore::HoldingThreadStore());
-    if ((ULONG_PTR)m_pUnloadBoundaryFrame < (ULONG_PTR)pFrame)
-    {
-        m_pUnloadBoundaryFrame = pFrame;
-    }
-    if (pFrame == NULL)
-    {
-        ResetBeginAbortedForADUnload();
-    }
-}
-
-void  Thread::ResetUnloadBoundaryFrame()
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE(this == GetThread() && PreemptiveGCDisabled());
-    m_pUnloadBoundaryFrame=NULL;
-    ResetBeginAbortedForADUnload();
-}
-
-#endif
-
-BOOL Thread::ShouldChangeAbortToUnload(Frame *pFrame, Frame *pUnloadBoundaryFrame)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    if (! pUnloadBoundaryFrame)
-        pUnloadBoundaryFrame = GetUnloadBoundaryFrame();
-
-    // turn the abort request into an AD unloaded exception when go past the boundary.
-    if (pFrame != pUnloadBoundaryFrame)
-        return FALSE;
-
-    // Only time have an unloadboundaryframe is when have specifically marked that thread for aborting
-    // during unload processing, so this won't trigger UnloadedException if have simply thrown a ThreadAbort
-    // past an AD transition frame
-    _ASSERTE (IsAbortRequested());
-
-    EEResetAbort(TAR_ADUnload);
-
-    if (m_AbortType == EEPolicy::TA_None)
-    {
-        return TRUE;
-    }
-    else
-    {
-        return FALSE;
-    }
-}
 
 BOOL Thread::HaveExtraWorkForFinalizer()
 {
     LIMITED_METHOD_CONTRACT;
 
     return m_ThreadTasks
-        || OverlappedDataObject::CleanupNeededFromGC()
         || ThreadpoolMgr::HaveTimerInfosToFlush()
         || ExecutionManager::IsCacheCleanupRequired()
         || Thread::CleanupNeededForFinalizedThread()
         || (m_DetachCount > 0)
-        || CExecutionEngine::HasDetachedTlsInfo()
-        || AppDomain::HasWorkForFinalizerThread()
-        || SystemDomain::System()->RequireAppDomainCleanup();
+        || SystemDomain::System()->RequireAppDomainCleanup()
+        || ThreadStore::s_pThreadStore->ShouldTriggerGCForDeadThreads();
 }
 
 void Thread::DoExtraWorkForFinalizer()
@@ -9829,11 +7318,6 @@ void Thread::DoExtraWorkForFinalizer()
     }
 #endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
 
-    if (AppDomain::HasWorkForFinalizerThread())
-    {
-        AppDomain::ProcessUnloadDomainEventOnFinalizeThread();
-    }
-
     if (RequireSyncBlockCleanup())
     {
 #ifndef FEATURE_PAL
@@ -9848,26 +7332,23 @@ void Thread::DoExtraWorkForFinalizer()
     }
     if (SystemDomain::System()->RequireAppDomainCleanup())
     {
-        SystemDomain::System()->ProcessDelayedUnloadDomains();
+        SystemDomain::System()->ProcessDelayedUnloadLoaderAllocators();
     }
-
-    CExecutionEngine::CleanupDetachedTlsInfo();
 
     if(m_DetachCount > 0 || Thread::CleanupNeededForFinalizedThread())
     {
         Thread::CleanupDetachedThreads();
     }
     
-    if(ExecutionManager::IsCacheCleanupRequired() && GCHeap::GetGCHeap()->GetCondemnedGeneration()>=1)
+    if(ExecutionManager::IsCacheCleanupRequired() && GCHeapUtilities::GetGCHeap()->GetCondemnedGeneration()>=1)
     {
         ExecutionManager::ClearCaches();
     }
 
-    OverlappedDataObject::RequestCleanupFromGC();
-
     // If there were any TimerInfos waiting to be released, they'll get flushed now
     ThreadpoolMgr::FlushQueueOfTimerInfos();
-    
+
+    ThreadStore::s_pThreadStore->TriggerGCForDeadThreadsIfNecessary();
 }
 
 
@@ -9887,135 +7368,25 @@ void Thread::DoExtraWorkForFinalizer()
                 SEH handler from DispatchOuter
                 C++ handler from DispatchMiddle
 
-   And if there is an AppDomain transition before we call back to user code, we additionally get:
-
-                AppDomain transition -- contains its own handlers to terminate the first pass
-                                        and marshal the exception.
-
-                SEH handler from DispatchOuter
-                C++ handler from DispatchMiddle
-
-   Regardless of whether or not there is an AppDomain transition, we then have:
-
                 User code that obviously can throw.
-
-   So if we don't have an AD transition, or we take a fault before we successfully transition the
-   AppDomain, then the base-most DispatchOuter/Middle will deal with the exception.  This may
-   involve swallowing exceptions or it may involve Watson & debugger attach.  It will always
-   involve notifications to any AppDomain.UnhandledException event listeners.
-
-   But if we did transition the AppDomain, then any Watson, debugger attach and UnhandledException
-   events will occur in that AppDomain in the initial first pass.  So we get a good debugging
-   experience and we get notifications to the host that show which AppDomain is allowing exceptions
-   to go unhandled (so perhaps it can be unloaded or otherwise dealt with).
-
-   The trick is that if the exception goes unhandled at the process level, we would normally try
-   to fire AppDomain events and display the faulting exception on the console from two more
-   places.  These are the base-most DispatchOuter/Middle pair and the hook of the OS unhandled
-   exception handler at the base of the thread.
-
-   This is redundant and messy.  (There's no concern with getting a 2nd Watson because we only
-   do one of these per process anyway).  The solution for the base-most DispatchOuter/Middle is
-   to use the ManagedThreadCallState.flags to control whether the exception has already been
-   dealt with or not.  These flags cause the ThreadBaseRedirectingFilter to either do normal
-   "base of the thread" exception handling, or to ignore the exception because it has already
-   been reported in the AppDomain we transitioned to.
-
-   But turning off the reporting in the OS unhandled exception filter is harder.  We don't want
-   to flip a bit on the Thread to disable this, unless we can be sure we are only disabling
-   something we already reported, and that this thread will never recover from that situation and
-   start executing code again.  Here's the normal nightmare scenario with SEH:
-
-   1)  exception of type A is thrown
-   2)  All the filters in the 1st pass say they don't want an A
-   3)  The exception gets all the way out and is considered unhandled.  We report this "fact".
-   4)  Imagine we then set a bit that says this thread shouldn't report unhandled exceptions.
-   5)  The 2nd pass starts.
-   6)  Inside a finally, someone throws an exception of type B.
-   7)  A new 1st pass starts from the point of the throw, with a type B.
-   8)  Now a filter says "Yes, I will swallow exception B."
-   9)  We no longer have an unhandled exception, and execution continues merrily.
-
-   This is an unavoidable consequence of the 2-pass model.  If you report unhandled exceptions
-   in the 1st pass (for good debugging), you might find that this was premature and you don't
-   have an unhandled exception when you get to the 2nd pass.
-
-   But it would not be optimal if in step 4 we set a bit that says we should suppress normal
-   notifications and reporting on this thread, believing that the process will terminate.
-
-   The solution is to recognize that the base OS unhandled exception filter runs in two modes.
-   In the first mode, it operates as today and serves as our backstop.  In the second mode
-   it is fully redundant with the handlers pushed after the AppDomain transition, which are
-   completely containing the exception to the AD that it occurred in (for purposes of reporting).
-   So we just need a flag on the thread that says whether or not that set of handlers are pushed
-   and functioning.  That flag enables / disables the base exception reporting and is called
-   TSNC_AppDomainContainUnhandled
 
 */
 
 
-enum ManagedThreadCallStateFlags
-{
-    MTCSF_NormalBase,
-    MTCSF_ContainToAppDomain,
-    MTCSF_SuppressDuplicate,
-};
-
 struct ManagedThreadCallState
 {
-    ADID                         pAppDomainId;
-    AppDomain*                   pUnsafeAppDomain;
-    BOOL                         bDomainIsAsID;
-
-    Context::ADCallBackFcnType   pTarget;
+    ADCallBackFcnType   pTarget;
     LPVOID                       args;
     UnhandledExceptionLocation   filterType;
-    ManagedThreadCallStateFlags  flags;
-    BOOL IsAppDomainEqual(AppDomain* pApp)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return bDomainIsAsID?(pApp->GetId()==pAppDomainId):(pUnsafeAppDomain==pApp);
-    }
-    ManagedThreadCallState(ADID AppDomainId,Context::ADCallBackFcnType Target,LPVOID Args,
-                        UnhandledExceptionLocation   FilterType, ManagedThreadCallStateFlags  Flags):
-          pAppDomainId(AppDomainId),
-          pUnsafeAppDomain(NULL),
-          bDomainIsAsID(TRUE),
-          pTarget(Target),
-          args(Args),
-          filterType(FilterType),
-          flags(Flags)
-    {
-        LIMITED_METHOD_CONTRACT;
-    };
-protected:
-    ManagedThreadCallState(AppDomain* AppDomain,Context::ADCallBackFcnType Target,LPVOID Args,
-                        UnhandledExceptionLocation   FilterType, ManagedThreadCallStateFlags  Flags):
-          pAppDomainId(ADID(0)),
-          pUnsafeAppDomain(AppDomain),
-          bDomainIsAsID(FALSE),
-          pTarget(Target),
-          args(Args),
-          filterType(FilterType),
-          flags(Flags)
-    {
-        LIMITED_METHOD_CONTRACT;
-    };
-    void InitForFinalizer(AppDomain* AppDomain,Context::ADCallBackFcnType Target,LPVOID Args)
-    {
-        LIMITED_METHOD_CONTRACT;
-        filterType=FinalizerThread;
-        pUnsafeAppDomain=AppDomain;
-        pTarget=Target;
-        args=Args;
-    };
 
-    friend void ManagedThreadBase_NoADTransition(Context::ADCallBackFcnType pTarget,
-                                             UnhandledExceptionLocation filterType);
-    friend void ManagedThreadBase::FinalizerAppDomain(AppDomain* pAppDomain,
-                                           Context::ADCallBackFcnType pTarget,
-                                           LPVOID args,
-                                           ManagedThreadCallState *pTurnAround);
+    ManagedThreadCallState(ADCallBackFcnType Target,LPVOID Args,
+                        UnhandledExceptionLocation   FilterType):
+          pTarget(Target),
+          args(Args),
+          filterType(FilterType)
+    {
+        LIMITED_METHOD_CONTRACT;
+    };
 };
 
 // The following static helpers are outside of the ManagedThreadBase struct because I
@@ -10024,46 +7395,6 @@ protected:
 // API only.
 
 static void ManagedThreadBase_DispatchOuter(ManagedThreadCallState *pCallState);
-
-
-// Here's the tricky part.  *IF and only IF* we took an AppDomain transition at the base, then we
-// now want to push another complete set of handlers above us.  The reason is that we want the
-// Watson report and the unhandled exception event to occur in the target AppDomain.  If we don't
-// do this apparently redundant push of handlers, then we will marshal back the exception to the
-// handlers on the Default AppDomain side.  This will erase all the important exception state by
-// unwinding (catch and rethrow) in DoADCallBack.  And it will cause all unhandled exceptions to
-// be reported from the Default AppDomain, which is annoying to any AppDomain.UnhandledException
-// event listeners.
-//
-// So why not skip the handlers that are in the Default AppDomain and just push the ones after the
-// transition?  Well, transitioning out of the Default AppDomain into the target AppDomain could
-// fail.  We need handlers pushed for that case.  And in that case it's perfectly reasonable to
-// report the problem as occurring in the Default AppDomain, which is what the base handlers will
-// do.
-
-static void ManagedThreadBase_DispatchInCorrectAD(LPVOID args)
-{
-    CONTRACTL
-    {
-        GC_TRIGGERS;
-        THROWS;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-    ManagedThreadCallState *pCallState = (ManagedThreadCallState *) args;
-
-    // Ensure we aren't going to infinitely recurse.
-    _ASSERTE(pCallState->IsAppDomainEqual(GetThread()->GetDomain()));
-
-    // And then go round one more time.  But this time we want to ensure that the filter contains
-    // any exceptions that aren't swallowed.  These must be treated as unhandled, rather than
-    // propagated through the AppDomain boundary in search of an outer handler.  Otherwise we
-    // will not get correct Watson behavior.
-    pCallState->flags = MTCSF_ContainToAppDomain;
-    ManagedThreadBase_DispatchOuter(pCallState);
-    pCallState->flags = MTCSF_NormalBase;
-}
 
 static void ManagedThreadBase_DispatchInner(ManagedThreadCallState *pCallState)
 {
@@ -10075,41 +7406,8 @@ static void ManagedThreadBase_DispatchInner(ManagedThreadCallState *pCallState)
     }
     CONTRACTL_END;
 
-
-    Thread *pThread = GetThread();
-
-    if (!pCallState->IsAppDomainEqual(pThread->GetDomain()))
-    {
-        // On Win7 and later, AppDomain transitions at the threadbase will *not* have EH setup at transition boundary.
-        // This implies that an unhandled exception from the base domain (i.e. AD in which the thread starts) will
-        // not return to DefDomain but will continue to go up the stack with the thread still being in base domain.
-        // We have a holder in ENTER_DOMAIN_*_NO_EH_AT_TRANSITION macro (ReturnToPreviousAppDomainHolder) that will
-        // revert AD context at threadbase if an unwind is triggered after the exception has gone unhandled.
-        //
-        // This also implies that there will be no exception object marshalling (and it may not be required after all) 
-        // as well and once the holder reverts the AD context, the LastThrownObject in Thread will be set to NULL.
-#ifndef FEATURE_PAL
-        BOOL fSetupEHAtTransition = !(RunningOnWin7());            
-#else // !FEATURE_PAL
-        BOOL fSetupEHAtTransition = TRUE;
-#endif // !FEATURE_PAL
-
-        if (pCallState->bDomainIsAsID)
-            pThread->DoADCallBack(pCallState->pAppDomainId,
-                              ManagedThreadBase_DispatchInCorrectAD,
-                              pCallState, fSetupEHAtTransition);
-        else
-            pThread->DoADCallBack(pCallState->pUnsafeAppDomain,
-                              ManagedThreadBase_DispatchInCorrectAD,
-                               pCallState, ADV_FINALIZER, fSetupEHAtTransition);
-    }
-    else
-    {
-        // Since no AppDomain transition is necessary, we need no additional handlers pushed
-        // *AFTER* the transition.  We now have adequate handlers below us.  Go ahead and
-        // dispatch the call.
-        (*pCallState->pTarget) (pCallState->args);
-    }
+    // Go ahead and dispatch the call.
+    (*pCallState->pTarget) (pCallState->args);
 }
 
 static void ManagedThreadBase_DispatchMiddle(ManagedThreadCallState *pCallState)
@@ -10117,11 +7415,6 @@ static void ManagedThreadBase_DispatchMiddle(ManagedThreadCallState *pCallState)
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_MODE_COOPERATIVE;
-    STATIC_CONTRACT_SO_TOLERANT;
-
-    // We have the probe outside the EX_TRY below since corresponding EX_CATCH
-    // also invokes SO_INTOLERANT code.
-    BEGIN_SO_INTOLERANT_CODE(GetThread());
 
     EX_TRY_CPP_ONLY
     {
@@ -10153,7 +7446,6 @@ static void ManagedThreadBase_DispatchMiddle(ManagedThreadCallState *pCallState)
             {
                 GCX_COOP();
                 m_pThread->SetFrame(m_pEntryFrame);
-                m_pThread->ResetThreadStateNC(Thread::TSNC_AppDomainContainUnhandled);
             }
         };
 
@@ -10171,8 +7463,7 @@ static void ManagedThreadBase_DispatchMiddle(ManagedThreadCallState *pCallState)
         // behavior (swallowing all unhandled exception), then swallow all unhandled exception.
         //
         if (SwallowUnhandledExceptions() ||
-            IsExceptionOfType(kThreadAbortException, pException) ||
-            IsExceptionOfType(kAppDomainUnloadedException, pException))
+            IsExceptionOfType(kThreadAbortException, pException))
         {
             // Do nothing to swallow the exception
         }
@@ -10194,8 +7485,6 @@ static void ManagedThreadBase_DispatchMiddle(ManagedThreadCallState *pCallState)
         }
     }
     EX_END_CATCH(SwallowAllExceptions);
-
-    END_SO_INTOLERANT_CODE;
 }
 
 /*
@@ -10219,30 +7508,17 @@ static LONG ThreadBaseRedirectingFilter(PEXCEPTION_POINTERS pExceptionInfo, LPVO
     STATIC_CONTRACT_GC_TRIGGERS;
     STATIC_CONTRACT_MODE_ANY;
 
-    LONG (*ptrFilter) (PEXCEPTION_POINTERS, PVOID);
-
     TryParam * pRealParam = reinterpret_cast<TryParam *>(pParam);
     ManagedThreadCallState * _pCallState = pRealParam->m_pCallState;
-    ManagedThreadCallStateFlags flags = _pCallState->flags;
-
-    if (flags == MTCSF_SuppressDuplicate)
-    {
-        LOG((LF_EH, LL_INFO100, "ThreadBaseRedirectingFilter: setting TSNC_AppDomainContainUnhandled\n"));
-        GetThread()->SetThreadStateNC(Thread::TSNC_AppDomainContainUnhandled);
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
 
     LONG ret = -1;
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(return EXCEPTION_CONTINUE_SEARCH;);
 
     // This will invoke the swallowing filter. If that returns EXCEPTION_CONTINUE_SEARCH,
     // it will trigger unhandled exception processing.
-    ptrFilter = ThreadBaseExceptionAppDomainFilter;
-
-    // WARNING - ptrFilter may not return
+    // WARNING - ThreadBaseExceptionAppDomainFilter may not return
     // This occurs when the debugger decides to intercept an exception and catch it in a frame closer
     // to the leaf than the one executing this filter
-    ret = (*ptrFilter) (pExceptionInfo, _pCallState);
+    ret = ThreadBaseExceptionAppDomainFilter(pExceptionInfo, _pCallState);
 
     // Although EXCEPTION_EXECUTE_HANDLER can also be returned in cases corresponding to
     // unhandled exceptions, all of those cases have already notified the debugger of an unhandled
@@ -10256,108 +7532,38 @@ static LONG ThreadBaseRedirectingFilter(PEXCEPTION_POINTERS pExceptionInfo, LPVO
         NotifyOfCHFFilterWrapper(pExceptionInfo, pRealParam);
     }
 
-    // If we are containing unhandled exceptions to the AppDomain we transitioned into, and the
-    // exception is coming out, then this exception is going unhandled.  We have already done
-    // Watson and managed events, so suppress all filters below us.  Otherwise we are swallowing
-    // it and returning out of the AppDomain.
-    if (flags == MTCSF_ContainToAppDomain)
-    {
-        if(ret == EXCEPTION_CONTINUE_SEARCH)
-        {
-            _pCallState->flags = MTCSF_SuppressDuplicate;
-        }
-        else if(ret == EXCEPTION_EXECUTE_HANDLER)
-        {
-            _pCallState->flags = MTCSF_NormalBase;
-        }
-        // else if( EXCEPTION_CONTINUE_EXECUTION )  do nothing
-    }
-
     // Get the reference to the current thread..
     Thread *pCurThread = GetThread();
     _ASSERTE(pCurThread);
 
-    if (flags == MTCSF_ContainToAppDomain)
+    //
+    // In the default domain, when an exception goes unhandled on a managed thread whose threadbase is in the VM (e.g. explicitly spawned threads,
+    //    ThreadPool threads, finalizer thread, etc), CLR can end up in the unhandled exception processing path twice.
+    //
+    // The first attempt to perform UE processing happens at the managed thread base (via this function). When it completes,
+    // we will set TSNC_ProcessedUnhandledException state against the thread to indicate that we have perform the unhandled exception processing.
+    //
+    // On CoreSys CoreCLR, the host can ask CoreCLR to run all code in the default domain. As a result, when we return from the first attempt to perform UE
+    // processing, the call could return back with EXCEPTION_EXECUTE_HANDLER since, like desktop CoreCLR is instructed by SL host to swallow all unhandled exceptions,
+    // CoreSys CoreCLR can also be instructed by its Phone host to swallow all unhandled exceptions. As a result, the exception dispatch will never continue to go upstack
+    // to the native threadbase in the OS kernel and thus, there will never be a second attempt to perform UE processing. Hence, we dont, and shouldnt, need to set
+    // TSNC_ProcessedUnhandledException state against the thread if we are in SingleAppDomain mode and have been asked to swallow the exception.
+    //
+    // If we continue to set TSNC_ProcessedUnhandledException and a ThreadPool Thread A has an exception go unhandled, we will swallow it correctly for the first time.
+    // The next time Thread A has an exception go unhandled, our UEF will see TSNC_ProcessedUnhandledException set and assume (incorrectly) UE processing has happened and
+    // will fail to honor the host policy (e.g. swallow unhandled exception). Thus, the 2nd unhandled exception may end up crashing the app when it should not.
+    //
+    if (ret != EXCEPTION_EXECUTE_HANDLER)
     {
-
-        if (((ManagedThreadCallState *) _pCallState)->flags == MTCSF_SuppressDuplicate)
-        {
-            // Set the flag that we have done unhandled exception processing
-            // for this managed thread that started in a non-default domain
-            LOG((LF_EH, LL_INFO100, "ThreadBaseRedirectingFilter: setting TSNC_AppDomainContainUnhandled\n"));
-            pCurThread->SetThreadStateNC(Thread::TSNC_AppDomainContainUnhandled);
-        }
-    }
-    else
-    {
-        _ASSERTE(flags == MTCSF_NormalBase);
-
-#ifdef FEATURE_CORECLR
-        if(!IsSingleAppDomain())
-        {
-            // This assert shouldnt be hit in CoreCLR since:
-            //
-            // 1) It has no concept of managed entry point that is invoked by the shim. You can
-            //    only run managed code via hosting APIs that will run code in non-default domains.
-            //
-            // 2) Managed threads cannot be created in DefaultDomain since no user code executes
-            //    in default domain.
-            //
-            // So, if this is hit, something is not right!
-            _ASSERTE(!"How come a managed thread in CoreCLR has suffered unhandled exception in DefaultDomain?");
-        }
-#endif // FEATURE_CORECLR
-
         LOG((LF_EH, LL_INFO100, "ThreadBaseRedirectingFilter: setting TSNC_ProcessedUnhandledException\n"));
 
-#if defined(FEATURE_CORECLR)
+        // Since we have already done unhandled exception processing for it, we dont want it
+        // to happen again if our UEF gets invoked upon returning back to the OS.
         //
-        // In the default domain, when an exception goes unhandled on a managed thread whose threadbase is in the VM (e.g. explicitly spawned threads, 
-        //    ThreadPool threads, finalizer thread, etc), CLR can end up in the unhandled exception processing path twice.
-        // 
-        // The first attempt to perform UE processing happens at the managed thread base (via this function). When it completes,
-        // we will set TSNC_ProcessedUnhandledException state against the thread to indicate that we have perform the unhandled exception processing.
-        //
-        // On the desktop CLR, after the first attempt, we will return back to the OS with EXCEPTION_CONTINUE_SEARCH as unhandled exceptions cannot be swallowed. When the exception reaches
-        // the native threadbase in the OS kernel, the OS will invoke the UEF registered for the process. This can result in CLR's UEF (COMUnhandledExceptionFilter)
-        // getting invoked that will attempt to perform UE processing yet again for the same thread. To avoid this duplicate processing, we check the presence of
-        // TSNC_ProcessedUnhandledException state on the thread and if present, we simply return back to the OS.
-        //
-        // On desktop CoreCLR, we will only do UE processing once (at the managed threadbase) since no thread is created in default domain - all are created and executed in non-default domain.
-        // As a result, we go via completely different codepath that prevents duplication of UE processing from happening, especially since desktop CoreCLR is targetted for SL and SL
-        // always passes us a flag to swallow unhandled exceptions.
-        //
-        // On CoreSys CoreCLR, the host can ask CoreCLR to run all code in the default domain. As a result, when we return from the first attempt to perform UE
-        // processing, the call could return back with EXCEPTION_EXECUTE_HANDLER since, like desktop CoreCLR is instructed by SL host to swallow all unhandled exceptions, 
-        // CoreSys CoreCLR can also be instructed by its Phone host to swallow all unhandled exceptions. As a result, the exception dispatch will never continue to go upstack
-        // to the native threadbase in the OS kernel and thus, there will never be a second attempt to perform UE processing. Hence, we dont, and shouldnt, need to set
-        // TSNC_ProcessedUnhandledException state against the thread if we are in SingleAppDomain mode and have been asked to swallow the exception.
-        //
-        // If we continue to set TSNC_ProcessedUnhandledException and a ThreadPool Thread A has an exception go unhandled, we will swallow it correctly for the first time.
-        // The next time Thread A has an exception go unhandled, our UEF will see TSNC_ProcessedUnhandledException set and assume (incorrectly) UE processing has happened and
-        // will fail to honor the host policy (e.g. swallow unhandled exception). Thus, the 2nd unhandled exception may end up crashing the app when it should not.
-        //
-        if (IsSingleAppDomain() && (ret != EXCEPTION_EXECUTE_HANDLER))
-#endif // defined(FEATURE_CORECLR)
-        {
-            // Since we have already done unhandled exception processing for it, we dont want it 
-            // to happen again if our UEF gets invoked upon returning back to the OS.
-            //
-            // Set the flag to indicate so.
-            pCurThread->SetThreadStateNC(Thread::TSNC_ProcessedUnhandledException);
-        }
+        // Set the flag to indicate so.
+        pCurThread->SetThreadStateNC(Thread::TSNC_ProcessedUnhandledException);
     }
 
-#ifdef FEATURE_UEF_CHAINMANAGER
-    if (g_pUEFManager && (ret == EXCEPTION_CONTINUE_SEARCH))
-    {
-        // Since the "UEF" of this runtime instance didnt handle the exception,
-        // invoke the other registered UEF callbacks as well
-        ret = g_pUEFManager->InvokeUEFCallbacks(pExceptionInfo);
-    }
-#endif // FEATURE_UEF_CHAINMANAGER
-
-    END_SO_INTOLERANT_CODE;
     return ret;
 }
 
@@ -10388,9 +7594,7 @@ static void ManagedThreadBase_DispatchOuter(ManagedThreadCallState *pCallState)
         TryParam *pTryParam;
         Thread *pThread;
 
-#ifdef FEATURE_CORECLR
         BOOL *pfHadException; 
-#endif // FEATURE_CORECLR
 
 #ifdef WIN64EXCEPTIONS
         Frame *pFrame;
@@ -10400,10 +7604,8 @@ static void ManagedThreadBase_DispatchOuter(ManagedThreadCallState *pCallState)
     args.pTryParam = &param;
     args.pThread = pThread;
 
-#ifdef FEATURE_CORECLR
     BOOL fHadException = TRUE;
     args.pfHadException = &fHadException;
-#endif // FEATURE_CORECLR
 
 #ifdef WIN64EXCEPTIONS
     args.pFrame = pFrame;
@@ -10435,25 +7637,10 @@ static void ManagedThreadBase_DispatchOuter(ManagedThreadCallState *pCallState)
         }
         PAL_ENDTRY;
 
-#ifdef FEATURE_CORECLR
         *(pArgs->pfHadException) = FALSE;
-#endif // FEATURE_CORECLR
     }
     PAL_FINALLY
     {
-#ifdef FEATURE_CORECLR
-        // If we had a breakpoint exception that has gone unhandled,
-        // then switch to the correct AD context. Its fine to do this
-        // here because:
-        //
-        // 1) We are in an unwind (this is a C++ destructor).
-        // 2) SetFrame (below) does validation to be in the correct AD context. Thus,
-        //    this should be done before that.
-        if (fHadException && (GetCurrentExceptionCode() == STATUS_BREAKPOINT))
-        {
-            ReturnToPreviousAppDomain();
-        }
-#endif // FEATURE_CORECLR
         catchFrame.Pop();
     }
     PAL_ENDTRY;
@@ -10463,8 +7650,7 @@ static void ManagedThreadBase_DispatchOuter(ManagedThreadCallState *pCallState)
 // For the implementation, there are three variants of work possible:
 
 // 1.  Establish the base of a managed thread, and switch to the correct AppDomain.
-static void ManagedThreadBase_FullTransitionWithAD(ADID pAppDomain,
-                                                   Context::ADCallBackFcnType pTarget,
+static void ManagedThreadBase_FullTransition(ADCallBackFcnType pTarget,
                                                    LPVOID args,
                                                    UnhandledExceptionLocation filterType)
 {
@@ -10476,13 +7662,13 @@ static void ManagedThreadBase_FullTransitionWithAD(ADID pAppDomain,
     }
     CONTRACTL_END;
 
-    ManagedThreadCallState CallState(pAppDomain, pTarget, args, filterType, MTCSF_NormalBase);
+    ManagedThreadCallState CallState(pTarget, args, filterType);
     ManagedThreadBase_DispatchOuter(&CallState);
 }
 
 // 2.  Establish the base of a managed thread, but the AppDomain transition must be
 //     deferred until later.
-void ManagedThreadBase_NoADTransition(Context::ADCallBackFcnType pTarget,
+void ManagedThreadBase_NoADTransition(ADCallBackFcnType pTarget,
                                              UnhandledExceptionLocation filterType)
 {
     CONTRACTL
@@ -10495,7 +7681,7 @@ void ManagedThreadBase_NoADTransition(Context::ADCallBackFcnType pTarget,
 
     AppDomain *pAppDomain = GetAppDomain();
 
-    ManagedThreadCallState CallState(pAppDomain, pTarget, NULL, filterType, MTCSF_NormalBase);
+    ManagedThreadCallState CallState(pTarget, NULL, filterType);
 
     // self-describing, to create a pTurnAround data for eventual delivery to a subsequent AppDomain
     // transition.
@@ -10509,36 +7695,25 @@ void ManagedThreadBase_NoADTransition(Context::ADCallBackFcnType pTarget,
 // And here are the various exposed entrypoints for base thread behavior
 
 // The 'new Thread(...).Start()' case from COMSynchronizable kickoff thread worker
-void ManagedThreadBase::KickOff(ADID pAppDomain, Context::ADCallBackFcnType pTarget, LPVOID args)
+void ManagedThreadBase::KickOff(ADCallBackFcnType pTarget, LPVOID args)
 {
     WRAPPER_NO_CONTRACT;
-    ManagedThreadBase_FullTransitionWithAD(pAppDomain, pTarget, args, ManagedThread);
+    ManagedThreadBase_FullTransition(pTarget, args, ManagedThread);
 }
 
 // The IOCompletion, QueueUserWorkItem, AddTimer, RegisterWaitForSingleObject cases in the ThreadPool
-void ManagedThreadBase::ThreadPool(ADID pAppDomain, Context::ADCallBackFcnType pTarget, LPVOID args)
+void ManagedThreadBase::ThreadPool(ADCallBackFcnType pTarget, LPVOID args)
 {
     WRAPPER_NO_CONTRACT;
-    ManagedThreadBase_FullTransitionWithAD(pAppDomain, pTarget, args, ThreadPoolThread);
+    ManagedThreadBase_FullTransition(pTarget, args, ThreadPoolThread);
 }
 
 // The Finalizer thread establishes exception handling at its base, but defers all the AppDomain
 // transitions.
-void ManagedThreadBase::FinalizerBase(Context::ADCallBackFcnType pTarget)
+void ManagedThreadBase::FinalizerBase(ADCallBackFcnType pTarget)
 {
     WRAPPER_NO_CONTRACT;
     ManagedThreadBase_NoADTransition(pTarget, FinalizerThread);
-}
-
-void ManagedThreadBase::FinalizerAppDomain(AppDomain *pAppDomain,
-                                           Context::ADCallBackFcnType pTarget,
-                                           LPVOID args,
-                                           ManagedThreadCallState *pTurnAround)
-{
-    WRAPPER_NO_CONTRACT;
-    pTurnAround->InitForFinalizer(pAppDomain,pTarget,args);
-    _ASSERTE(pTurnAround->flags == MTCSF_NormalBase);
-    ManagedThreadBase_DispatchInner(pTurnAround);
 }
 
 //+----------------------------------------------------------------------------
@@ -10611,7 +7786,7 @@ LPVOID Thread::GetStaticFieldAddress(FieldDesc *pFD)
 // 
 //+----------------------------------------------------------------------------
 
-TADDR Thread::GetStaticFieldAddrNoCreate(FieldDesc *pFD, PTR_AppDomain pDomain)
+TADDR Thread::GetStaticFieldAddrNoCreate(FieldDesc *pFD)
 {
     CONTRACTL {
         NOTHROW;
@@ -10631,11 +7806,11 @@ TADDR Thread::GetStaticFieldAddrNoCreate(FieldDesc *pFD, PTR_AppDomain pDomain)
     if (pFD->GetFieldType() == ELEMENT_TYPE_CLASS ||
         pFD->GetFieldType() == ELEMENT_TYPE_VALUETYPE)
     {
-        base = pMT->GetGCThreadStaticsBasePointer(dac_cast<PTR_Thread>(this), pDomain);
+        base = pMT->GetGCThreadStaticsBasePointer(dac_cast<PTR_Thread>(this));
     }
     else
     {
-        base = pMT->GetNonGCThreadStaticsBasePointer(dac_cast<PTR_Thread>(this), pDomain);
+        base = pMT->GetNonGCThreadStaticsBasePointer(dac_cast<PTR_Thread>(this));
     }
     
     if (base == NULL)
@@ -10729,184 +7904,22 @@ void Thread::DeleteThreadStaticData()
     }
     CONTRACTL_END;
 
-    // Deallocate the memory used by the table of ThreadLocalBlocks
-    if (m_pTLBTable != NULL)
-    {
-        for (SIZE_T i = 0; i < m_TLBTableSize; ++i)
-        {
-            ThreadLocalBlock * pTLB = m_pTLBTable[i];
-            if (pTLB != NULL)
-            {
-                m_pTLBTable[i] = NULL;
-                pTLB->FreeTable();
-                delete pTLB;
-            }
-        }
-
-        delete m_pTLBTable;
-        m_pTLBTable = NULL;
-    }
-    m_pThreadLocalBlock = NULL;
-    m_TLBTableSize = 0;
+    m_ThreadLocalBlock.FreeTable();
 }
 
 //+----------------------------------------------------------------------------
 //
-//  Method:     Thread::DeleteThreadStaticData   protected
+//  Method:     Thread::DeleteThreadStaticData   public
 //
-//  Synopsis:   Delete the static data for the given appdomain. This is called
-//              when the appdomain unloads.
+//  Synopsis:   Delete the static data for the given module. This is called
+//              when the AssemblyLoadContext unloads.
 //
-// 
+//
 //+----------------------------------------------------------------------------
 
-void Thread::DeleteThreadStaticData(AppDomain *pDomain)
+void Thread::DeleteThreadStaticData(ModuleIndex index)
 {
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    // Look up the AppDomain index
-    SIZE_T index = pDomain->GetIndex().m_dwIndex;
-
-    ThreadLocalBlock * pTLB = NULL;
-
-    // NULL out the pointer to the ThreadLocalBlock
-    if (index < m_TLBTableSize)
-    {
-        pTLB = m_pTLBTable[index];
-        m_pTLBTable[index] = NULL;
-    }
-
-    if (pTLB != NULL)
-    {
-        // Since the AppDomain is being unloaded anyway, all the memory used by
-        // the TLB will be reclaimed, so we don't really have to call FreeTable()
-        pTLB->FreeTable();
-
-        delete pTLB;
-    }
-}
-
-#ifdef FEATURE_LEAK_CULTURE_INFO
-void Thread::ResetCultureForDomain(ADID id)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-    THREADBASEREF thread = (THREADBASEREF) GetExposedObjectRaw();
-
-    if (thread == NULL)
-        return;
-
-    CULTUREINFOBASEREF userCulture = thread->GetCurrentUserCulture();
-    if (userCulture != NULL)
-    {
-        if (!userCulture->IsSafeCrossDomain() && userCulture->GetCreatedDomainID() == id)
-            thread->ResetCurrentUserCulture();
-    }
-
-    CULTUREINFOBASEREF UICulture = thread->GetCurrentUICulture();
-    if (UICulture != NULL)
-    {
-        if (!UICulture->IsSafeCrossDomain() && UICulture->GetCreatedDomainID() == id)
-            thread->ResetCurrentUICulture();
-    }
-}
-#endif // FEATURE_LEAK_CULTURE_INFO
-
-#ifndef FEATURE_LEAK_CULTURE_INFO
-void Thread::InitCultureAccessors()
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-    }
-    CONTRACTL_END;
-
-    OBJECTREF *pCurrentCulture = NULL;
-    Thread *pThread = GetThread();
-
-    GCX_COOP();
-
-    if (managedThreadCurrentCulture == NULL) {
-        managedThreadCurrentCulture = MscorlibBinder::GetField(FIELD__THREAD__CULTURE);
-        pCurrentCulture = (OBJECTREF*)pThread->GetStaticFieldAddress(managedThreadCurrentCulture);
-    }
-
-    if (managedThreadCurrentUICulture == NULL) {
-        managedThreadCurrentUICulture = MscorlibBinder::GetField(FIELD__THREAD__UI_CULTURE);
-        pCurrentCulture = (OBJECTREF*)pThread->GetStaticFieldAddress(managedThreadCurrentUICulture);
-    }
-}
-#endif // FEATURE_LEAK_CULTURE_INFO
-
-
-ARG_SLOT Thread::CallPropertyGet(BinderMethodID id, OBJECTREF pObject)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-    if (!pObject) {
-        return 0;
-    }
-
-    ARG_SLOT retVal;
-
-    GCPROTECT_BEGIN(pObject);
-    MethodDescCallSite propGet(id, &pObject);
-
-    // Set up the Stack.
-    ARG_SLOT pNewArgs = ObjToArgSlot(pObject);
-
-    // Make the actual call.
-    retVal = propGet.Call_RetArgSlot(&pNewArgs);
-    GCPROTECT_END();
-
-    return retVal;
-}
-
-ARG_SLOT Thread::CallPropertySet(BinderMethodID id, OBJECTREF pObject, OBJECTREF pValue)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-    }
-    CONTRACTL_END;
-
-    if (!pObject) {
-        return 0;
-    }
-
-    ARG_SLOT retVal;
-
-    GCPROTECT_BEGIN(pObject);
-    GCPROTECT_BEGIN(pValue);
-    MethodDescCallSite propSet(id, &pObject);
-
-    // Set up the Stack.
-    ARG_SLOT pNewArgs[] = {
-        ObjToArgSlot(pObject),
-        ObjToArgSlot(pValue)
-    };
-
-    // Make the actual call.
-    retVal = propSet.Call_RetArgSlot(pNewArgs);
-    GCPROTECT_END();
-    GCPROTECT_END();
-
-    return retVal;
+    m_ThreadLocalBlock.FreeTLM(index.m_dwIndex, FALSE /* isThreadShuttingDown */);
 }
 
 OBJECTREF Thread::GetCulture(BOOL bUICulture)
@@ -10918,253 +7931,17 @@ OBJECTREF Thread::GetCulture(BOOL bUICulture)
     }
     CONTRACTL_END;
 
-    FieldDesc *         pFD;
-
-    _ASSERTE(PreemptiveGCDisabled());
-
     // This is the case when we're building mscorlib and haven't yet created
     // the system assembly.
     if (SystemDomain::System()->SystemAssembly()==NULL || g_fForbidEnterEE) {
         return NULL;
     }
 
-    // Get the actual thread culture.
-    OBJECTREF pCurThreadObject = GetExposedObject();
-    _ASSERTE(pCurThreadObject!=NULL);
-
-    THREADBASEREF pThreadBase = (THREADBASEREF)(pCurThreadObject);
-    OBJECTREF pCurrentCulture = bUICulture ? pThreadBase->GetCurrentUICulture() : pThreadBase->GetCurrentUserCulture();
-
-    if (pCurrentCulture==NULL) {
-        GCPROTECT_BEGIN(pThreadBase);
-        if (bUICulture) {
-            // Call the Getter for the CurrentUICulture.  This will cause it to populate the field.
-            ARG_SLOT retVal = CallPropertyGet(METHOD__THREAD__GET_UI_CULTURE,
-                                           (OBJECTREF)pThreadBase);
-            pCurrentCulture = ArgSlotToObj(retVal);
-        } else {
-            //This is  faster than calling the property, because this is what the call does anyway.
-            pFD = MscorlibBinder::GetField(FIELD__CULTURE_INFO__CURRENT_CULTURE);
-            _ASSERTE(pFD);
-
-            pFD->CheckRunClassInitThrowing();
-
-            pCurrentCulture = pFD->GetStaticOBJECTREF();
-            _ASSERTE(pCurrentCulture!=NULL);
-        }
-        GCPROTECT_END();
-    }
-
+    OBJECTREF pCurrentCulture;
+    MethodDescCallSite propGet(bUICulture ? METHOD__CULTURE_INFO__GET_CURRENT_UI_CULTURE : METHOD__CULTURE_INFO__GET_CURRENT_CULTURE);
+    ARG_SLOT retVal = propGet.Call_RetArgSlot(NULL);
+    pCurrentCulture = ArgSlotToObj(retVal);
     return pCurrentCulture;
-}
-
-
-
-// copy culture name into szBuffer and return length
-int Thread::GetParentCultureName(__out_ecount(length) LPWSTR szBuffer, int length, BOOL bUICulture)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    // This is the case when we're building mscorlib and haven't yet created
-    // the system assembly.
-    if (SystemDomain::System()->SystemAssembly()==NULL) {
-        const WCHAR *tempName = W("en");
-        INT32 tempLength = (INT32)wcslen(tempName);
-        _ASSERTE(length>=tempLength);
-        memcpy(szBuffer, tempName, tempLength*sizeof(WCHAR));
-        return tempLength;
-    }
-
-    ARG_SLOT Result = 0;
-    INT32 retVal=0;
-    WCHAR *buffer=NULL;
-    INT32 bufferLength=0;
-    STRINGREF cultureName = NULL;
-
-    GCX_COOP();
-
-    struct _gc {
-        OBJECTREF pCurrentCulture;
-        OBJECTREF pParentCulture;
-    } gc;
-    ZeroMemory(&gc, sizeof(gc));
-    GCPROTECT_BEGIN(gc);
-
-    gc.pCurrentCulture = GetCulture(bUICulture);
-    if (gc.pCurrentCulture != NULL) {
-        Result = CallPropertyGet(METHOD__CULTURE_INFO__GET_PARENT, gc.pCurrentCulture);
-    }
-
-    if (Result) {
-        gc.pParentCulture = (OBJECTREF)(ArgSlotToObj(Result));
-        if (gc.pParentCulture != NULL)
-        {
-            Result = 0;
-            Result = CallPropertyGet(METHOD__CULTURE_INFO__GET_NAME, gc.pParentCulture);
-        }
-    }
-
-    GCPROTECT_END();
-
-    if (Result==0) {
-        return 0;
-    }
-
-
-    // Extract the data out of the String.
-    cultureName = (STRINGREF)(ArgSlotToObj(Result));
-    cultureName->RefInterpretGetStringValuesDangerousForGC((WCHAR**)&buffer, &bufferLength);
-
-    if (bufferLength<length) {
-        memcpy(szBuffer, buffer, bufferLength * sizeof (WCHAR));
-        szBuffer[bufferLength]=0;
-        retVal = bufferLength;
-    }
-
-    return retVal;
-}
-
-
-
-
-// copy culture name into szBuffer and return length
-int Thread::GetCultureName(__out_ecount(length) LPWSTR szBuffer, int length, BOOL bUICulture)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    // This is the case when we're building mscorlib and haven't yet created
-    // the system assembly.
-    if (SystemDomain::System()->SystemAssembly()==NULL || g_fForbidEnterEE) {
-        const WCHAR *tempName = W("en-US");
-        INT32 tempLength = (INT32)wcslen(tempName);
-        _ASSERTE(length>=tempLength);
-        memcpy(szBuffer, tempName, tempLength*sizeof(WCHAR));
-        return tempLength;
-    }
-
-    ARG_SLOT Result = 0;
-    INT32 retVal=0;
-    WCHAR *buffer=NULL;
-    INT32 bufferLength=0;
-    STRINGREF cultureName = NULL;
-
-    GCX_COOP ();
-
-    OBJECTREF pCurrentCulture = NULL;
-    GCPROTECT_BEGIN(pCurrentCulture)
-    {
-        pCurrentCulture = GetCulture(bUICulture);
-        if (pCurrentCulture != NULL)
-            Result = CallPropertyGet(METHOD__CULTURE_INFO__GET_NAME, pCurrentCulture);
-    }
-    GCPROTECT_END();
-
-    if (Result==0) {
-        return 0;
-    }
-
-    // Extract the data out of the String.
-    cultureName = (STRINGREF)(ArgSlotToObj(Result));
-    cultureName->RefInterpretGetStringValuesDangerousForGC((WCHAR**)&buffer, &bufferLength);
-
-    if (bufferLength<length) {
-        memcpy(szBuffer, buffer, bufferLength * sizeof (WCHAR));
-        szBuffer[bufferLength]=0;
-        retVal = bufferLength;
-    }
-
-    return retVal;
-}
-
-LCID GetThreadCultureIdNoThrow(Thread *pThread, BOOL bUICulture)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_TRIGGERS;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    LCID Result = LCID(-1);
-
-    EX_TRY
-    {
-        Result = pThread->GetCultureId(bUICulture);
-    }
-    EX_CATCH
-    {
-    }
-    EX_END_CATCH (SwallowAllExceptions);
-
-    return (INT32)Result;
-}
-
-// Return a language identifier.
-LCID Thread::GetCultureId(BOOL bUICulture)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    // This is the case when we're building mscorlib and haven't yet created
-    // the system assembly.
-    if (SystemDomain::System()->SystemAssembly()==NULL || g_fForbidEnterEE) {
-        return (LCID) -1;
-    }
-
-    LCID Result = (LCID) -1;
-
-#ifdef FEATURE_USE_LCID
-    GCX_COOP();
-
-    OBJECTREF pCurrentCulture = NULL;
-    GCPROTECT_BEGIN(pCurrentCulture)
-    {
-        pCurrentCulture = GetCulture(bUICulture);
-        if (pCurrentCulture != NULL)
-            Result = (LCID)CallPropertyGet(METHOD__CULTURE_INFO__GET_ID, pCurrentCulture);
-    }
-    GCPROTECT_END();
-#endif
-
-    return Result;
-}
-
-void Thread::SetCultureId(LCID lcid, BOOL bUICulture)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    GCX_COOP();
-
-    OBJECTREF CultureObj = NULL;
-    GCPROTECT_BEGIN(CultureObj)
-    {
-        // Convert the LCID into a CultureInfo.
-        GetCultureInfoForLCID(lcid, &CultureObj);
-
-        // Set the newly created culture as the thread's culture.
-        SetCulture(&CultureObj, bUICulture);
-    }
-    GCPROTECT_END();
 }
 
 void Thread::SetCulture(OBJECTREF *CultureObj, BOOL bUICulture)
@@ -11176,16 +7953,17 @@ void Thread::SetCulture(OBJECTREF *CultureObj, BOOL bUICulture)
     }
     CONTRACTL_END;
 
-    // Retrieve the exposed thread object.
-    OBJECTREF pCurThreadObject = GetExposedObject();
-    _ASSERTE(pCurThreadObject!=NULL);
+    MethodDescCallSite propSet(bUICulture
+        ? METHOD__CULTURE_INFO__SET_CURRENT_UI_CULTURE
+        : METHOD__CULTURE_INFO__SET_CURRENT_CULTURE);
 
-    // Set the culture property on the thread.
-    THREADBASEREF pThreadBase = (THREADBASEREF)(pCurThreadObject);
-    CallPropertySet(bUICulture
-                    ? METHOD__THREAD__SET_UI_CULTURE
-                    : METHOD__THREAD__SET_CULTURE,
-                    (OBJECTREF)pThreadBase, *CultureObj);
+    // Set up the Stack.
+    ARG_SLOT pNewArgs[] = {
+        ObjToArgSlot(*CultureObj)
+    };
+
+    // Make the actual call.
+    propSet.Call_RetArgSlot(pNewArgs);
 }
 
 void Thread::SetHasPromotedBytes ()
@@ -11198,7 +7976,7 @@ void Thread::SetHasPromotedBytes ()
 
     m_fPromoted = TRUE;
 
-    _ASSERTE(GCHeap::IsGCInProgress()  && IsGCThread ());
+    _ASSERTE(GCHeapUtilities::IsGCInProgress()  && IsGCThread ());
 
     if (!m_fPreemptiveGCDisabled)
     {
@@ -11212,7 +7990,6 @@ BOOL ThreadStore::HoldingThreadStore(Thread *pThread)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -11226,452 +8003,68 @@ BOOL ThreadStore::HoldingThreadStore(Thread *pThread)
     }
 }
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-void Thread::SetupFiberData()
+NOINLINE void Thread::OnIncrementCountOverflow(UINT32 *threadLocalCount, UINT64 *overflowCount)
+{
+    WRAPPER_NO_CONTRACT;
+    _ASSERTE(threadLocalCount != nullptr);
+    _ASSERTE(overflowCount != nullptr);
+
+    // Increment overflow, accumulate the count for this increment into the overflow count and reset the thread-local count
+
+    // The thread store lock, in coordination with other places that read these values, ensures that both changes
+    // below become visible together
+    ThreadStoreLockHolder tsl;
+
+    *threadLocalCount = 0;
+    InterlockedExchangeAdd64((LONGLONG *)overflowCount, (LONGLONG)UINT32_MAX + 1);
+}
+
+UINT64 Thread::GetTotalCount(SIZE_T threadLocalCountOffset, UINT64 *overflowCount)
 {
     CONTRACTL {
         NOTHROW;
-        GC_NOTRIGGER;
+        GC_TRIGGERS;
     }
     CONTRACTL_END;
 
-    _ASSERTE (this == GetThread());
-    _ASSERTE (m_pFiberData == NULL);
+    _ASSERTE(overflowCount != nullptr);
 
-    m_pFiberData = ClrTeb::GetFiberDataPtr();
-    if (m_pFiberData != NULL && (g_CORDebuggerControlFlags & DBCF_FIBERMODE) == 0)
+    // enumerate all threads, summing their local counts.
+    ThreadStoreLockHolder tsl;
+
+    UINT64 total = GetOverflowCount(overflowCount);
+
+    Thread *pThread = NULL;
+    while ((pThread = ThreadStore::GetAllThreadList(pThread, 0, 0)) != NULL)
     {
-        // We are in fiber mode
-        g_CORDebuggerControlFlags |= DBCF_FIBERMODE;
-        if (g_pDebugInterface)
-        {
-            g_pDebugInterface->SetFiberMode(true);
-        }
-    }
-}
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-#ifdef _DEBUG
-
-int Thread::MaxThreadRecord = 20;
-int Thread::MaxStackDepth = 20;
-
-const int Thread::MaxThreadTrackInfo = Thread::ThreadTrackInfo_Max;
-
-void Thread::AddFiberInfo(DWORD type)
-{
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_MODE_ANY;
-    STATIC_CONTRACT_SO_TOLERANT;
-
-#ifndef FEATURE_PAL
-    
-    if (m_pFiberInfo[0] == NULL) {
-        return;
-    }
-
-    DWORD mask = g_pConfig->SaveThreadInfoMask();
-    if ((mask & type) == 0)
-    {
-        return;
-    }
-
-    int slot = -1;
-    while (type != 0)
-    {
-        type >>= 1;
-        slot ++;
-    }
-
-    _ASSERTE (slot < ThreadTrackInfo_Max);
-
-    // use try to force ebp frame.
-    PAL_TRY_NAKED {
-        ULONG index = FastInterlockIncrement((LONG*)&m_FiberInfoIndex[slot])-1;
-        index %= MaxThreadRecord;
-        size_t unitBytes = sizeof(FiberSwitchInfo)-sizeof(size_t)+MaxStackDepth*sizeof(size_t);
-        FiberSwitchInfo *pInfo = (FiberSwitchInfo*)((char*)m_pFiberInfo[slot] + index*unitBytes);
-        pInfo->timeStamp = getTimeStamp();
-        pInfo->threadID = GetCurrentThreadId();
-
-#ifdef FEATURE_HIJACK
-        // We can't crawl the stack of a thread that currently has a hijack pending
-        // (since the hijack routine won't be recognized by any code manager). So we
-        // undo any hijack, the EE will re-attempt it later.
-        // Stack crawl happens on the current thread, which may not be 'this' thread.
-        Thread* pCurrentThread = GetThread();
-        if (pCurrentThread != NULL && (pCurrentThread->m_State & TS_Hijacked)) 
-        {
-            pCurrentThread->UnhijackThread();
-        }
-#endif
-        
-        int count = UtilCaptureStackBackTrace (2,MaxStackDepth,(PVOID*)pInfo->callStack,NULL);
-        while (count < MaxStackDepth) {
-            pInfo->callStack[count++] = 0;
-        }
-    }
-    PAL_EXCEPT_NAKED (EXCEPTION_EXECUTE_HANDLER)
-    {
-    }
-    PAL_ENDTRY_NAKED;
-#endif // !FEATURE_PAL
-}
-
-#endif // _DEBUG
-
-HRESULT Thread::SwitchIn(HANDLE threadHandle)
-{
-    // can't have dynamic contracts because this method is going to mess with TLS
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_MODE_ANY;
- 
-    //can't do heap allocation in this method
-    CantAllocHolder caHolder;
-
-    // !!! Can not use the following line, since it uses an object which .dctor calls
-    // !!! FLS_SETVALUE, and a new FLS is created after SwitchOut.
-    // CANNOTTHROWCOMPLUSEXCEPTION();
-
-    // Case Cookie to thread object and add to tls
-#ifdef _DEBUG
-    Thread *pThread = GetThread();
-    // If this is hit, we need to understand.
-    // Sometimes we see the assert but the memory does not match the assert.
-    if (pThread) {
-        DebugBreak();
-    }
-    //_ASSERT(GetThread() == NULL);
-#endif
-
-    if (GetThread() != NULL) {
-        return HOST_E_INVALIDOPERATION;
-    }
-
-    CExecutionEngine::SwitchIn();
-
-    // !!! no contract for this class.
-    // !!! We have not switched in tls block.
-    class EnsureTlsData
-    {
-    private:
-        Thread *m_pThread;
-        BOOL m_fNeedReset;
-    public:
-        EnsureTlsData(Thread* pThread){m_pThread = pThread; m_fNeedReset = TRUE;}
-        ~EnsureTlsData()
-        {
-            if (m_fNeedReset)
-            {
-                SetThread(NULL);
-                SetAppDomain(NULL);
-                CExecutionEngine::SwitchOut();
-            }
-        }
-        void SuppressRelease()
-        {
-            m_fNeedReset = FALSE;
-        }
-    };
-
-    EnsureTlsData ensure(this);
-
-#ifdef _DEBUG
-    if (CLRTaskHosted()) {
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        IHostTask *pTask = NULL;
-        _ASSERTE (CorHost2::GetHostTaskManager()->GetCurrentTask(&pTask) == S_OK &&
-                  (pTask == GetHostTask() || GetHostTask() == NULL));
-
-        if (pTask)
-            pTask->Release();
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-    }
-#endif
-
-    if (SetThread(this))
-    {
-        Thread *pThread = GetThread();
-        if (!pThread)
-            return E_OUTOFMEMORY;
-
-        // !!! make sure that we switchin TLS so that FLS is available for Contract etc.
-
-        // We redundantly keep the domain in its own TLS slot, for faster access from
-        // stubs
-        if (!SetAppDomain(m_pDomainAtTaskSwitch))
-        {
-            return E_OUTOFMEMORY;
-        }
-
-        CANNOTTHROWCOMPLUSEXCEPTION();
-#if 0
-        // We switch out a fiber only if the fiber is in preemptive gc mode.
-        _ASSERTE (!PreemptiveGCDisabled());
-#endif
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        if (CLRTaskHosted() && GetHostTask() == NULL)
-        {
-            // Reset has been called on this task.
-
-            if (! SetStackLimits(fAll))
-            {
-                return E_FAIL;
-            }
-
-            // We commit the thread's entire stack when it enters the runtime to allow us to be reliable in low memory
-            // situtations. See the comments in front of Thread::CommitThreadStack() for mor information.
-            if (!Thread::CommitThreadStack(this))
-            {
-                return E_OUTOFMEMORY;
-            }
-
-            HRESULT hr = CorHost2::GetHostTaskManager()->GetCurrentTask(&m_pHostTask);
-            _ASSERTE (hr == S_OK && m_pHostTask);
-
-#ifdef _DEBUG
-            AddFiberInfo(ThreadTrackInfo_Lifetime);
-#endif
-
-            m_pFiberData = ClrTeb::GetFiberDataPtr();
-
-            m_OSThreadId = ::GetCurrentThreadId();
-
-#ifdef ENABLE_CONTRACTS
-            m_pClrDebugState = ::GetClrDebugState();
-#endif
-            ResetThreadState(TS_TaskReset);
-        }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-        // We have to be switched in on the same fiber
-        _ASSERTE (GetCachedStackBase() == GetStackUpperBound());
-
-        if (m_pFiberData)
-        {
-            // only set the m_OSThreadId to bad food in Fiber mode
-            m_OSThreadId = ::GetCurrentThreadId();
-#ifdef PROFILING_SUPPORTED
-            // If a profiler is present, then notify the profiler that a
-            // thread has been created.
-            {
-                BEGIN_PIN_PROFILER(CORProfilerTrackThreads());
-                g_profControlBlock.pProfInterface->ThreadAssignedToOSThread(
-                    (ThreadID)this, m_OSThreadId);
-                END_PIN_PROFILER();
-            }
-#endif // PROFILING_SUPPORTED
-        }
-        SetThreadHandle(threadHandle);
-
-#ifndef FEATURE_PAL
-        m_pTEB = (struct _NT_TIB*)NtCurrentTeb();
-#endif // !FEATURE_PAL
-
-#if 0
-        if (g_TrapReturningThreads && m_fPreemptiveGCDisabled && this != ThreadSuspend::GetSuspensionThread()) {
-            WorkingOnThreadContextHolder workingOnThreadContext(this);
-            if (workingOnThreadContext.Acquired())
-            {
-                HandledJITCase(TRUE);
-            }
-        }
-#endif
-
-#ifdef _DEBUG
-        // For debugging purpose, we save callstack during task switch.  On Win64, the callstack
-        // is done within OS loader lock, and obtaining managed callstack may cause fiber switch.
-        SetThreadStateNC(TSNC_InTaskSwitch);
-        AddFiberInfo(ThreadTrackInfo_Schedule);
-        ResetThreadStateNC(TSNC_InTaskSwitch);
-#endif
-
-        ensure.SuppressRelease();
-        return S_OK;
-    }
-    else
-    {
-        return E_FAIL;
-    }
-}
-
-HRESULT Thread::SwitchOut()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return E_NOTIMPL;
-}
-
-void Thread::InternalSwitchOut()
-{
-    INDEBUG( BOOL fNoTLS = (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    {
-        // Can't do heap allocation in this method.
-        // We need to scope this holder because its destructor accesses FLS.
-    CantAllocHolder caHolder;
-    
-    // !!! Can not use the following line, since it uses an object which .dctor calls
-    // !!! FLS_SETVALUE, and a new FLS is created after SwitchOut.
-    // CANNOTTHROWCOMPLUSEXCEPTION();
-
-    _ASSERTE(GetThread() == this);
-
-    _ASSERTE (!fNoTLS ||
-              (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-
-#if 0
-    // workaround wwl: for SQL reschedule
-#ifndef _DEBUG
-        if (PreemptiveGCDisabled)
-        {
-        DebugBreak();
-    }
-#endif
-    _ASSERTE(!PreemptiveGCDisabled());
-#endif
-
-    // Can not assert here.  If a mutex is orphaned, the thread will have ThreadAffinity.
-    //_ASSERTE(!HasThreadAffinity());
-
-    _ASSERTE (!fNoTLS ||
-              (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-
-#ifdef _DEBUG
-    // For debugging purpose, we save callstack during task switch.  On Win64, the callstack
-    // is done within OS loader lock, and obtaining managed callstack may cause fiber switch.
-    SetThreadStateNC(TSNC_InTaskSwitch);
-    AddFiberInfo(ThreadTrackInfo_Schedule);
-    ResetThreadStateNC(TSNC_InTaskSwitch);
-#endif
-
-    _ASSERTE (!fNoTLS ||
-              (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-
-    m_pDomainAtTaskSwitch = GetAppDomain();
-
-    if (m_pFiberData)
-    {
-        // only set the m_OSThreadId to bad food in Fiber mode
-        m_OSThreadId = SWITCHED_OUT_FIBER_OSID;
-#ifdef PROFILING_SUPPORTED
-        // If a profiler is present, then notify the profiler that a
-        // thread has been created.
-        {
-            BEGIN_PIN_PROFILER(CORProfilerTrackThreads());
-            g_profControlBlock.pProfInterface->ThreadAssignedToOSThread(
-                (ThreadID)this, m_OSThreadId);
-            END_PIN_PROFILER();
-        }
-#endif // PROFILING_SUPPORTED
-    }
-
-    _ASSERTE (!fNoTLS ||
-              (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-
-    HANDLE hThread = GetThreadHandle();
-
-    SetThreadHandle (SWITCHOUT_HANDLE_VALUE);
-    while (m_dwThreadHandleBeingUsed > 0)
-    {
-        // Another thread is using the handle now.
-#undef Sleep
-        // We can not call __SwitchToThread since we can not go back to host.
-        ::Sleep(10);
-#define Sleep(a) Dont_Use_Sleep(a)
-    }
-
-        if (m_WeOwnThreadHandle && m_ThreadHandleForClose == INVALID_HANDLE_VALUE)
-        {
-        m_ThreadHandleForClose = hThread;
-    }
-
-    // The host is getting control of this thread, so if we were trying
-    // to yield this thread, we can stop those attempts now.
-    ResetThreadState(TS_YieldRequested);
-
-    _ASSERTE (!fNoTLS ||
-              (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-    }
-
-    CExecutionEngine::SwitchOut();
-
-    // We need to make sure that TLS are touched last here.
-    // Contract uses TLS.
-    SetThread(NULL);
-    SetAppDomain(NULL);
-
-    _ASSERTE (!fNoTLS ||
-              (CExecutionEngine::CheckThreadStateNoCreate(0) == NULL));
-}
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-HRESULT Thread::GetMemStats (COR_GC_THREAD_STATS *pStats)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    // Get the allocation context which contains this counter in it.
-    alloc_context *p = &m_alloc_context;
-    pStats->PerThreadAllocation = p->alloc_bytes + p->alloc_bytes_loh;
-    if (GetHasPromotedBytes())
-        pStats->Flags = COR_GC_THREAD_HAS_PROMOTED_BYTES;
-
-    return S_OK;
-}
-#endif //FEATURE_INCLUDE_ALL_INTERFACES
-
-
-LONG Thread::GetTotalThreadPoolCompletionCount()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    LONG total;
-    if (g_fEEStarted) //make sure we actually have a thread store
-    {
-        // make sure up-to-date thread-local counts are visible to us
-        ::FlushProcessWriteBuffers();
-
-        // enumerate all threads, summing their local counts.
-        ThreadStoreLockHolder tsl;
-
-        total = s_threadPoolCompletionCountOverflow.Load();
-
-        Thread *pThread = NULL;
-        while ((pThread = ThreadStore::GetAllThreadList(pThread, 0, 0)) != NULL)
-        {
-            total += pThread->m_threadPoolCompletionCount;
-        }
-    }
-    else
-    {
-        total = s_threadPoolCompletionCountOverflow.Load();
+        total += *GetThreadLocalCountRef(pThread, threadLocalCountOffset);
     }
 
     return total;
 }
 
+UINT64 Thread::GetTotalThreadPoolCompletionCount()
+{
+    CONTRACTL {
+        NOTHROW;
+        GC_TRIGGERS;
+    }
+    CONTRACTL_END;
+
+    // enumerate all threads, summing their local counts.
+    ThreadStoreLockHolder tsl;
+
+    UINT64 total = GetWorkerThreadPoolCompletionCountOverflow() + GetIOThreadPoolCompletionCountOverflow();
+
+    Thread *pThread = NULL;
+    while ((pThread = ThreadStore::GetAllThreadList(pThread, 0, 0)) != NULL)
+    {
+        total += pThread->m_workerThreadPoolCompletionCount;
+        total += pThread->m_ioThreadPoolCompletionCount;
+    }
+
+    return total;
+}
 
 INT32 Thread::ResetManagedThreadObject(INT32 nPriority)
 {
@@ -11691,44 +8084,17 @@ INT32 Thread::ResetManagedThreadObjectInCoopMode(INT32 nPriority)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
     THREADBASEREF pObject = (THREADBASEREF)ObjectFromHandle(m_ExposedObject);
     if (pObject != NULL)
     {
-        pObject->ResetCulture();
         pObject->ResetName();
         nPriority = pObject->GetPriority();
     }
 
     return nPriority;
-}
-
-void Thread::FullResetThread()
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_TRIGGERS;
-    }
-    CONTRACTL_END;
-
-    GCX_COOP();
-
-    // We need to put this thread in COOPERATIVE GC first to solve race between AppDomain::Unload
-    // and Thread::Reset.  AppDomain::Unload does a full GC to collect all roots in one AppDomain.
-    // ThreadStaticData used to be coupled with a managed array of objects in the managed Thread
-    // object, however this is no longer the case.
-
-    // TODO: Do we still need to put this thread into COOP mode?
-
-    GCX_FORBID();
-    DeleteThreadStaticData();
-    ResetSecurityInfo();
-
-    m_alloc_context.alloc_bytes = 0;
-    m_fPromoted = FALSE;
 }
 
 BOOL Thread::IsRealThreadPoolResetNeeded()
@@ -11738,7 +8104,6 @@ BOOL Thread::IsRealThreadPoolResetNeeded()
         NOTHROW;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
-        SO_TOLERANT;
     } 
     CONTRACTL_END;
 
@@ -11758,11 +8123,11 @@ BOOL Thread::IsRealThreadPoolResetNeeded()
     return FALSE;
 }
 
-void Thread::InternalReset(BOOL fFull, BOOL fNotFinalizerThread, BOOL fThreadObjectResetNeeded, BOOL fResetAbort)
+void Thread::InternalReset(BOOL fNotFinalizerThread, BOOL fThreadObjectResetNeeded, BOOL fResetAbort)
 {
     CONTRACTL {
         NOTHROW;
-        if(!fNotFinalizerThread || fThreadObjectResetNeeded) {GC_TRIGGERS;SO_INTOLERANT;} else {GC_NOTRIGGER;SO_TOLERANT;}        
+        if(!fNotFinalizerThread || fThreadObjectResetNeeded) {GC_TRIGGERS;} else {GC_NOTRIGGER;}        
     }
     CONTRACTL_END;
 
@@ -11781,21 +8146,6 @@ void Thread::InternalReset(BOOL fFull, BOOL fNotFinalizerThread, BOOL fThreadObj
     {
         nPriority = ResetManagedThreadObject(nPriority);
     }
-
-    if (fFull)
-    {
-        FullResetThread();
-    }
-
-#ifndef FEATURE_CORECLR
-    _ASSERTE (m_dwCriticalRegionCount == 0);
-    m_dwCriticalRegionCount = 0;
-
-    _ASSERTE (m_dwThreadAffinityCount == 0);
-    m_dwThreadAffinityCount = 0;
-#endif // !FEATURE_CORECLR
-
-    //m_MarshalAlloc.Collapse(NULL);
 
     if (fResetAbort && IsAbortRequested()) {
         UnmarkThreadForAbort(TAR_ALL);
@@ -11822,190 +8172,15 @@ void Thread::InternalReset(BOOL fFull, BOOL fNotFinalizerThread, BOOL fThreadObj
     }
 }
 
-HRESULT Thread::Reset(BOOL fFull)
-{
-    // !!! Can not use non-static contract here.
-    // !!! Contract depends on Thread object for GC_TRIGGERS.
-    // !!! At the end of this function, we call InternalSwitchOut,
-    // !!! and then GetThread()=NULL, and dtor of contract does not work any more.
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_ENTRY_POINT;
-
-    if ( !g_fEEStarted)
-        return(E_FAIL);
-
-    HRESULT hr = S_OK;
-
-    BEGIN_SO_INTOLERANT_CODE_NOPROBE;
-
-#ifdef _DEBUG
-    if (CLRTaskHosted()) {
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        // Reset is a heavy operation.  We will call into SQL for lock and memory operations.
-        // The host better keeps IHostTask alive.
-        _ASSERTE (GetCurrentHostTask() == GetHostTask());
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-    }
-
-    _ASSERTE (GetThread() == this);
-#ifdef _TARGET_X86_
-    _ASSERTE (GetExceptionState()->GetContextRecord() == NULL);
-#endif
-#endif
-
-    if (GetThread() != this)
-    {
-        IfFailGo(E_UNEXPECTED);
-    }
-
-    if (HasThreadState(Thread::TS_YieldRequested))
-    {
-        ResetThreadState(Thread::TS_YieldRequested);
-    }
-
-    _ASSERTE (!PreemptiveGCDisabled());
-    _ASSERTE (m_pFrame == FRAME_TOP);
-    // A host should not recycle a CLRTask if the task is created by us through CreateNewThread.
-    // We need to make Thread.Join work for this case.
-    if ((m_StateNC & (TSNC_CLRCreatedThread | TSNC_CannotRecycle)) != 0)
-    {
-        // Todo: wwl better returning code.
-        IfFailGo(E_UNEXPECTED);
-    }
-
-#ifdef FEATURE_COMINTEROP_APARTMENT_SUPPORT
-    if (IsCoInitialized())
-    {
-        // The current thread has done CoInitialize
-        IfFailGo(E_UNEXPECTED);
-    }
-#endif
-
-#ifdef _DEBUG
-    AddFiberInfo(ThreadTrackInfo_Lifetime);
-#endif
-
-    SetThreadState(TS_TaskReset);
-
-    if (IsAbortRequested())
-    {
-        EEResetAbort(Thread::TAR_ALL);
-    }
-  
-    InternalReset(fFull);
-
-    if (PreemptiveGCDisabled())
-    {
-        EnablePreemptiveGC();
-    }
-
-    {
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        // We need to scope this assert because of 
-        // the jumps to ErrExit from above.
-        GCX_ASSERT_PREEMP();
-
-    _ASSERTE (m_pHostTask);
-
-    ReleaseHostTask();
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-#ifdef WIN64EXCEPTIONS
-    ExceptionTracker::PopTrackers((void*)-1);
-#endif // WIN64EXCEPTIONS
-
-        ResetThreadStateNC(TSNC_UnbalancedLocks);
-        m_dwLockCount = 0;
-#ifndef FEATURE_CORECLR
-        m_dwCriticalRegionCount = 0;
-#endif // !FEATURE_CORECLR
-
-    InternalSwitchOut();
-    m_OSThreadId = SWITCHED_OUT_FIBER_OSID;
-    }
-
-ErrExit:
-
-    END_SO_INTOLERANT_CODE_NOPROBE;
-
-#ifdef ENABLE_CONTRACTS_DATA
-    // Decouple our cache from the Task.
-    // Next time, the thread may be run on a different thread.
-    if (SUCCEEDED(hr))
-    {
-    m_pClrDebugState = NULL;
-    }
-#endif
-
-    return hr;
-}
-
-HRESULT Thread::ExitTask ()
-{
-    // !!! Can not use contract here.
-    // !!! Contract depends on Thread object for GC_TRIGGERS.
-    // !!! At the end of this function, we call InternalSwitchOut,
-    // !!! and then GetThread()=NULL, and dtor of contract does not work any more.
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_GC_TRIGGERS;
-    STATIC_CONTRACT_ENTRY_POINT;
-
-    if ( !g_fEEStarted)
-        return(E_FAIL);
-
-    HRESULT hr = S_OK;
-
-    // <TODO> We need to probe here, but can't introduce destructors etc.</TODO>
-    BEGIN_CONTRACT_VIOLATION(SOToleranceViolation);
-
-    //OnThreadTerminate(FALSE);
-    _ASSERTE (this == GetThread());
-    _ASSERTE (!PreemptiveGCDisabled());
-
-    // Can not assert the following.  SQL may call ExitTask after addref and abort a task.
-    //_ASSERTE (m_UnmanagedRefCount == 0);
-    if (this != GetThread())
-        IfFailGo(HOST_E_INVALIDOPERATION);
-
-    if (HasThreadState(Thread::TS_YieldRequested))
-    {
-        ResetThreadState(Thread::TS_YieldRequested);
-    }
-
-#ifdef FEATURE_COMINTEROP_APARTMENT_SUPPORT
-    if (IsCoInitialized())
-    {
-        // This thread has used ole32.  We need to balance CoInitialize call on this thread.
-        // We also need to free any COM objects created on this thread.
-
-        // If we don't do this work, ole32 is going to do the same during its DLL_THREAD_DETACH,
-        // and may re-enter CLR.
-        CleanupCOMState();
-    }
-#endif
-    m_OSThreadId = SWITCHED_OUT_FIBER_OSID;
-    hr = DetachThread(FALSE);
-    // !!! Do not touch any field of Thread object.  The Thread object is subject to delete
-    // !!! after DetachThread call.
-ErrExit:;
-
-    END_CONTRACT_VIOLATION;
-
-    return hr;
-}
-
 HRESULT Thread::Abort ()
 {
     CONTRACTL
     {
         NOTHROW;
         if (GetThread()) {GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(return COR_E_STACKOVERFLOW;);
     EX_TRY
     {
         UserAbort(TAR_Thread, EEPolicy::TA_Safe, INFINITE, Thread::UAC_Host);
@@ -12014,7 +8189,6 @@ HRESULT Thread::Abort ()
     {
     }
     EX_END_CATCH(SwallowAllExceptions);
-    END_SO_INTOLERANT_CODE;
 
     return S_OK;
 }
@@ -12025,11 +8199,8 @@ HRESULT Thread::RudeAbort()
     {
         NOTHROW;
         if (GetThread()) {GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
-        SO_TOLERANT;
     }
     CONTRACTL_END;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(return COR_E_STACKOVERFLOW);
 
     EX_TRY
     {
@@ -12040,8 +8211,6 @@ HRESULT Thread::RudeAbort()
     }
     EX_END_CATCH(SwallowAllExceptions);
 
-    END_SO_INTOLERANT_CODE;
-
     return S_OK;
 }
 
@@ -12050,7 +8219,6 @@ HRESULT Thread::NeedsPriorityScheduling(BOOL *pbNeedsPriorityScheduling)
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -12059,253 +8227,12 @@ HRESULT Thread::NeedsPriorityScheduling(BOOL *pbNeedsPriorityScheduling)
     return S_OK;
 }
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-HRESULT Thread::YieldTask()
-{
-#undef Sleep
-    CONTRACTL {
-        NOTHROW;
-        if (GetThread()) {GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    //can't do heap allocation in this method
-    CantAllocHolder caHolder;
-    _ASSERTE(CLRTaskHosted());
-
-    // The host must guarantee that we have enough stack before they call this API.
-    // We unfortunately do not have a good mechanism to indicate/enforce this and it's too 
-    // late in Whidbey to add one now. We should definitely consider adding such a 
-    // mechanism in Orcas however. For now we will work around this by marking the 
-    // method as SO_TOLERANT and disabling SO tolerance violations for any code it calls.
-    CONTRACT_VIOLATION(SOToleranceViolation);
-
-    //
-    // YieldTask should not be called from a managed thread, as it can lead to deadlocks.
-    // However, some tests do this, and it would be hard to change that.  Let's at least ensure
-    // that they are not shooting themselves in the foot.
-    //
-    Thread* pCurThread = GetThread();
-    if (this == pCurThread)
-    {
-        // We will suspend the target thread.  If YieldTask is called on the current thread,
-        // we will suspend the current thread forever.
-        return HOST_E_INVALIDOPERATION;
-    }
-
-    FAULT_FORBID();
-
-    // This function has been called by the host, and the host needs not
-    // be reentrant.  Therefore, no code running below this function can
-    // cause calls back into the host.
-    ForbidCallsIntoHostOnThisThreadHolder forbidCallsIntoHostOnThisThread(TRUE /*dummy*/);
-    while (!forbidCallsIntoHostOnThisThread.Acquired())
-    {
-        // We can not call __SwitchToThread since we can not go back to host.
-        ::Sleep(10);
-        forbidCallsIntoHostOnThisThread.Acquire();
-    }
-
-    // So that the thread can yield when it tries to switch to coop gc.
-    CounterHolder trtHolder(&g_TrapReturningThreads);
-
-    // One worker on a thread only.
-    while (TRUE)
-    {
-        LONG curValue = m_State;
-        if ((curValue & TS_YieldRequested) != 0)
-        {
-            // The host has previously called YieldTask for this thread,
-            // and the thread has not cleared the flag yet.
-            return S_FALSE;
-        }
-        else if ((curValue & TS_Unstarted) != 0)
-        {
-            // The task is still unstarted, so we can consider the host
-            // to be in control of this thread, which means we have
-            // succeeded in getting the host in control.
-            return S_OK;
-        }
-
-        CONSISTENCY_CHECK(sizeof(m_State) == sizeof(LONG));
-        if (FastInterlockCompareExchange((LONG*)&m_State, curValue | TS_YieldRequested, curValue) == curValue)
-        {
-            break;
-        }
-    }
-
-#ifdef PROFILING_SUPPORTED
-    {
-        BEGIN_PIN_PROFILER(CORProfilerTrackSuspends());
-        g_profControlBlock.pProfInterface->RuntimeThreadSuspended((ThreadID)this);
-        END_PIN_PROFILER();
-    }
-#endif // PROFILING_SUPPORTED
-
-    while (m_State & TS_YieldRequested)
-    {
-        BOOL fDone = FALSE;
-
-        if (m_State & (TS_Dead | TS_Detached))
-        {
-            // The thread is dead, in other words, yielded forever.
-            // Don't bother clearing TS_YieldRequested, as nobody
-            // is going to look at it any more.
-            break;
-        }
-
-        CounterHolder handleHolder(&m_dwThreadHandleBeingUsed);
-        HANDLE hThread = GetThreadHandle();
-        if (hThread == INVALID_HANDLE_VALUE)
-        {
-            // The thread is dead, in other words, yielded forever.
-            // Don't bother clearing TS_YieldRequested, as nobody
-            // is going to look at it any more.
-            break;
-        }
-        else if (hThread == SWITCHOUT_HANDLE_VALUE)
-        {
-            // The thread is currently switched out.
-            // This means that the host has control of the thread,
-            // so we can stop our attempts to yield it.  Note that
-            // TS_YieldRequested is cleared in InternalSwitchOut.  (If we
-            // were to clear it here, we could race against another
-            // thread that is running YieldTask.)
-            break;
-        }
-
-        DWORD dwSuspendCount = ::SuspendThread(hThread);
-        if ((int)dwSuspendCount >= 0) 
-        {
-            if (!EnsureThreadIsSuspended(hThread, this))
-            {
-                goto Retry;
-            }
-
-            if (hThread == GetThreadHandle())
-            {
-                if (m_dwForbidSuspendThread != 0)
-                {
-                    goto Retry;
-                }
-            }
-            else
-            {
-                // A thread was switch out but in again.
-                // We suspended the wrong thread; resume it and give
-                // up our attempts to yield.  Note that TS_YieldRequested
-                // is cleared in InternalSwitchOut.
-                ::ResumeThread(hThread);
-                break;
-            }
-        }
-        else
-        {
-            // We can get here either SuspendThread fails
-            // Or the fiber thread dies after this fiber switched out.
-            
-            if ((int)dwSuspendCount != -1)
-            {
-                 STRESS_LOG1(LF_SYNC, LL_INFO1000, "In Thread::YieldTask ::SuspendThread returned %x \n", dwSuspendCount);
-            }
-            if (GetThreadHandle() == SWITCHOUT_HANDLE_VALUE)
-            {
-                // The thread was switched out while we tried to suspend it.
-                // This means that the host has control of the thread,
-                // so we can stop our attempts to yield it.  Note that
-                // TS_YieldRequested is cleared in InternalSwitchOut.  (If we
-                // were to clear it here, we could race against another
-                // thread that is running YieldTask.)
-                break;
-            }
-            else {
-                continue;
-            }
-        }
-
-        if (!m_fPreemptiveGCDisabled)
-        {
-            ::ResumeThread(hThread);
-            break;
-        }
-
-#ifdef FEATURE_HIJACK
-
-#ifdef _DEBUG
-        if (pCurThread != NULL)
-        {
-            pCurThread->dbg_m_cSuspendedThreads ++;
-            _ASSERTE(pCurThread->dbg_m_cSuspendedThreads > 0);
-        }
-#endif
-
-        // Only check for HandledJITCase if we actually suspended the thread.
-        if ((int)dwSuspendCount >= 0)
-        {
-            WorkingOnThreadContextHolder workingOnThreadContext(this);
-            if (workingOnThreadContext.Acquired() && HandledJITCase())
-            {
-                // Redirect thread so we can capture a good thread context
-                // (GetThreadContext is not sufficient, due to an OS bug).
-                // If we don't succeed (should only happen on Win9X, due to
-                // a different OS bug), we must resume the thread and try
-                // again.
-                fDone = CheckForAndDoRedirectForYieldTask();
-            }
-        }
-
-#ifdef _DEBUG
-        if (pCurThread != NULL)
-        {
-            _ASSERTE(pCurThread->dbg_m_cSuspendedThreads > 0);
-            pCurThread->dbg_m_cSuspendedThreads --;
-            _ASSERTE(pCurThread->dbg_m_cSuspendedThreadsWithoutOSLock <= pCurThread->dbg_m_cSuspendedThreads);
-        }
-#endif //_DEBUG
-
-#endif // FEATURE_HIJACK
-
-Retry:
-        ::ResumeThread(hThread);
-        if (fDone)
-        {
-            // We managed to redirect the thread, so we know that it will yield.
-            // We can let the actual yielding happen asynchronously.
-            break;
-        }
-        handleHolder.Release();
-        ::Sleep(1);
-    }
-#ifdef PROFILING_SUPPORTED
-    {
-        BEGIN_PIN_PROFILER(CORProfilerTrackSuspends());
-        g_profControlBlock.pProfInterface->RuntimeThreadResumed((ThreadID)this);
-        END_PIN_PROFILER();
-    }
-#endif
-    return S_OK;
-#define Sleep(a) Dont_Use_Sleep(a)
-}
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
 HRESULT Thread::LocksHeld(SIZE_T *pLockCount)
 {
     LIMITED_METHOD_CONTRACT;
 
     *pLockCount = m_dwLockCount;
-#ifndef FEATURE_CORECLR
-    *pLockCount += m_dwCriticalRegionCount;
-#endif // !FEATURE_CORECLR
-    return S_OK;
-}
-
-HRESULT Thread::SetTaskIdentifier(TASKID asked)
-{
-    LIMITED_METHOD_CONTRACT;
-
-    // @todo: Should be check for uniqueness?
-    m_TaskId = asked;
     return S_OK;
 }
 
@@ -12320,7 +8247,6 @@ HRESULT Thread::BeginPreventAsyncAbort()
 
 #ifdef _DEBUG
     ASSERT(count > 0);
-    AddFiberInfo(ThreadTrackInfo_Abort);
 
     FastInterlockIncrement((LONG*)&m_dwDisableAbortCheckCount);
 #endif
@@ -12339,7 +8265,6 @@ HRESULT Thread::EndPreventAsyncAbort()
 
 #ifdef _DEBUG
     ASSERT(count >= 0);
-    AddFiberInfo(ThreadTrackInfo_Abort);
 
     FastInterlockDecrement((LONG*)&m_dwDisableAbortCheckCount);
 #endif
@@ -12347,57 +8272,6 @@ HRESULT Thread::EndPreventAsyncAbort()
     return S_OK;
 }
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-// We release m_pHostTask during ICLRTask::Reset and ICLRTask::ExitTask call.
-// This function allows us to synchronize obtaining m_pHostTask with Thread reset or exit.
-IHostTask* Thread::GetHostTaskWithAddRef()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    CounterIncrease(&m_dwHostTaskRefCount);
-    IHostTask *pHostTask = m_pHostTask;
-    if (pHostTask != NULL)
-    {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        pHostTask->AddRef();
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-    }
-    CounterDecrease(&m_dwHostTaskRefCount);
-    return pHostTask;
-}
-
-void Thread::ReleaseHostTask()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    if (m_pHostTask == NULL)
-    {
-        return;
-    }
-
-    IHostTask *pHostTask = m_pHostTask;
-    m_pHostTask = NULL;
-
-    YIELD_WHILE (m_dwHostTaskRefCount > 0);
-    
-    BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-    pHostTask->Release();
-    END_SO_TOLERANT_CODE_CALLING_HOST;
-
-    STRESS_LOG1 (LF_SYNC, LL_INFO100, "Release HostTask %p", pHostTask);
-}
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
 ULONG Thread::AddRef()
 {
@@ -12408,9 +8282,6 @@ ULONG Thread::AddRef()
     _ASSERTE (m_UnmanagedRefCount != (DWORD) -1);
     ULONG ref = FastInterlockIncrement((LONG*)&m_UnmanagedRefCount);
 
-#ifdef _DEBUG
-    AddFiberInfo(ThreadTrackInfo_Lifetime);
-#endif
     return ref;
 }
 
@@ -12422,9 +8293,6 @@ ULONG Thread::Release()
     _ASSERTE (m_ExternalRefCount > 0);
     _ASSERTE (m_UnmanagedRefCount > 0);
     ULONG ref = FastInterlockDecrement((LONG*)&m_UnmanagedRefCount);
-#ifdef _DEBUG
-    AddFiberInfo(ThreadTrackInfo_Lifetime);
-#endif
     return ref;
 }
 
@@ -12432,537 +8300,8 @@ HRESULT Thread::QueryInterface(REFIID riid, void **ppUnk)
 {
     LIMITED_METHOD_CONTRACT;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    if (IID_ICLRTask2 == riid)
-        *ppUnk = (ICLRTask2 *)this;
-    else if (IID_ICLRTask == riid)
-        *ppUnk = (ICLRTask *)this;
-    else 
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
         return E_NOINTERFACE;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    AddRef();
-    return S_OK;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-}
-
-BOOL IsHostedThread()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    if (!CLRTaskHosted())
-    {
-        return FALSE;
-    }
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    Thread *pThread = GetThread();
-    if (pThread && pThread->GetHostTask() != NULL)
-    {
-        return TRUE;
-    }
-
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-    IHostTask *pHostTask = NULL;
-    BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        pManager->GetCurrentTask(&pHostTask);
-    END_SO_TOLERANT_CODE_CALLING_HOST;
-
-    BOOL fRet = (pHostTask != NULL);
-    if (pHostTask)
-    {
-        if (pThread)
-        {
-            _ASSERTE (pThread->GetHostTask() == NULL);
-            pThread->m_pHostTask = pHostTask;
-        }
-        else
-        {
-            pHostTask->Release();
-        }
-    }
-
-    return fRet;
-#else // !FEATURE_INCLUDE_ALL_INTERFACES
-    return FALSE;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-}
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-IHostTask *GetCurrentHostTask()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        MODE_ANY;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    IHostTaskManager *provider = CorHost2::GetHostTaskManager();
-
-    IHostTask *pHostTask = NULL;
-
-    BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-    provider->GetCurrentTask(&pHostTask);
-    END_SO_TOLERANT_CODE_CALLING_HOST;
-
-    if (pHostTask)
-    {
-    pHostTask->Release();
-    }
-
-    return pHostTask;
-}
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-void __stdcall Thread::LeaveRuntime(size_t target)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr = LeaveRuntimeNoThrow(target);
-    if (FAILED(hr))
-        ThrowHR(hr);
-}
-
-HRESULT Thread::LeaveRuntimeNoThrow(size_t target)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    if (!CLRTaskHosted())
-    {
-        return S_OK;
-    }
-
-    if (!IsHostedThread())
-    {
-        return S_OK;
-    }
-
-    HRESULT hr = S_OK;
- 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    // A SQL thread can enter the runtime w/o a managed thread.
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(hr = COR_E_STACKOVERFLOW);
-
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-    if (pManager)
-    {
-#ifdef _DEBUG
-        Thread *pThread = GetThread();
-        if (pThread)
-        {
-            pThread->AddFiberInfo(Thread::ThreadTrackInfo_UM_M);
-        }
-#endif
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pManager->LeaveRuntime(target);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-    }
-    END_SO_INTOLERANT_CODE;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    return hr;
-}
-
-void __stdcall Thread::LeaveRuntimeThrowComplus(size_t target)
-{
-
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        ENTRY_POINT;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr = S_OK;
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *pManager = NULL;
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    if (!CLRTaskHosted())
-    {
-        goto Exit;
-    }
-
-    if (!IsHostedThread())
-    {
-        goto Exit;
-    }
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    pManager = CorHost2::GetHostTaskManager();
-    if (pManager)
-    {
-#ifdef _DEBUG
-        Thread *pThread = GetThread();
-        if (pThread)
-        {
-            pThread->AddFiberInfo(Thread::ThreadTrackInfo_UM_M);
-        }
-#endif
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pManager->LeaveRuntime(target);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    if (FAILED(hr))
-    {
-        INSTALL_UNWIND_AND_CONTINUE_HANDLER;
-        ThrowHR(hr);
-        UNINSTALL_UNWIND_AND_CONTINUE_HANDLER;
-    }
-
-
-Exit:
-;
-
-}
-
-void __stdcall Thread::EnterRuntime()
-{
-    if (!CLRTaskHosted())
-    {
-        // optimize for the most common case
-        return;
-    }
-
-    DWORD dwLastError = GetLastError();
-
-    CONTRACTL {
-        THROWS;
-        ENTRY_POINT;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-    //BEGIN_ENTRYPOINT_THROWS;
-
-    HRESULT hr = EnterRuntimeNoThrowWorker();
-    if (FAILED(hr))
-        ThrowHR(hr);
-
-    SetLastError(dwLastError);
-    //END_ENTRYPOINT_THROWS;
-
-}
-
-HRESULT Thread::EnterRuntimeNoThrow()
-{
-    if (!CLRTaskHosted())
-    {
-        // optimize for the most common case
-        return S_OK;
-    }
-
-    DWORD dwLastError = GetLastError();
-
-    // This function can be called during a hard SO when managed code has called out to native
-    // which has SOd, so we can't probe here.  We already probe in LeaveRuntime, which will be
-    // called at roughly the same stack level as LeaveRuntime, so we assume that the probe for
-    // LeaveRuntime will cover us here.
-
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr = EnterRuntimeNoThrowWorker();
-
-    SetLastError(dwLastError);
-
-    return hr;
-}
-
-HRESULT Thread::EnterRuntimeNoThrowWorker()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-    
-    if (!IsHostedThread())
-    {
-        return S_OK;
-    }
-
-    HRESULT hr = S_OK;
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-
-    if (pManager)
-    {
-#ifdef _DEBUG
-        // A SQL thread can enter the runtime w/o a managed thread.
-        Thread *pThread = GetThread();
-        if (pThread)
-        {
-            pThread->AddFiberInfo(Thread::ThreadTrackInfo_UM_M);
-        }
-#endif
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pManager->EnterRuntime();
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    return hr;
-}
-
-void Thread::ReverseEnterRuntime()
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr = ReverseEnterRuntimeNoThrow();
-
-    if (hr != S_OK)
-        ThrowHR(hr);
-}
-
-__declspec(noinline) void Thread::ReverseEnterRuntimeThrowComplusHelper(HRESULT hr)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        SO_TOLERANT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    INSTALL_UNWIND_AND_CONTINUE_HANDLER;
-    ThrowHR(hr);
-    UNINSTALL_UNWIND_AND_CONTINUE_HANDLER;
-}
-
-void Thread::ReverseEnterRuntimeThrowComplus()
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        SO_TOLERANT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr = ReverseEnterRuntimeNoThrow();
-
-    if (hr != S_OK)
-    {
-        ReverseEnterRuntimeThrowComplusHelper(hr);
-    }
-}
-
-
-HRESULT Thread::ReverseEnterRuntimeNoThrow()
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    if (!CLRTaskHosted())
-    {
-        return S_OK;
-    }
-
-    if (!IsHostedThread())
-    {
-        return S_OK;
-    }
-
-    HRESULT hr = S_OK;
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-    if (pManager)
-    {
-#ifdef _DEBUG
-        // A SQL thread can enter the runtime w/o a managed thread.
-        BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(hr = COR_E_STACKOVERFLOW);
-
-        Thread *pThread = GetThread();
-        if (pThread)
-        {
-            pThread->AddFiberInfo(Thread::ThreadTrackInfo_UM_M);
-        }
-        END_SO_INTOLERANT_CODE;
-
-#endif
-        hr = pManager->ReverseEnterRuntime();
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    return hr;
-}
-
-void Thread::ReverseLeaveRuntime()
-{
-    // This function can be called during a hard SO so we can't probe here.  We already probe in
-    // ReverseEnterRuntime, which will be called at roughly the same stack level as ReverseLeaveRuntime,
-    // so we assume that the probe for ReverseEnterRuntime will cover us here.
-
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    // SetupForComCallHR calls this inside a CATCH, but it triggers a THROWs violation
-    CONTRACT_VIOLATION(ThrowsViolation);
-
-    if (!CLRTaskHosted())
-    {
-        return;
-    }
-
-    if (!IsHostedThread())
-    {
-        return;
-    }
-
-    HRESULT hr = S_OK;
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-
-    if (pManager)
-    {
-#ifdef _DEBUG
-        // A SQL thread can enter the runtime w/o a managed thread.
-        Thread *pThread = GetThread();
-        if (pThread)
-        {
-        pThread->AddFiberInfo(Thread::ThreadTrackInfo_UM_M);
-        }
-#endif
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pManager->ReverseLeaveRuntime();
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    if (hr != S_OK)
-        ThrowHR(hr);
-
-}
-
-// For OS EnterCriticalSection, call host to enable ThreadAffinity
-void Thread::BeginThreadAffinity()
-{
-    LIMITED_METHOD_CONTRACT;
-
-#ifndef FEATURE_CORECLR
-    if (!CLRTaskHosted())
-    {
-        return;
-    }
-
-    if (IsGCSpecialThread() || IsDbgHelperSpecialThread())
-    {
-        return;
-    }
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-
-    HRESULT hr;
-
-    BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-    hr = pManager->BeginThreadAffinity();
-    END_SO_TOLERANT_CODE_CALLING_HOST;
-    _ASSERTE (hr == S_OK);
-    Thread *pThread = GetThread();
-
-    if (pThread)
-    {
-        pThread->IncThreadAffinityCount();
-#ifdef _DEBUG
-        pThread->AddFiberInfo(Thread::ThreadTrackInfo_Affinity);
-#endif
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-#endif // !FEATURE_CORECLR
-}
-
-
-// For OS EnterCriticalSection, call host to enable ThreadAffinity
-void Thread::EndThreadAffinity()
-{
-    LIMITED_METHOD_CONTRACT;
-
-#ifndef FEATURE_CORECLR
-    if (!CLRTaskHosted())
-    {
-        return;
-    }
-
-    if (IsGCSpecialThread() || IsDbgHelperSpecialThread())
-    {
-        return;
-    }
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTaskManager *pManager = CorHost2::GetHostTaskManager();
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    Thread *pThread = GetThread();
-    if (pThread)
-    {
-        pThread->DecThreadAffinityCount ();
-#ifdef _DEBUG
-        pThread->AddFiberInfo(Thread::ThreadTrackInfo_Affinity);
-#endif
-    }
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HRESULT hr = S_OK;
-
-    BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-    hr = pManager->EndThreadAffinity();
-    END_SO_TOLERANT_CODE_CALLING_HOST;
-
-    _ASSERTE (hr == S_OK);
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-#endif // !FEATURE_CORECLR
 }
 
 void Thread::SetupThreadForHost()
@@ -12971,42 +8310,10 @@ void Thread::SetupThreadForHost()
     {
         THROWS;
         GC_TRIGGERS;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
     _ASSERTE (GetThread() == this);
-    CONTRACT_VIOLATION(SOToleranceViolation);
-
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostTask *pHostTask = GetHostTask();
-    if (pHostTask) {
-        SetupFiberData();
-
-        // @todo - need to block for Interop debugging before leaving the runtime here.
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = pHostTask->SetCLRTask(this);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            ThrowHR(hr);
-        }
-        if (m_WeOwnThreadHandle)
-        {
-            // If host provides a thread handle, we do not need to own a handle.
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-            CorHost2::GetHostTaskManager()->SwitchToTask(0);
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-            if (m_ThreadHandleForClose != INVALID_HANDLE_VALUE)
-            {
-                m_WeOwnThreadHandle = FALSE;
-                CloseHandle(m_ThreadHandleForClose);
-                m_ThreadHandleForClose = INVALID_HANDLE_VALUE;
-            }
-        }
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 }
 
 
@@ -13014,7 +8321,6 @@ ETaskType GetCurrentTaskType()
 {
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     ETaskType TaskType = TT_UNKNOWN;
     size_t type = (size_t)ClrFlsGetValue (TlsIdx_ThreadType);
@@ -13041,10 +8347,6 @@ ETaskType GetCurrentTaskType()
     else if (type & ThreadType_Wait)
     {
         TaskType = TT_THREADPOOL_WAIT;
-    }
-    else if (type & ThreadType_ADUnloadHelper)
-    {
-        TaskType = TT_ADUNLOAD;
     }
     else if (type & ThreadType_Threadpool_IOCompletion)
     {
@@ -13334,55 +8636,6 @@ BOOL dbgOnly_IsSpecialEEThread()
 #endif // _DEBUG
 
 
-// There is an MDA which can detect illegal reentrancy into the CLR.  For instance, if you call managed
-// code from a native vectored exception handler, this might cause a reverse PInvoke to occur.  But if the
-// exception was triggered from code that was executing in cooperative GC mode, we now have GC holes and
-// general corruption.
-#ifdef MDA_SUPPORTED
-NOINLINE BOOL HasIllegalReentrancyRare()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_TRIGGERS;
-        ENTRY_POINT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    Thread *pThread = GetThread();
-    if (pThread == NULL || !pThread->PreemptiveGCDisabled())
-        return FALSE;
-
-    BEGIN_ENTRYPOINT_VOIDRET;
-    MDA_TRIGGER_ASSISTANT(Reentrancy, ReportViolation());
-    END_ENTRYPOINT_VOIDRET;
-    return TRUE;
-}
-#endif
-
-// Actually fire the Reentrancy probe, if warranted.
-BOOL HasIllegalReentrancy()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_TRIGGERS;
-        ENTRY_POINT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-#ifdef MDA_SUPPORTED
-    if (NULL == MDA_GET_ASSISTANT(Reentrancy))
-        return FALSE;
-    return HasIllegalReentrancyRare();
-#else
-    return FALSE;
-#endif // MDA_SUPPORTED
-}
-
-
 #endif // #ifndef DACCESS_COMPILE
 
 #ifdef DACCESS_COMPILE
@@ -13407,11 +8660,6 @@ Thread::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
         {
             m_pDomain->EnumMemoryRegions(flags, true);
         }
-
-        if (m_Context.IsValid())
-        {
-            m_Context->EnumMemoryRegions(flags);
-        }
     }
 
     if (m_debuggerFilterContext.IsValid())
@@ -13423,10 +8671,7 @@ Thread::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
 
     m_ExceptionState.EnumChainMemoryRegions(flags);
 
-    // Like the old thread static implementation, we only enumerate
-    // the current TLB. Should we be enumerating all of the TLBs?
-    if (m_pThreadLocalBlock.IsValid())
-        m_pThreadLocalBlock->EnumMemoryRegions(flags);
+    m_ThreadLocalBlock.EnumMemoryRegions(flags);
 
     if (flags != CLRDATA_ENUM_MEM_MINI && flags != CLRDATA_ENUM_MEM_TRIAGE)
     {
@@ -13635,52 +8880,29 @@ ThreadStore::EnumMemoryRegions(CLRDataEnumMemoryFlags flags)
 
 #endif // #ifdef DACCESS_COMPILE
 
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-// For the purposes of tracking resource usage we implement a simple cpu resource usage counter on each
-// thread. Every time QueryThreadProcessorUsage() is invoked it returns the amount of cpu time (a combination
-// of user and kernel mode time) used since the last call to QueryThreadProcessorUsage(). The result is in 100
-// nanosecond units.
-ULONGLONG Thread::QueryThreadProcessorUsage()
+OBJECTHANDLE Thread::GetOrCreateDeserializationTracker()
 {
-    LIMITED_METHOD_CONTRACT;
-
-    // Get current values for the amount of kernel and user time used by this thread over its entire lifetime.
-    FILETIME sCreationTime, sExitTime, sKernelTime, sUserTime;
-    HANDLE hThread = GetThreadHandle();
-    BOOL fResult = GetThreadTimes(hThread,
-                                  &sCreationTime,
-                                  &sExitTime,
-                                  &sKernelTime,
-                                  &sUserTime);
-    if (!fResult)
+    CONTRACTL
     {
-#ifdef _DEBUG
-        ULONG error = GetLastError();
-        printf("GetThreadTimes failed: %d; handle is %p\n", error, hThread);
-        _ASSERTE(FALSE);
-#endif
-        return 0;
+        THROWS;
+        GC_TRIGGERS;
+        MODE_COOPERATIVE;
+    }
+    CONTRACTL_END;
+
+#if !defined (DACCESS_COMPILE)
+    if (m_DeserializationTracker != NULL)
+    {
+        return m_DeserializationTracker;
     }
 
-    // Combine the user and kernel times into a single value (FILETIME is just a structure representing an
-    // unsigned int64 in two 32-bit pieces).
-    _ASSERTE(sizeof(FILETIME) == sizeof(UINT64));
-    ULONGLONG ullCurrentUsage = *(ULONGLONG*)&sKernelTime + *(ULONGLONG*)&sUserTime;
+    _ASSERTE(this == GetThread());
 
-    // Store the current processor usage as the new baseline, and retrieve the previous usage.
-    ULONGLONG ullPreviousUsage = VolatileLoad(&m_ullProcessorUsageBaseline);
-    if (ullPreviousUsage >= ullCurrentUsage ||
-        ullPreviousUsage != (ULONGLONG)InterlockedCompareExchange64(
-            (LONGLONG*)&m_ullProcessorUsageBaseline, 
-            (LONGLONG)ullCurrentUsage, 
-            (LONGLONG)ullPreviousUsage))
-    {
-        // another thread beat us to it, and already reported this usage.  
-        return 0; 
-    }
+    MethodTable* pMT = MscorlibBinder::GetClass(CLASS__DESERIALIZATION_TRACKER);
+    m_DeserializationTracker = CreateGlobalStrongHandle(AllocateObject(pMT));
 
-    // The result is the difference between this value and the previous usage value.
-    return ullCurrentUsage - ullPreviousUsage;
+    _ASSERTE(m_DeserializationTracker != NULL);
+#endif // !defined (DACCESS_COMPILE)
+
+    return m_DeserializationTracker;
 }
-#endif // FEATURE_APPDOMAIN_RESOURCE_MONITORING

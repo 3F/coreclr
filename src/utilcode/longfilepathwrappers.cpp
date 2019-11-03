@@ -17,9 +17,10 @@ private:
         static const WCHAR* UNCPathPrefix;
         static const WCHAR* UNCExtendedPathPrefix;
         static const WCHAR VolumeSeparatorChar;
+		#define UNCPATHPREFIX W("\\\\")
 #endif //FEATURE_PAL
-        static const WCHAR LongFile::DirectorySeparatorChar;
-        static const WCHAR LongFile::AltDirectorySeparatorChar;
+        static const WCHAR DirectorySeparatorChar;
+        static const WCHAR AltDirectorySeparatorChar;
 public:
         static BOOL IsExtended(SString & path);
         static BOOL IsUNCExtended(SString & path);
@@ -29,6 +30,10 @@ public:
         static BOOL IsDevice(SString & path);
 
         static HRESULT NormalizePath(SString& path);
+
+#ifndef FEATURE_PAL
+        static void NormalizeDirectorySeparators(SString& path);
+#endif
 };
 
 HMODULE
@@ -41,7 +46,6 @@ LoadLibraryExWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;  
     }
     CONTRACTL_END;
 
@@ -49,7 +53,6 @@ LoadLibraryExWrapper(
     HMODULE ret = NULL;
     DWORD lastError;
     
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return NULL;)
     EX_TRY
     {
 
@@ -60,6 +63,7 @@ LoadLibraryExWrapper(
 #ifndef FEATURE_PAL
             //Adding the assert to ensure relative paths which are not just filenames are not used for LoadLibrary Calls
             _ASSERTE(!LongFile::IsPathNotFullyQualified(path) || !LongFile::ContainsDirectorySeparator(path));
+            LongFile::NormalizeDirectorySeparators(path);
 #endif //FEATURE_PAL
 
             ret = LoadLibraryExW(path.GetUnicode(), hFile, dwFlags);
@@ -68,7 +72,6 @@ LoadLibraryExWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -96,15 +99,12 @@ CreateFileWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     DWORD lastError;
     HANDLE ret = INVALID_HANDLE_VALUE;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return NULL;)
 
     EX_TRY
     {
@@ -125,7 +125,6 @@ CreateFileWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -148,15 +147,12 @@ SetFileAttributesWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     BOOL   ret = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -173,7 +169,6 @@ SetFileAttributesWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -195,15 +190,12 @@ GetFileAttributesWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     DWORD  ret = INVALID_FILE_ATTRIBUTES;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return INVALID_FILE_ATTRIBUTES;)
 
     EX_TRY
     {
@@ -219,7 +211,6 @@ GetFileAttributesWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -243,15 +234,12 @@ GetFileAttributesExWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     BOOL   ret = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -270,7 +258,6 @@ GetFileAttributesExWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -292,15 +279,12 @@ DeleteFileWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     BOOL   ret = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -316,7 +300,6 @@ DeleteFileWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -341,15 +324,12 @@ CopyFileWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr  = S_OK;
     BOOL    ret = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -368,7 +348,6 @@ CopyFileWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -392,15 +371,12 @@ MoveFileExWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr  = S_OK;
     BOOL    ret = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -419,7 +395,6 @@ MoveFileExWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -447,15 +422,12 @@ SearchPathWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
    
     HRESULT hr  = S_OK;
     DWORD    ret = 0;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -517,7 +489,6 @@ SearchPathWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -541,15 +512,12 @@ GetShortPathNameWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     DWORD ret = 0;
     HRESULT hr = S_OK;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -581,7 +549,6 @@ GetShortPathNameWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -604,15 +571,12 @@ GetLongPathNameWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     DWORD ret = 0;
     HRESULT hr = S_OK;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -645,7 +609,6 @@ GetLongPathNameWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -668,15 +631,12 @@ CreateDirectoryWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     BOOL ret   = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -693,7 +653,6 @@ CreateDirectoryWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -715,15 +674,12 @@ RemoveDirectoryWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     BOOL ret   = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -739,7 +695,6 @@ RemoveDirectoryWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -761,15 +716,12 @@ GetModuleFileNameWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -799,7 +751,6 @@ GetModuleFileNameWrapper(
         buffer.CloseBuffer(ret);
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -823,15 +774,12 @@ UINT WINAPI GetTempFileNameWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     UINT ret = 0;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -851,7 +799,6 @@ UINT WINAPI GetTempFileNameWrapper(
         
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -871,15 +818,12 @@ DWORD WINAPI GetTempPathWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -895,7 +839,6 @@ DWORD WINAPI GetTempPathWrapper(
         lpBuffer.CloseBuffer(ret);
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -916,15 +859,12 @@ DWORD WINAPI GetCurrentDirectoryWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -940,7 +880,6 @@ DWORD WINAPI GetCurrentDirectoryWrapper(
         lpBuffer.CloseBuffer(ret);
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -962,15 +901,12 @@ DWORD WINAPI GetEnvironmentVariableWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return 0;)
 
     EX_TRY
     {
@@ -1003,7 +939,6 @@ DWORD WINAPI GetEnvironmentVariableWrapper(
         lpBuffer.CloseBuffer(ret);
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK)
     {
@@ -1030,15 +965,12 @@ CreateHardLinkWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     BOOL ret   = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -1057,7 +989,6 @@ CreateHardLinkWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -1085,15 +1016,12 @@ CopyFileExWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr  = S_OK;
     BOOL    ret = FALSE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -1115,7 +1043,6 @@ CopyFileExWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -1142,15 +1069,12 @@ FindFirstFileExWrapper(
     CONTRACTL
     {
         NOTHROW;
-    SO_TOLERANT;
     }
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
     HANDLE ret = INVALID_HANDLE_VALUE;
     DWORD lastError;
-
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(SetLastError(COR_E_STACKOVERFLOW); return FALSE;)
 
     EX_TRY
     {
@@ -1171,7 +1095,6 @@ FindFirstFileExWrapper(
         lastError = GetLastError();
     }
     EX_CATCH_HRESULT(hr);
-    END_SO_INTOLERANT_CODE
 
     if (hr != S_OK )
     {
@@ -1186,7 +1109,6 @@ FindFirstFileExWrapper(
 }
 #endif //!FEATURE_PAL
 
-#if defined(FEATURE_CORECLR) || defined(CROSSGEN_COMPILE)
 
 #ifndef FEATURE_PAL
 
@@ -1219,7 +1141,6 @@ BOOL PAL_GetPALDirectoryWrapper(SString& pbuffer)
     }
     else 
     {
-        DWORD dwLength;
         hr = CopySystemDirectory(pPath, pbuffer);
     }
   
@@ -1246,7 +1167,6 @@ BOOL PAL_GetPALDirectoryWrapper(SString& pbuffer)
 
 #endif // FEATURE_PAL
 
-#endif // FEATURE_CORECLR || CROSSGEN_COMPILE
 
 //Implementation of LongFile Helpers
 const WCHAR LongFile::DirectorySeparatorChar = W('\\');
@@ -1256,7 +1176,18 @@ const WCHAR LongFile::VolumeSeparatorChar = W(':');
 const WCHAR* LongFile::ExtendedPrefix = W("\\\\?\\");
 const WCHAR* LongFile::DevicePathPrefix = W("\\\\.\\");
 const WCHAR* LongFile::UNCExtendedPathPrefix = W("\\\\?\\UNC\\");
-const WCHAR* LongFile::UNCPathPrefix = W("\\\\");
+const WCHAR* LongFile::UNCPathPrefix = UNCPATHPREFIX;
+
+void LongFile::NormalizeDirectorySeparators(SString& path)
+{
+    for(SString::Iterator i = path.Begin(); i < path.End(); ++i)
+    {
+        if (*i == AltDirectorySeparatorChar)
+        {
+            path.Replace(i, DirectorySeparatorChar);
+        }
+    }
+}
 
 BOOL LongFile::IsExtended(SString & path)
 {
@@ -1289,7 +1220,7 @@ BOOL LongFile::IsPathNotFullyQualified(SString & path)
         return !IsDirectorySeparator(path[1]); // There is no valid way to specify a relative path with two initial slashes
     }
 
-    return !((path.GetCount() >= 3)           //The only way to specify a fixed path that doesn't begin with two slashes is the drive, colon, slash format- i.e. C:\
+    return !((path.GetCount() >= 3)           //The only way to specify a fixed path that doesn't begin with two slashes is the drive, colon, slash format- i.e. "C:\"
             && (path[1] == VolumeSeparatorChar)
             && IsDirectorySeparator(path[2]));
 }
@@ -1326,7 +1257,8 @@ HRESULT LongFile::NormalizePath(SString & path)
         //In this case if path is \\server the extended syntax should be like  \\?\UNC\server
         //The below logic populates the path from prefixLen offset from the start. This ensures that first 2 characters are overwritten
         //
-        prefixLen = prefix.GetCount() - 2;
+        prefixLen = prefix.GetCount() - (COUNT_T)wcslen(UNCPATHPREFIX);
+        _ASSERTE(prefixLen > 0 );
     }
 
    
@@ -1366,12 +1298,25 @@ HRESULT LongFile::NormalizePath(SString & path)
         }
     }
 
+	SString fullpath(SString::Literal,buffer + prefixLen);
 
-    //wcscpy_s always termintes with NULL, so we are saving the character that will be overwriiten
-    WCHAR temp = buffer[prefix.GetCount()];
-    wcscpy_s(buffer, prefix.GetCount() + 1, prefix.GetUnicode());
-    buffer[prefix.GetCount()] = temp;
-    path.CloseBuffer(ret + prefixLen);
+    //Check if the resolved path is a UNC. By default we assume relative path to resolve to disk 
+    if (fullpath.BeginsWith(UNCPathPrefix) && prefixLen != prefix.GetCount() - (COUNT_T)wcslen(UNCPATHPREFIX))
+    {
+
+        //Remove the leading '\\' from the UNC path to be replaced with UNCExtendedPathPrefix
+        fullpath.Replace(fullpath.Begin(), (COUNT_T)wcslen(UNCPATHPREFIX), UNCExtendedPathPrefix);
+        path.CloseBuffer();
+        path.Set(fullpath);
+    }
+    else
+    {
+        //wcscpy_s always termintes with NULL, so we are saving the character that will be overwriiten
+        WCHAR temp = buffer[prefix.GetCount()];
+        wcscpy_s(buffer, prefix.GetCount() + 1, prefix.GetUnicode());
+        buffer[prefix.GetCount()] = temp;
+        path.CloseBuffer(ret + prefixLen);
+    }
 
     return S_OK;
 }

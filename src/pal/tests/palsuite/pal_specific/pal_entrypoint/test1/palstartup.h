@@ -22,9 +22,14 @@ struct _mainargs
     char ** argv;
 };
 
-static DWORD PALAPI run_main(struct _mainargs *args)
+static DWORD run_main(struct _mainargs *args)
 {
     return (DWORD) PAL_startup_main(args->argc, args->argv);
+}
+
+static void terminate(void)
+{
+    PAL_Terminate();
 }
 
 int __cdecl main(int argc, char **argv) {
@@ -34,9 +39,7 @@ int __cdecl main(int argc, char **argv) {
         return FAIL;;
     }
 
-    // PAL_Terminate is a stdcall function, but it takes no parameters
-    // so the difference doesn't matter.
-    atexit((void (__cdecl *)(void)) PAL_Terminate);
+    atexit(terminate);
 
     mainargs.argc = argc;
     mainargs.argv = argv;

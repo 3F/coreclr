@@ -31,6 +31,45 @@ struct DebuggerControllerPatch;
 class DebuggerUserBreakpoint;
 class ControllerStackInfo;
 
+typedef struct _DR6 *PDR6;
+typedef struct _DR6 {
+    DWORD       B0 : 1;
+    DWORD       B1 : 1;
+    DWORD       B2 : 1;
+    DWORD       B3 : 1;
+    DWORD       Pad1 : 9;
+    DWORD       BD : 1;
+    DWORD       BS : 1;
+    DWORD       BT : 1;
+} DR6;
+
+typedef struct _DR7 *PDR7;
+typedef struct _DR7 {
+    DWORD       L0 : 1;
+    DWORD       G0 : 1;
+    DWORD       L1 : 1;
+    DWORD       G1 : 1;
+    DWORD       L2 : 1;
+    DWORD       G2 : 1;
+    DWORD       L3 : 1;
+    DWORD       G3 : 1;
+    DWORD       LE : 1;
+    DWORD       GE : 1;
+    DWORD       Pad1 : 3;
+    DWORD       GD : 1;
+    DWORD       Pad2 : 1;
+    DWORD       Pad3 : 1;
+    DWORD       Rwe0 : 2;
+    DWORD       Len0 : 2;
+    DWORD       Rwe1 : 2;
+    DWORD       Len1 : 2;
+    DWORD       Rwe2 : 2;
+    DWORD       Len2 : 2;
+    DWORD       Rwe3 : 2;
+    DWORD       Len3 : 2;
+} DR7;
+
+
 // Ticket for ensuring that it's safe to get a stack trace.
 class StackTraceTicket
 {
@@ -213,6 +252,9 @@ public:
         *(reinterpret_cast<DWORD*>(BypassBuffer)) = SentinelValue;
         RipTargetFixup = 0;
         RipTargetFixupSize = 0;
+#elif _TARGET_ARM64_
+        RipTargetFixup = 0;
+        
 #endif
     }
 
@@ -224,23 +266,23 @@ public:
 
     LONG AddRef()
     {
-        InterlockedIncrement(&m_refCount);
-        _ASSERTE(m_refCount > 0);
-        return m_refCount;
+        LONG newRefCount = InterlockedIncrement(&m_refCount);
+        _ASSERTE(newRefCount > 0);
+        return newRefCount;
     }
 
     LONG Release()
     {
-        LONG result = InterlockedDecrement(&m_refCount);
-        _ASSERTE(m_refCount >= 0);
+        LONG newRefCount = InterlockedDecrement(&m_refCount);
+        _ASSERTE(newRefCount >= 0);
 
-        if (m_refCount == 0)
+        if (newRefCount == 0)
         {
             TRACE_FREE(this);
             DeleteInteropSafeExecutable(this);
         }
 
-        return result;
+        return newRefCount;
     }
 
     // "PatchBypass" must be the first field of this class for alignment to be correct.
@@ -251,6 +293,8 @@ public:
 
     UINT_PTR                RipTargetFixup;
     BYTE                    RipTargetFixupSize;
+#elif defined(_TARGET_ARM64_)
+    UINT_PTR                RipTargetFixup;
 #endif
 
 private:
@@ -271,16 +315,32 @@ struct DebuggerFunctionKey1
 
 typedef DebuggerFunctionKey1 UNALIGNED DebuggerFunctionKey;
 
-// ILMaster: Breakpoints on IL code may need to be applied to multiple
-// copies of code, because generics mean code gets JITTed multiple times.
-// The "master" is a patch we keep to record the IL offset, and is used to
-// create new "slave"patches.
-
+// IL Master: Breakpoints on IL code may need to be applied to multiple
+// copies of code. Historically generics was the only way IL code was JITTed
+// multiple times but more recently the CodeVersionManager and tiered compilation
+// provide more open-ended mechanisms to have multiple native code bodies derived
+// from a single IL method body.
+// The "master" is a patch we keep to record the IL offset or native offset, and 
+// is used to create new "slave"patches. For native offsets only offset 0 is allowed
+// because that is the only one that we think would have a consistent semantic
+// meaning across different code bodies.
+// There can also be multiple IL bodies for the same method given EnC or ReJIT.
+// A given master breakpoint is tightly bound to one particular IL body determined
+// by encVersion. ReJIT + breakpoints isn't currently supported.
 //
-// ILSlave: The slaves created from ILMaster patches.  The offset for
-// these is initially an IL offset and later becomes a native offset.
 //
-// NativeManaged: A patch we apply to managed code, usually for walkers etc.
+// IL Slave: The slaves created from Master patches. If the master used an IL offset 
+// then the slave also initially has an IL offset that will later become a native offset.
+// If the master uses a native offset (0) then the slave will also have a native offset (0).
+// These patches always resolve to addresses in jitted code.
+//
+//
+// NativeManaged: A patch we apply to managed code, usually for walkers etc. If this code
+// is jitted then these patches are always bound to one exact jitted code body.
+// If you need to be 100% sure I suggest you do more code review but I believe we also
+// use this for managed code from other code generators such as a stub or statically compiled
+// code that executes in cooperative mode.
+//
 //
 // NativeUnmanaged: A patch applied to any kind of native code.
 
@@ -356,6 +416,8 @@ struct DebuggerControllerPatch
     PRD_TYPE                opcodeSaved;//also a misnomer
     BOOL                    offsetIsIL;
     TraceDestination        trace;
+    MethodDesc*             pMethodDescFilter; // used for IL Master patches that should only bind to jitted
+                                               // code versions for a single generic instantiation
 private:
     int                     refCount;
     union
@@ -658,7 +720,9 @@ public:
     DebuggerControllerPatch *AddPatchForMethodDef(DebuggerController *controller, 
                                       Module *module, 
                                       mdMethodDef md, 
-                                      size_t offset, 
+                                      MethodDesc *pMethodDescFilter,
+                                      size_t offset,
+                                      BOOL offsetIsIL,
                                       DebuggerPatchKind kind,
                                       FramePointer fp,
                                       AppDomain *pAppDomain,
@@ -839,6 +903,7 @@ enum DEBUGGER_CONTROLLER_TYPE
                                           // send that they've hit a user breakpoint to the Right Side.
     DEBUGGER_CONTROLLER_JMC_STEPPER,      // Stepper that only stops in JMC-functions.
     DEBUGGER_CONTROLLER_CONTINUABLE_EXCEPTION,
+    DEBUGGER_CONTROLLER_DATA_BREAKPOINT,
     DEBUGGER_CONTROLLER_STATIC,
 };
 
@@ -949,8 +1014,6 @@ class DebuggerController
     //
 
   public:
-    // Once we support debugging + fibermode (which was cut in V2.0), we may need some Thread::BeginThreadAffinity() calls
-    // associated with the controller lock because this lock wraps context operations.
     class ControllerLockHolder : public CrstHolder
     {
     public:
@@ -1167,8 +1230,10 @@ public:
                 
     BOOL AddILPatch(AppDomain * pAppDomain, Module *module, 
                     mdMethodDef md,
+                    MethodDesc* pMethodFilter,
                     SIZE_T encVersion,  // what encVersion does this apply to?
-                    SIZE_T offset);
+                    SIZE_T offset,
+                    BOOL offsetIsIL);
         
     // The next two are very similar.  Both work on offsets,
     // but one takes a "patch id".  I don't think these are really needed: the
@@ -1241,12 +1306,14 @@ public:
 
     DebuggerControllerPatch *AddILMasterPatch(Module *module, 
                   mdMethodDef md,
+                  MethodDesc *pMethodDescFilter,
                   SIZE_T offset,
+                  BOOL offsetIsIL,
                   SIZE_T encVersion);
                   
     BOOL AddBindAndActivatePatchForMethodDesc(MethodDesc *fd,
                   DebuggerJitInfo *dji,
-                  SIZE_T offset,
+                  SIZE_T nativeOffset,
                   DebuggerPatchKind kind,
                   FramePointer fp,
                   AppDomain *pAppDomain);
@@ -1319,7 +1386,7 @@ public:
     // the bp. So we pass in an extra flag, fInteruptedBySetIp,  to let the controller decide how to handle this.
     // Since SetIP only works within a single function, this can only be an issue if a thread's current stopping
     // location and the patch it set are in the same function. (So this could happen for step-over, but never
-    // setp-out). 
+    // step-out). 
     // This flag will almost always be false.
     // 
     // Once we actually send the event, we're under the debugger lock, and so the world is stable underneath us.
@@ -1423,6 +1490,7 @@ public:
                        SIZE_T ilEnCVersion,  // must give the EnC version for non-native bps
                        MethodDesc *nativeMethodDesc,  // must be non-null when m_native, null otherwise
                        DebuggerJitInfo *nativeJITInfo,  // optional when m_native, null otherwise
+                       bool nativeCodeBindAllVersions,
                        BOOL *pSucceed
                        );
 
@@ -1703,6 +1771,52 @@ private:
     bool SendEvent(Thread *thread, bool fInteruptedBySetIp);
 };
 
+#ifdef FEATURE_DATABREAKPOINT
+
+class DebuggerDataBreakpoint : public DebuggerController
+{
+private:
+    CONTEXT m_context;
+public:
+    DebuggerDataBreakpoint(Thread* pThread) : DebuggerController(pThread, NULL)
+    {
+        LOG((LF_CORDB, LL_INFO10000, "D:DDBP: Data Breakpoint event created\n"));
+        memcpy(&m_context, g_pEEInterface->GetThreadFilterContext(pThread), sizeof(CONTEXT));
+    }
+    
+    virtual DEBUGGER_CONTROLLER_TYPE GetDCType(void)
+    {
+        return DEBUGGER_CONTROLLER_DATA_BREAKPOINT;
+    }
+
+    virtual TP_RESULT TriggerPatch(DebuggerControllerPatch *patch, Thread *thread,  TRIGGER_WHY tyWhy);
+
+    virtual bool TriggerSingleStep(Thread *thread, const BYTE *ip);
+
+    bool SendEvent(Thread *thread, bool fInteruptedBySetIp)
+    {
+        CONTRACTL
+        {
+            NOTHROW;
+            SENDEVENT_CONTRACT_ITEMS;
+        }
+        CONTRACTL_END;
+
+        LOG((LF_CORDB, LL_INFO10000, "DDBP::SE: in DebuggerDataBreakpoint's SendEvent\n"));
+
+        g_pDebugger->SendDataBreakpoint(thread, &m_context, this);
+
+        Delete();
+
+        return true;
+    }
+
+    static bool TriggerDataBreakpoint(Thread *thread, CONTEXT * pContext);
+};
+
+#endif // FEATURE_DATABREAKPOINT
+
+
 /* ------------------------------------------------------------------------- *
  * DebuggerUserBreakpoint routines.  UserBreakpoints are used 
  * by Runtime threads to send that they've hit a user breakpoint to the 
@@ -1772,6 +1886,7 @@ private:
 
     bool SendEvent(Thread *thread, bool fInteruptedBySetIp);
 };
+
 
 #ifdef EnC_SUPPORTED
 //---------------------------------------------------------------------------------------

@@ -83,7 +83,7 @@ LOCAL_LABEL(HaveThread):
 
         mov             r12, rax                // r12 <- Thread*
 
-        //FailFast if a native callable method invoked via ldftn and calli.
+        //FailFast if a native callable method is invoked via ldftn and calli.
         cmp             dword ptr [r12 + OFFSETOF__Thread__m_fPreemptiveGCDisabled], 1
         jz              LOCAL_LABEL(InvalidTransition)
 
@@ -102,16 +102,6 @@ LOCAL_LABEL(HaveThread):
 LOCAL_LABEL(InCooperativeMode):
 
         mov             METHODDESC_REGISTER, [rbp - UMThunkStubAMD64_RBP_OFFSET + UMThunkStubAMD64_METHODDESC_OFFSET]
-
-#if _DEBUG
-        mov             rax, [r12 + OFFSETOF__Thread__m_pDomain]
-        mov             eax, [rax + OFFSETOF__AppDomain__m_dwId]
-
-        mov             r11d, [METHODDESC_REGISTER + OFFSETOF__UMEntryThunk__m_dwDomainId]
-
-        cmp             rax, r11
-        jne             LOCAL_LABEL(WrongAppDomain)
-#endif
 
         mov             r11, [METHODDESC_REGISTER + OFFSETOF__UMEntryThunk__m_pUMThunkMarshInfo]
         mov             eax, [r11 + OFFSETOF__UMThunkMarshInfo__m_cbActualArgSize]                      // stack_args
@@ -190,21 +180,4 @@ LOCAL_LABEL(CopyLoop):
 
         jmp             LOCAL_LABEL(UMThunkStub_ArgumentsSetup)
 
-#if _DEBUG
-LOCAL_LABEL(WrongAppDomain):
-        int3
-#endif
-
 NESTED_END UMThunkStub, _TEXT
-
-//
-// EXTERN_C void __stdcall UM2MThunk_WrapperHelper(
-//       void *pThunkArgs,               // rdi
-//       int argLen,                     // rsi
-//       void *pAddr,                    // rdx            // not used
-//       UMEntryThunk *pEntryThunk,      // rcx
-//       Thread *pThread);               // r8
-//
-NESTED_ENTRY UM2MThunk_WrapperHelper, _TEXT, NoHandler
-        int3
-NESTED_END UM2MThunk_WrapperHelper, _TEXT

@@ -20,6 +20,8 @@
 #ifndef _THREADPOOL_REQUEST_H
 #define _THREADPOOL_REQUEST_H
 
+#include "util.hpp"
+
 #define TP_QUANTUM 2
 #define UNUSED_THREADPOOL_INDEX (DWORD)-1
 
@@ -48,24 +50,24 @@ public:
     virtual void SetAppDomainRequestsActive() = 0;
 
     //This functions marks the end of requests queued for this domain.
-    virtual void ClearAppDomainRequestsActive(BOOL bADU = FALSE) = 0;
+    virtual void ClearAppDomainRequestsActive() = 0;
 
     //Clears the "active" flag if it was set, and returns whether it was set.
     virtual bool TakeActiveRequest() = 0;
 
     //Takes care of dispatching requests in the right domain.
     virtual void DispatchWorkItem(bool* foundWork, bool* wasNotRecalled) = 0;
-    virtual void SetAppDomainId(ADID id) = 0;
     virtual void SetTPIndexUnused() = 0;
     virtual BOOL IsTPIndexUnused() = 0;
     virtual void SetTPIndex(TPIndex index) = 0; 
-    virtual void SetAppDomainUnloading() = 0;
-    virtual void ClearAppDomainUnloading() = 0;
 };
 
 typedef DPTR(IPerAppDomainTPCount) PTR_IPerAppDomainTPCount;
 
-static const LONG ADUnloading = -1;
+#ifdef _MSC_VER
+// Disable this warning - we intentionally want __declspec(align()) to insert padding for us
+#pragma warning(disable: 4324) // structure was padded due to __declspec(align())
+#endif
 
 //--------------------------------------------------------------------------
 //ManagedPerAppDomainTPCount maintains per-appdomain thread pool state. 
@@ -85,32 +87,20 @@ public:
     inline void ResetState()
     {
         LIMITED_METHOD_CONTRACT;
-        m_numRequestsPending = 0;
-        m_id.m_dwId = 0;
+        VolatileStore(&m_numRequestsPending, (LONG)0);
     }
     
     inline BOOL IsRequestPending()
     {
         LIMITED_METHOD_CONTRACT;
-        return m_numRequestsPending != ADUnloading && m_numRequestsPending > 0;
+
+        LONG count = VolatileLoad(&m_numRequestsPending);
+        return count > 0;
     }
 
     void SetAppDomainRequestsActive();
-    void ClearAppDomainRequestsActive(BOOL bADU);
+    void ClearAppDomainRequestsActive();
     bool TakeActiveRequest();
-
-    inline void SetAppDomainId(ADID id)
-    {
-        LIMITED_METHOD_CONTRACT;
-        //This function should be called during appdomain creation when no managed code
-        //has started running yet. That implies, no requests should be pending
-        //or dispatched to this structure yet.
-
-        _ASSERTE(m_numRequestsPending != ADUnloading);
-        _ASSERTE(m_id.m_dwId == 0);
-
-        m_id = id;
-    }
 
     inline void SetTPIndex(TPIndex index) 
     {
@@ -119,8 +109,6 @@ public:
         //has started running yet. That implies, no requests should be pending
         //or dispatched to this structure yet.
 
-        _ASSERTE(m_numRequestsPending != ADUnloading);
-        _ASSERTE(m_id.m_dwId == 0);
         _ASSERTE(m_index.m_dwIndex == UNUSED_THREADPOOL_INDEX);
 
         m_index = index;
@@ -131,13 +119,6 @@ public:
         LIMITED_METHOD_CONTRACT;
         if (m_index.m_dwIndex == UNUSED_THREADPOOL_INDEX)
         {
-            //This function is called during appdomain creation, and no new appdomains can be
-            //added removed at this time. So, make sure that the per-appdomain structures that 
-            //have been cleared(reclaimed) don't have any pending requests to them.
-
-            _ASSERTE(m_numRequestsPending != ADUnloading);
-            _ASSERTE(m_id.m_dwId == 0);
-
             return TRUE;
         }
 
@@ -147,34 +128,19 @@ public:
     inline void SetTPIndexUnused()
     {
         WRAPPER_NO_CONTRACT;
-        //This function should be called during appdomain unload when all threads have
-        //succesfully exited the appdomain. That implies, no requests should be pending
-        //or dispatched to this structure.
-
-        _ASSERTE(m_id.m_dwId == 0);
-
         m_index.m_dwIndex = UNUSED_THREADPOOL_INDEX;
-    }
-
-    inline void SetAppDomainUnloading()
-    {
-        LIMITED_METHOD_CONTRACT;
-        m_numRequestsPending = ADUnloading;
-    }
-
-    inline void ClearAppDomainUnloading();
-
-    inline BOOL IsAppDomainUnloading()
-    {
-        return m_numRequestsPending.Load() == ADUnloading;
     }
 
     void DispatchWorkItem(bool* foundWork, bool* wasNotRecalled);
 
 private:
-    Volatile<LONG> m_numRequestsPending;
-    ADID m_id;
     TPIndex m_index;
+    struct DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) {
+        BYTE m_padding1[MAX_CACHE_LINE_SIZE - sizeof(LONG)];
+        // Only use with VolatileLoad+VolatileStore+FastInterlockCompareExchange
+        LONG m_numRequestsPending;
+        BYTE m_padding2[MAX_CACHE_LINE_SIZE];
+    };
 };
 
 //--------------------------------------------------------------------------
@@ -212,28 +178,24 @@ public:
     {
         LIMITED_METHOD_CONTRACT;
         m_NumRequests = 0;
-        m_outstandingThreadRequestCount = 0;
+        VolatileStore(&m_outstandingThreadRequestCount, (LONG)0);
     }
 
     inline BOOL IsRequestPending()
     {
         LIMITED_METHOD_CONTRACT;
-        return m_outstandingThreadRequestCount != 0 ? TRUE : FALSE;
+        return VolatileLoad(&m_outstandingThreadRequestCount) != (LONG)0 ? TRUE : FALSE;
     }
 
     void SetAppDomainRequestsActive();
     
-    inline void ClearAppDomainRequestsActive(BOOL bADU)
+    inline void ClearAppDomainRequestsActive()
     {
         LIMITED_METHOD_CONTRACT;
-        m_outstandingThreadRequestCount = 0;
+        VolatileStore(&m_outstandingThreadRequestCount, (LONG)0);
     }
 
     bool TakeActiveRequest();
-
-    inline void SetAppDomainId(ADID id)
-    {
-    }
 
     void QueueUnmanagedWorkRequest(LPTHREAD_START_ROUTINE  function, PVOID context);
     PVOID DeQueueUnManagedWorkRequest(bool* lastOne);
@@ -259,23 +221,26 @@ public:
 	_ASSERT(FALSE); 
     }   
 
-    inline void SetAppDomainUnloading()
+    inline ULONG GetNumRequests()
     {
-        WRAPPER_NO_CONTRACT;
-        _ASSERT(FALSE);        
-    }
-
-    inline void ClearAppDomainUnloading()
-    {
-        WRAPPER_NO_CONTRACT;
-        _ASSERT(FALSE);        
+        LIMITED_METHOD_CONTRACT;
+        return VolatileLoad(&m_NumRequests);
     }
 
 private:
-    ULONG m_NumRequests;
-    Volatile<LONG> m_outstandingThreadRequestCount;
     SpinLock m_lock;
+    ULONG m_NumRequests;
+    struct DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) {
+        BYTE m_padding1[MAX_CACHE_LINE_SIZE - sizeof(LONG)];
+        // Only use with VolatileLoad+VolatileStore+FastInterlockCompareExchange
+        LONG m_outstandingThreadRequestCount;
+        BYTE m_padding2[MAX_CACHE_LINE_SIZE];
+    };
 };
+
+#ifdef _MSC_VER
+#pragma warning(default: 4324)  // structure was padded due to __declspec(align())
+#endif
 
 //--------------------------------------------------------------------------
 //PerAppDomainTPCountList maintains the collection of per-appdomain thread 
@@ -294,29 +259,10 @@ class PerAppDomainTPCountList{
 public:
     static void InitAppDomainIndexList();    
     static void ResetAppDomainIndex(TPIndex index);
-    static void ResetAppDomainTPCounts(TPIndex index);
     static bool AreRequestsPendingInAnyAppDomains();
     static LONG GetAppDomainIndexForThreadpoolDispatch();
-    static void SetAppDomainId(TPIndex index, ADID id);
     static TPIndex AddNewTPIndex();
-    static void SetAppDomainUnloading(TPIndex index)
-    {
-        WRAPPER_NO_CONTRACT;
-        IPerAppDomainTPCount * pAdCount = dac_cast<PTR_IPerAppDomainTPCount> (s_appDomainIndexList.Get(index.m_dwIndex-1));
-        _ASSERTE(pAdCount);
-        pAdCount->SetAppDomainUnloading();
-    }
 
-    static void ClearAppDomainUnloading(TPIndex index)
-    {
-        WRAPPER_NO_CONTRACT;
-        IPerAppDomainTPCount * pAdCount = dac_cast<PTR_IPerAppDomainTPCount> (s_appDomainIndexList.Get(index.m_dwIndex-1));
-        _ASSERTE(pAdCount);
-        pAdCount->ClearAppDomainUnloading();
-    }
-
-    typedef Holder<TPIndex, SetAppDomainUnloading, ClearAppDomainUnloading> AppDomainUnloadingHolder;
- 
     inline static IPerAppDomainTPCount* GetPerAppdomainCount(TPIndex index)
     {
         return dac_cast<PTR_IPerAppDomainTPCount>(s_appDomainIndexList.Get(index.m_dwIndex-1));
@@ -330,29 +276,12 @@ public:
 private:
     static DWORD FindFirstFreeTpEntry();
 
-    static UnManagedPerAppDomainTPCount s_unmanagedTPCount;
+    static BYTE s_padding[MAX_CACHE_LINE_SIZE - sizeof(LONG)];
+    DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) static LONG s_ADHint;
+    DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) static UnManagedPerAppDomainTPCount s_unmanagedTPCount;
 
     //The list of all per-appdomain work-request counts.
-    static ArrayListStatic s_appDomainIndexList;    
-
-    static LONG s_ADHint;
+    static ArrayListStatic s_appDomainIndexList;
 };
 
 #endif //_THREADPOOL_REQUEST_H
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -71,15 +71,15 @@ LEAF_ENTRY JIT_WriteBarrier_Debug, _TEXT
 #ifdef FEATURE_USE_SOFTWARE_WRITE_WATCH_FOR_GC_HEAP
         // Update the write watch table if necessary
         PREPARE_EXTERNAL_VAR g_sw_ww_enabled_for_gc_heap, r10
-        cmp     byte ptr [r10], 0h
+        cmp     byte ptr [r10], 0x0
         je      CheckCardTable_Debug
         mov     r10, rdi
-        shr     r10, 0Ch // SoftwareWriteWatch::AddressToTableByteIndexShift
+        shr     r10, 0xC // SoftwareWriteWatch::AddressToTableByteIndexShift
         PREPARE_EXTERNAL_VAR g_sw_ww_table, r11
         add     r10, qword ptr [r11]
-        cmp     byte ptr [r10], 0h
+        cmp     byte ptr [r10], 0x0
         jne     CheckCardTable_Debug
-        mov     byte ptr [r10], 0FFh
+        mov     byte ptr [r10], 0xFF
 #endif
 
     CheckCardTable_Debug:
@@ -94,16 +94,36 @@ LEAF_ENTRY JIT_WriteBarrier_Debug, _TEXT
         // Check if we need to update the card table
         // Calc pCardByte
         shr     rdi, 0x0B
+
         PREPARE_EXTERNAL_VAR g_card_table, r10
-        add     rdi, [r10]
+        mov     r10, [r10]
 
         // Check if this card is dirty
-        cmp     byte ptr [rdi], 0FFh
+        cmp     byte ptr [rdi + r10], 0xFF
+
         jne     UpdateCardTable_Debug
         REPRET
 
     UpdateCardTable_Debug:
-        mov     byte ptr [rdi], 0FFh
+        mov     byte ptr [rdi + r10], 0xFF
+
+#ifdef FEATURE_MANUALLY_MANAGED_CARD_BUNDLES
+        // Shift rdi by 0x0A more to get the card bundle byte (we shifted by 0x0B already)
+        shr     rdi, 0x0A
+
+        PREPARE_EXTERNAL_VAR g_card_bundle_table, r10
+        add     rdi, [r10]
+
+        // Check if this bundle byte is dirty
+        cmp     byte ptr [rdi], 0xFF
+
+        jne     UpdateCardBundle_Debug
+        REPRET
+
+    UpdateCardBundle_Debug:
+        mov     byte ptr [rdi], 0xFF
+#endif
+
         ret
 
     .balign 16

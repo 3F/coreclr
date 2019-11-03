@@ -28,6 +28,8 @@
 #include "utils.hpp"
 #include "variables.hpp"
 #include "ex.h"
+#include "clr/fs/path.h"
+using namespace clr::fs;
 
 namespace BINDER_SPACE
 {
@@ -142,10 +144,6 @@ namespace BINDER_SPACE
 
             m_pFailureCache = pFailureCache;
         }
-
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER)      
-        m_fCanExplicitlyBindToNativeImages = false;
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
         
     Exit:
         BINDER_LOG_LEAVE_HR(W("ApplicationContext::Init"), hr);
@@ -260,17 +258,20 @@ namespace BINDER_SPACE
                 break;
             }
 
+#ifndef CROSSGEN_COMPILE
+            if (Path::IsRelative(fileName))
+            {
+                BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Relative path not allowed"), fileName);
+                GO_WITH_HRESULT(E_INVALIDARG);
+            }
+#endif
+
             // Find the beginning of the simple name
             SString::Iterator iSimpleNameStart = fileName.End();
             
             if (!fileName.FindBack(iSimpleNameStart, DIRECTORY_SEPARATOR_CHAR_W))
             {
-#ifdef CROSSGEN_COMPILE
                 iSimpleNameStart = fileName.Begin();
-#else
-                // Couldn't find a directory separator.  File must have been specified as a relative path.  Not allowed.
-                GO_WITH_HRESULT(E_INVALIDARG);
-#endif
             }
             else
             {
@@ -397,6 +398,14 @@ namespace BINDER_SPACE
                 break;
             }
 
+#ifndef CROSSGEN_COMPILE
+            if (Path::IsRelative(pathName))
+            {
+                BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Relative path not allowed"), pathName);
+                GO_WITH_HRESULT(E_INVALIDARG);
+            }
+#endif
+
             m_platformResourceRoots.Append(pathName);
             BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Added resource root"), pathName);
         }
@@ -416,6 +425,14 @@ namespace BINDER_SPACE
                 break;
             }
             
+#ifndef CROSSGEN_COMPILE
+            if (Path::IsRelative(pathName))
+            {
+                BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Relative path not allowed"), pathName);
+                GO_WITH_HRESULT(E_INVALIDARG);
+            }
+#endif
+
             m_appPaths.Append(pathName);
             BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Added App Path"), pathName);
         }
@@ -434,6 +451,14 @@ namespace BINDER_SPACE
             {
                 break;
             }
+
+#ifndef CROSSGEN_COMPILE
+            if (Path::IsRelative(pathName))
+            {
+                BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Relative path not allowed"), pathName);
+                GO_WITH_HRESULT(E_INVALIDARG);
+            }
+#endif
 
             m_appNiPaths.Append(pathName);
             BINDER_LOG_STRING(W("ApplicationContext::SetupBindingPaths: Added App NI Path"), pathName);

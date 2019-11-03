@@ -3,13 +3,14 @@
 // See the LICENSE file in the project root for more information.
 
 #include <xplatform.h>
+#include <platformdefines.h>
 #include <stdio.h>
 
 
 BOOL boolManaged = true;
 BOOL boolNative = false;
 
-extern "C" DLL_EXPORT BOOL __stdcall Marshal_In(/*[in]*/BOOL boolValue)
+extern "C" DLL_EXPORT BOOL STDMETHODCALLTYPE Marshal_In(/*[in]*/BOOL boolValue)
 {
 	//Check the input
 	if(boolValue != boolManaged)
@@ -29,7 +30,7 @@ extern "C" DLL_EXPORT BOOL __stdcall Marshal_In(/*[in]*/BOOL boolValue)
 	return true;
 }
 
-extern "C" DLL_EXPORT BOOL __stdcall Marshal_InOut(/*[In,Out]*/BOOL boolValue)
+extern "C" DLL_EXPORT BOOL STDMETHODCALLTYPE Marshal_InOut(/*[In,Out]*/BOOL boolValue)
 {
 	//Check the input
 	if(boolValue != boolManaged)
@@ -53,7 +54,7 @@ extern "C" DLL_EXPORT BOOL __stdcall Marshal_InOut(/*[In,Out]*/BOOL boolValue)
 	return true;
 }
 
-extern "C" DLL_EXPORT BOOL __stdcall Marshal_Out(/*[Out]*/BOOL boolValue)
+extern "C" DLL_EXPORT BOOL STDMETHODCALLTYPE Marshal_Out(/*[Out]*/BOOL boolValue)
 {
 	//In-Place Change
 	boolValue = boolNative;
@@ -62,7 +63,7 @@ extern "C" DLL_EXPORT BOOL __stdcall Marshal_Out(/*[Out]*/BOOL boolValue)
 	return true;
 }
 
-extern "C" DLL_EXPORT BOOL __stdcall MarshalPointer_In(/*[in]*/BOOL *pboolValue)
+extern "C" DLL_EXPORT BOOL STDMETHODCALLTYPE MarshalPointer_In(/*[in]*/BOOL *pboolValue)
 {
 	//Check the input
 	if(*pboolValue != boolManaged)
@@ -82,7 +83,7 @@ extern "C" DLL_EXPORT BOOL __stdcall MarshalPointer_In(/*[in]*/BOOL *pboolValue)
 	return true;
 }
 
-extern "C" DLL_EXPORT BOOL __stdcall MarshalPointer_InOut(/*[in,out]*/BOOL *pboolValue)
+extern "C" DLL_EXPORT BOOL STDMETHODCALLTYPE MarshalPointer_InOut(/*[in,out]*/BOOL *pboolValue)
 {
 	//Check the input
 	if(*pboolValue != boolManaged)
@@ -106,7 +107,7 @@ extern "C" DLL_EXPORT BOOL __stdcall MarshalPointer_InOut(/*[in,out]*/BOOL *pboo
 	return true;
 }
 
-extern "C" DLL_EXPORT BOOL __stdcall MarshalPointer_Out(/*[out]*/ BOOL *pboolValue)
+extern "C" DLL_EXPORT BOOL STDMETHODCALLTYPE MarshalPointer_Out(/*[out]*/ BOOL *pboolValue)
 {
 	//In-Place Change
 	*pboolValue = boolNative;
@@ -116,10 +117,12 @@ extern "C" DLL_EXPORT BOOL __stdcall MarshalPointer_Out(/*[out]*/ BOOL *pboolVal
 }
 
 #pragma warning(push)
+#if _MSC_VER <= 1900
 // 'BOOL' forcing value to bool 'true' or 'false'
 #pragma warning(disable: 4800)
+#endif
 
-extern "C" DLL_EXPORT bool __stdcall Marshal_As_In(/*[in]*/bool boolValue)
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_As_In(/*[in]*/bool boolValue)
 {
 	//Check the input
 	if(boolValue != (bool)boolManaged)
@@ -139,7 +142,7 @@ extern "C" DLL_EXPORT bool __stdcall Marshal_As_In(/*[in]*/bool boolValue)
 	return true;
 }
 
-extern "C" DLL_EXPORT bool __stdcall Marshal_As_InOut(/*[In,Out]*/bool boolValue)
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_As_InOut(/*[In,Out]*/bool boolValue)
 {
 	//Check the input
 	if(boolValue != (bool)boolManaged)
@@ -163,7 +166,7 @@ extern "C" DLL_EXPORT bool __stdcall Marshal_As_InOut(/*[In,Out]*/bool boolValue
 	return true;
 }
 
-extern "C" DLL_EXPORT bool __stdcall Marshal_As_Out(/*[Out]*/bool boolValue)
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_As_Out(/*[Out]*/bool boolValue)
 {
 	//In-Place Change
 	boolValue = (bool)boolNative;
@@ -171,4 +174,74 @@ extern "C" DLL_EXPORT bool __stdcall Marshal_As_Out(/*[Out]*/bool boolValue)
 	//Return
 	return true;
 }
+
+#ifdef _WIN32
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_ByValue_Variant(VARIANT_BOOL boolValue, bool expected)
+{
+    if (boolValue != (expected ? VARIANT_TRUE : VARIANT_FALSE))
+    {
+        printf("Error in function Marshal_ByValue_Variant(Native Client)\n");
+
+        printf("Expected %s ", expected ? "true" : "false");
+        printf("Actual %s (%hi)", boolValue == VARIANT_FALSE ? "false" : "(unknown variant value)", boolValue);
+
+        return false;
+    }
+
+    return true;
+}
+
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_Ref_Variant(VARIANT_BOOL* pBoolValue)
+{
+    if (*pBoolValue != (boolManaged ? VARIANT_TRUE : VARIANT_FALSE))
+    {
+        printf("Error in function Marshal_ByValue_Variant(Native Client)\n");
+
+        printf("Expected %s ", boolManaged ? "true" : "false");
+        printf("Actual %s (%hi)", *pBoolValue == VARIANT_FALSE ? "false" : "(unknown variant value)", *pBoolValue);
+
+        return false;
+    }
+
+    *pBoolValue = (boolNative ? VARIANT_TRUE : VARIANT_FALSE);
+    return true;
+}
+
+struct ContainsVariantBool
+{
+    VARIANT_BOOL value;
+};
+
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_ByValue_Struct_Variant(ContainsVariantBool value, bool expected)
+{
+    if (value.value != (expected ? VARIANT_TRUE : VARIANT_FALSE))
+    {
+        printf("Error in function Marshal_ByValue_Variant(Native Client)\n");
+
+        printf("Expected %s ", expected ? "true" : "false");
+        printf("Actual %s (%hi)", value.value == VARIANT_FALSE ? "false" : "(unknown variant value)", value.value);
+
+        return false;
+    }
+
+    return true;
+}
+
+extern "C" DLL_EXPORT bool STDMETHODCALLTYPE Marshal_Ref_Struct_Variant(ContainsVariantBool* pBoolValue)
+{
+    if (pBoolValue->value != (boolManaged ? VARIANT_TRUE : VARIANT_FALSE))
+    {
+        printf("Error in function Marshal_ByValue_Variant(Native Client)\n");
+
+        printf("Expected %s ", boolManaged ? "true" : "false");
+        printf("Actual %s (%hi)", pBoolValue->value == VARIANT_FALSE ? "false" : "(unknown variant value)", pBoolValue->value);
+
+        return false;
+    }
+
+    pBoolValue->value = (boolNative ? VARIANT_TRUE : VARIANT_FALSE);
+    return true;
+}
+
+#endif
 #pragma warning(pop)

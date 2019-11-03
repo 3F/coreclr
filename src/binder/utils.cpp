@@ -146,12 +146,6 @@ namespace BINDER_SPACE
         return hr;
     }
 
-    BOOL IsURL(SString &urlOrPath)
-    {
-        // This is also in defined rotor pal
-        return PathIsURLW(urlOrPath);
-    }
-
     void MutateUrlToPath(SString &urlOrPath)
     {
         BINDER_LOG_ENTER(W("Utils::MutateUrlToPath"));

@@ -6,6 +6,7 @@
 //Testing the special values
 
 using System;
+using System.Runtime.InteropServices;
 
 internal class pow1
 {
@@ -15,18 +16,8 @@ internal class pow1
         bool pass = true;
 
         //Check if the test is being executed on ARMARCH
-        bool isProcessorArmArch = false;
-
-        string processorArchEnvVar = null;
-
-        processorArchEnvVar = Environment.GetEnvironmentVariable("PROCESSOR_ARCHITECTURE");
-
-        if ((processorArchEnvVar != null)
-            && (processorArchEnvVar.Equals("ARM", StringComparison.CurrentCultureIgnoreCase)
-                || processorArchEnvVar.Equals("ARM64", StringComparison.CurrentCultureIgnoreCase)))
-        {
-            isProcessorArmArch = true;
-        }
+        bool isProcessorArmArch = RuntimeInformation.ProcessArchitecture == Architecture.Arm
+                                || RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
 
         x = 0;
         y = 0;
@@ -129,7 +120,7 @@ internal class pow1
         x = 1;
         y = Double.NaN;
         z = Math.Pow(x, y);
-        if (!Double.IsNaN(z))
+        if (z != 1)
         {
             Console.WriteLine("x: {0}, y: {1}, Pow(x,y): {2}", x, y, z);
             pass = false;

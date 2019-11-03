@@ -29,16 +29,10 @@ Revision History:
 #include "pal/stackstring.hpp"
 
 #include <errno.h>
-#include <unistd.h> 
+#include <unistd.h>
 #include <time.h>
 #include <pthread.h>
 #include <dlfcn.h>
-
-#if HAVE_BSD_UUID_H
-#include <uuid.h>
-#elif HAVE_LIBUUID_H
-#include <uuid/uuid.h>
-#endif
 
 #include <pal_endian.h>
 
@@ -48,7 +42,6 @@ Revision History:
 
 SET_DEFAULT_DEBUG_CHANNEL(MISC);
 
-static const char RANDOM_DEVICE_NAME[] ="/dev/random";
 static const char URANDOM_DEVICE_NAME[]="/dev/urandom";
 
 /*++
@@ -56,16 +49,16 @@ static const char URANDOM_DEVICE_NAME[]="/dev/urandom";
 Function :
 
     PAL_GetPALDirectoryW
-    
+
     Returns the fully qualified path name
     where the PALL DLL was loaded from.
-    
-    On failure it returns FALSE and sets the 
+
+    On failure it returns FALSE and sets the
     proper LastError code.
 
 --*/
-BOOL 
-PAL_GetPALDirectoryW(PathWCharString& lpDirectoryName) 
+BOOL
+PAL_GetPALDirectoryW(PathWCharString& lpDirectoryName)
 {
     LPCWSTR lpFullPathAndName = NULL;
     LPCWSTR lpEndPoint = NULL;
@@ -91,8 +84,8 @@ PAL_GetPALDirectoryW(PathWCharString& lpDirectoryName)
         /* The path that we return is required to have
            the trailing slash on the end.*/
         lpEndPoint++;
-    
-        
+
+
         if(!lpDirectoryName.Set(lpFullPathAndName,lpEndPoint - lpFullPathAndName))
         {
             ASSERT( "The buffer was not large enough.\n" );
@@ -108,8 +101,8 @@ PAL_GetPALDirectoryW(PathWCharString& lpDirectoryName)
         /* Error path, should not be executed. */
         SetLastError( ERROR_INTERNAL_ERROR );
     }
-    
-EXIT:    
+
+EXIT:
     PERF_EXIT(PAL_GetPALDirectoryW);
     return bRet;
 }
@@ -124,9 +117,9 @@ PAL_GetPALDirectoryA(PathCharString& lpDirectoryName)
 
     bRet = PAL_GetPALDirectoryW(directory);
 
-    if (bRet) 
+    if (bRet)
     {
-        
+
         int length = WideCharToMultiByte(CP_ACP, 0, directory.GetString(), -1, NULL, 0, NULL, 0);
         LPSTR DirectoryName = lpDirectoryName.OpenStringBuffer(length);
         if (NULL == DirectoryName)
@@ -134,7 +127,7 @@ PAL_GetPALDirectoryA(PathCharString& lpDirectoryName)
             SetLastError( ERROR_INSUFFICIENT_BUFFER );
             bRet = FALSE;
         }
-        
+
         length = WideCharToMultiByte(CP_ACP, 0, directory.GetString(), -1, DirectoryName, length, NULL, 0);
 
         if (0 == length)
@@ -142,7 +135,7 @@ PAL_GetPALDirectoryA(PathCharString& lpDirectoryName)
             bRet = FALSE;
             length++;
         }
-    
+
         lpDirectoryName.CloseBuffer(length - 1);
     }
 
@@ -155,20 +148,18 @@ PAL_GetPALDirectoryA(PathCharString& lpDirectoryName)
 Function :
 
     PAL_GetPALDirectoryW
-    
+
     Returns the fully qualified path name
     where the PALL DLL was loaded from.
-    
-    On failure it returns FALSE and sets the 
+
+    On failure it returns FALSE and sets the
     proper LastError code.
-    
-See rotor_pal.doc for more details.
 
 --*/
 PALIMPORT
-BOOL 
+BOOL
 PALAPI
-PAL_GetPALDirectoryW( OUT LPWSTR lpDirectoryName, IN OUT UINT* cchDirectoryName ) 
+PAL_GetPALDirectoryW( OUT LPWSTR lpDirectoryName, IN OUT UINT* cchDirectoryName )
 {
     PathWCharString directory;
     BOOL bRet;
@@ -178,14 +169,14 @@ PAL_GetPALDirectoryW( OUT LPWSTR lpDirectoryName, IN OUT UINT* cchDirectoryName 
     bRet = PAL_GetPALDirectoryW(directory);
 
     if (bRet) {
-        
+
         if (directory.GetCount() > *cchDirectoryName)
         {
             SetLastError( ERROR_INSUFFICIENT_BUFFER );
             bRet = FALSE;
         }
         else
-        { 
+        {
             PAL_wcscpy(lpDirectoryName, directory.GetString());
         }
 
@@ -213,7 +204,7 @@ PAL_GetPALDirectoryA(
 
     bRet = PAL_GetPALDirectoryA(directory);
 
-    if (bRet) 
+    if (bRet)
     {
         if (directory.GetCount() > *cchDirectoryName)
         {
@@ -221,10 +212,10 @@ PAL_GetPALDirectoryA(
             bRet = FALSE;
             *cchDirectoryName = directory.GetCount();
         }
-        else if (strcpy_s(lpDirectoryName, directory.GetCount(), directory.GetString()) == SAFECRT_SUCCESS) 
+        else if (strcpy_s(lpDirectoryName, directory.GetCount(), directory.GetString()) == SAFECRT_SUCCESS)
         {
         }
-        else 
+        else
         {
             bRet = FALSE;
         }
@@ -235,94 +226,68 @@ PAL_GetPALDirectoryA(
     return bRet;
 }
 
-BOOL
+VOID
 PALAPI
 PAL_Random(
-        IN BOOL bStrong,
         IN OUT LPVOID lpBuffer,
         IN DWORD dwLength)
 {
     int rand_des = -1;
-    BOOL bRet = FALSE;
     DWORD i;
-    char buf;
     long num = 0;
-    static BOOL sMissingDevRandom;
     static BOOL sMissingDevURandom;
     static BOOL sInitializedMRand;
 
     PERF_ENTRY(PAL_Random);
-    ENTRY("PAL_Random(bStrong=%d, lpBuffer=%p, dwLength=%d)\n", 
-          bStrong, lpBuffer, dwLength);
+    ENTRY("PAL_Random(lpBuffer=%p, dwLength=%d)\n", lpBuffer, dwLength);
 
-    i = 0;
-
-    if (bStrong == TRUE && i < dwLength && !sMissingDevRandom)
+    if (!sMissingDevURandom)
     {
-        // request non-blocking access to avoid hangs if the /dev/random is exhausted
-        // or just simply broken
-        if ((rand_des = PAL__open(RANDOM_DEVICE_NAME, O_RDONLY | O_NONBLOCK)) == -1)
+        do
+        {
+            rand_des = open("/dev/urandom", O_RDONLY, O_CLOEXEC);
+        }
+        while ((rand_des == -1) && (errno == EINTR));
+
+        if (rand_des == -1)
         {
             if (errno == ENOENT)
             {
-                sMissingDevRandom = TRUE;
+                sMissingDevURandom = TRUE;
             }
             else
             {
                 ASSERT("PAL__open() failed, errno:%d (%s)\n", errno, strerror(errno));
             }
 
-            // Back off and try /dev/urandom.
+            // Back off and try mrand48.
         }
         else
         {
-            for( ; i < dwLength; i++)
+            DWORD offset = 0;
+            do
             {
-                if (read(rand_des, &buf, 1) < 1)
+                ssize_t n = read(rand_des, (BYTE*)lpBuffer + offset , dwLength - offset);
+                if (n == -1)
                 {
-                    // the /dev/random pool has been exhausted.  Fall back
-                    // to /dev/urandom for the remainder of the buffer.
+                    if (errno == EINTR)
+                    {
+                        continue;
+                    }
+                    ASSERT("read() failed, errno:%d (%s)\n", errno, strerror(errno));
+
                     break;
                 }
 
-                *(((BYTE*)lpBuffer) + i) ^= buf;
+                offset += n;
             }
+            while (offset != dwLength);
+
+            _ASSERTE(offset == dwLength);
 
             close(rand_des);
         }
     }
- 
-    if (i < dwLength && !sMissingDevURandom)
-    {
-        if ((rand_des = PAL__open(URANDOM_DEVICE_NAME, O_RDONLY)) == -1)
-        {
-            if (errno == ENOENT)
-            {                
-                sMissingDevURandom = TRUE;                
-            }
-            else
-            {
-                ASSERT("PAL__open() failed, errno:%d (%s)\n", errno, strerror(errno));               
-            }
-
-            // Back off and try mrand48.           
-        }
-        else
-        {
-            for( ; i < dwLength; i++)
-            {
-                if (read(rand_des, &buf, 1) < 1)
-                {
-                    // Fall back to srand48 for the remainder of the buffer.
-                    break;
-                }
-
-                *(((BYTE*)lpBuffer) + i) ^= buf;
-            }
-
-            close(rand_des);
-        }
-    }    
 
     if (!sInitializedMRand)
     {
@@ -331,9 +296,9 @@ PAL_Random(
     }
 
     // always xor srand48 over the whole buffer to get some randomness
-    // in case /dev/random is not really random
+    // in case /dev/urandom is not really random
 
-    for(i = 0; i < dwLength; i++)
+    for (i = 0; i < dwLength; i++)
     {
         if (i % sizeof(long) == 0) {
             num = mrand48();
@@ -343,39 +308,6 @@ PAL_Random(
         num >>= 8;
     }
 
-    bRet = TRUE;
-
-    LOGEXIT("PAL_Random returns %d\n", bRet);
+    LOGEXIT("PAL_Random\n");
     PERF_EXIT(PAL_Random);
-    return bRet;
-}
-
-HRESULT
-PALAPI
-CoCreateGuid(OUT GUID * pguid)
-{
-#if HAVE_BSD_UUID_H
-    uuid_t uuid;
-    uint32_t status;
-    uuid_create(&uuid, &status);
-    if (status != uuid_s_ok)
-    {
-        ASSERT("Unexpected uuid_create failure (status=%u)\n", status);
-        PROCAbort();
-    }
-
-    // Encode the uuid with little endian.
-    uuid_enc_le(pguid, &uuid);
-#elif HAVE_LIBUUID_H
-    uuid_generate_random(*(uuid_t*)pguid);
-
-    // Change the byte order of the Data1, 2 and 3, since the uuid_generate_random
-    // generates them with big endian while GUIDS need to have them in little endian.
-    pguid->Data1 = SWAP32(pguid->Data1);
-    pguid->Data2 = SWAP16(pguid->Data2);
-    pguid->Data3 = SWAP16(pguid->Data3);
-#else
-    #error Don't know how to generate UUID on this platform
-#endif
-    return 0;
 }

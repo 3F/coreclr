@@ -5,6 +5,7 @@
 // Tests Finalize() with Inheritance
 
 using System;
+using System.Runtime.CompilerServices;
 
 namespace One
 {
@@ -54,6 +55,8 @@ namespace Three {
 #pragma warning restore 0414
         C c;
 
+        // No inline to ensure no stray refs to the B, C, D objects.
+        [MethodImplAttribute(MethodImplOptions.NoInlining)]
         public CreateObj()
         {
             b = new B();
@@ -61,6 +64,7 @@ namespace Three {
             d = new D();
         }
 
+        [MethodImplAttribute(MethodImplOptions.NoInlining)]
         public bool RunTest()
         {
             A a = c;
@@ -83,7 +87,12 @@ namespace Three {
         {
             CreateObj temp = new CreateObj();
 
-            if (temp.RunTest())
+            temp.RunTest();
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+
+            if (C.count == 2)
             {
                 Console.WriteLine("Test Passed");
                 return 100;

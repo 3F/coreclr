@@ -14,19 +14,13 @@
 
 // All COM+ exceptions are expressed as a RaiseException with this exception
 // code.  If you change this value, you must also change
-// bcl\src\system\Exception.cs's _COMPlusExceptionCode value.
+// mscorlib\src\system\Exception.cs's _COMPlusExceptionCode value.
 
 #define EXCEPTION_MSVC    0xe06d7363    // 0xe0000000 | 'msc'
 
 #define EXCEPTION_COMPLUS 0xe0434352    // 0xe0000000 | 'CCR'
 
 #define EXCEPTION_HIJACK  0xe0434f4e    // 0xe0000000 | 'COM'+1
-
-#ifdef FEATURE_STACK_PROBE
-#define EXCEPTION_SOFTSO  0xe053534f    // 0xe0000000 | 'SSO'
-                                        // We can not throw internal C++ exception through managed frame.
-                                        // At boundary, we will raise an exception with this error code
-#endif
 
 #if defined(_DEBUG)
 #define EXCEPTION_INTERNAL_ASSERT 0xe0584d4e // 0xe0000000 | 'XMN'

@@ -30,16 +30,28 @@ struct CallDescrData
     UINT32                      fpReturnSize;
     PCODE                       pTarget;
 
+#ifdef CALLDESCR_RETBUFFARGREG
+    // Pointer to return buffer arg location
+    UINT64*                     pRetBuffArg;
+#endif
+
     //
     // Return value
     //
 #ifdef ENREGISTERED_RETURNTYPE_MAXSIZE
+#ifdef _TARGET_ARM64_
+    // Use NEON128 to ensure proper alignment for vectors.
+    DECLSPEC_ALIGN(16) NEON128 returnValue[ENREGISTERED_RETURNTYPE_MAXSIZE / sizeof(NEON128)];
+#else
     // Use UINT64 to ensure proper alignment
     UINT64 returnValue[ENREGISTERED_RETURNTYPE_MAXSIZE / sizeof(UINT64)];
+#endif
 #else
     UINT64 returnValue;
 #endif
 };
+
+#define NUMBER_RETURNVALUE_SLOTS (ENREGISTERED_RETURNTYPE_MAXSIZE / sizeof(ARG_SLOT))
 
 #if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 
@@ -82,7 +94,7 @@ private:
     ArgIterator m_argIt;
 
 #ifdef _DEBUG 
-    __declspec(noinline) void LogWeakAssert()
+    NOINLINE void LogWeakAssert()
     {
         LIMITED_METHOD_CONTRACT;
         LOG((LF_ASSERT, LL_WARNING, "%s::%s\n", m_pMD->m_pszDebugClassName, m_pMD->m_pszDebugMethodName));
@@ -129,11 +141,26 @@ private:
         m_argIt.ForceSigWalk();
     }
 
+    void DefaultInit(TypeHandle th)
+    {
+        CONTRACTL
+        {
+            MODE_ANY;
+        GC_TRIGGERS;
+        THROWS;
+        }
+        CONTRACTL_END;
+
+        m_pCallTarget = m_pMD->GetCallTarget(NULL, th);
+
+        m_argIt.ForceSigWalk();
+}
+
 #ifdef FEATURE_INTERPRETER
 public:
-    ARG_SLOT CallTargetWorker(const ARG_SLOT *pArguments, bool transitionToPreemptive = false);
+    void CallTargetWorker(const ARG_SLOT *pArguments, ARG_SLOT *pReturnValue, int cbReturnValue, bool transitionToPreemptive = false);
 #else
-    ARG_SLOT CallTargetWorker(const ARG_SLOT *pArguments);
+    void CallTargetWorker(const ARG_SLOT *pArguments, ARG_SLOT *pReturnValue, int cbReturnValue);
 #endif
 
 public:
@@ -232,6 +259,25 @@ public:
         DefaultInit(porProtectedThis);
     }
     
+    MethodDescCallSite(MethodDesc* pMD, TypeHandle th) :
+        m_pMD(pMD),
+        m_methodSig(pMD, th),
+        m_argIt(&m_methodSig)
+    {
+        CONTRACTL
+        {
+            THROWS;
+            GC_TRIGGERS;
+            MODE_COOPERATIVE;
+        }
+        CONTRACTL_END;
+
+        // We don't have a "this" pointer - ensure that we have activated the containing module
+        m_pMD->EnsureActive();
+
+        DefaultInit(th);
+    }
+
     //
     // Only use this constructor if you're certain you know where
     // you're going and it cannot be affected by generics/virtual
@@ -309,20 +355,22 @@ public:
                                   eltype == m_methodSig.GetReturnType());           \
             }                                                                       \
             ARG_SLOT retval;                                                        \
-            retval = CallTargetWorker(pArguments);                                  \
+            CallTargetWorker(pArguments, &retval, sizeof(retval));                  \
             return *(rettype *)ArgSlotEndianessFixup(&retval, sizeof(rettype));     \
+        }
+
+#define MDCALLDEF_ARGSLOT(wrappedmethod, ext)                                       \
+        FORCEINLINE void wrappedmethod##ext (const ARG_SLOT* pArguments, ARG_SLOT *pReturnValue, int cbReturnValue) \
+        {                                                                           \
+            CallTargetWorker(pArguments, pReturnValue, cbReturnValue);              \
+            /* Bigendian layout not support */                                      \
         }
 
 #define MDCALLDEF_REFTYPE(wrappedmethod,  permitvaluetypes, ext, ptrtype, reftype)              \
         FORCEINLINE reftype wrappedmethod##ext (const ARG_SLOT* pArguments)                     \
         {                                                                                       \
-            WRAPPER_NO_CONTRACT;                                                                \
-            {                                                                                   \
-                GCX_FORBID();  /* arg array is not protected */                                 \
-                CONSISTENCY_CHECK(MetaSig::RETOBJ == m_pMD->ReturnsObject(true));               \
-            }                                                                                   \
             ARG_SLOT retval;                                                                    \
-            retval = CallTargetWorker(pArguments);                                              \
+            CallTargetWorker(pArguments, &retval, sizeof(retval));                              \
             return ObjectTo##reftype(*(ptrtype *)                                               \
                         ArgSlotEndianessFixup(&retval, sizeof(ptrtype)));                       \
         }
@@ -336,7 +384,7 @@ public:
         FORCEINLINE void wrappedmethod (const ARG_SLOT* pArguments)     \
         {                                                               \
             WRAPPER_NO_CONTRACT;                                        \
-            CallTargetWorker(pArguments);                               \
+            CallTargetWorker(pArguments, NULL, 0);                      \
         }
 
 #define MDCALLDEFF_STD_RETTYPES(wrappedmethod,permitvaluetypes)                                         \
@@ -426,7 +474,7 @@ public:
 
         // XXX CallWithValueTypes_RetXXX(const ARG_SLOT* pArguments);
         MDCALLDEF_VOID(     CallWithValueTypes, TRUE)
-        MDCALLDEF(          CallWithValueTypes, TRUE,   _RetArgSlot,    ARG_SLOT,   OTHER_ELEMENT_TYPE)
+        MDCALLDEF_ARGSLOT(  CallWithValueTypes, _RetArgSlot)
         MDCALLDEF_REFTYPE(  CallWithValueTypes, TRUE,   _RetOBJECTREF,  Object*,    OBJECTREF)
         MDCALLDEF(          CallWithValueTypes, TRUE,   _RetOleColor,   OLE_COLOR,  OTHER_ELEMENT_TYPE)
 #undef OTHER_ELEMENT_TYPE
@@ -485,18 +533,15 @@ enum EEToManagedCallFlags
     /* thread abort has been requested */                                       \
     if (!(flags & EEToManagedCriticalCall))                                     \
     {                                                                           \
-        TESTHOOKCALL(AppDomainCanBeUnloaded(CURRENT_THREAD->GetDomain()->GetId().m_dwId,FALSE)); \
         if (CURRENT_THREAD->IsAbortRequested()) {                               \
             CURRENT_THREAD->HandleThreadAbort();                                \
         }                                                                       \
     }                                                                           \
-    BEGIN_SO_TOLERANT_CODE(CURRENT_THREAD);                                     \
     INSTALL_CALL_TO_MANAGED_EXCEPTION_HOLDER();                                 \
     INSTALL_COMPLUS_EXCEPTION_HANDLER_NO_DECLARE();
 
 #define END_CALL_TO_MANAGED()                                                   \
     UNINSTALL_COMPLUS_EXCEPTION_HANDLER();                                      \
-    END_SO_TOLERANT_CODE;                                                       \
 }
 
 /***********************************************************************/
@@ -514,6 +559,7 @@ enum DispatchCallSimpleFlags
 #define STRINGREF_TO_ARGHOLDER(x) (LPVOID)STRINGREFToObject(x)
 #define PTR_TO_ARGHOLDER(x) (LPVOID)x
 #define DWORD_TO_ARGHOLDER(x)   (LPVOID)(SIZE_T)x
+#define BOOL_TO_ARGHOLDER(x) DWORD_TO_ARGHOLDER(!!(x))   
 
 #define INIT_VARIABLES(count)                               \
         DWORD   __numArgs = count;                          \

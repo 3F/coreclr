@@ -119,12 +119,8 @@ class Frame;
 class Exception;
 
 VOID DECLSPEC_NORETURN RealCOMPlusThrowOM();
-VOID DECLSPEC_NORETURN RealCOMPlusThrowSO();
 
 #include <excepcpu.h>
-#include "stackprobe.h"
-
-
 
 //==========================================================================
 // Macros to allow catching exceptions from within the EE. These are lightweight
@@ -250,28 +246,6 @@ LONG WINAPI CLRVectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo);
 // Actual UEF worker prototype for use by GCUnhandledExceptionFilter.
 extern LONG InternalUnhandledExceptionFilter_Worker(PEXCEPTION_POINTERS pExceptionInfo);
 
-// This function is the filter function for the "__except" setup in "gc1()"
-// in gc.cpp to handle exceptions that happen during GC.
-inline LONG CheckException(EXCEPTION_POINTERS* pExceptionPointers, PVOID pv)
-{
-    WRAPPER_NO_CONTRACT;
-
-    LONG result = CLRVectoredExceptionHandler(pExceptionPointers);
-    if (result != EXCEPTION_EXECUTE_HANDLER)
-        return result;
-
-#ifdef _DEBUG_IMPL
-    _ASSERTE(!"Unexpected Exception");
-#else
-    FreeBuildDebugBreak();
-#endif
-
-    // Set the debugger to break on AV and return a value of EXCEPTION_CONTINUE_EXECUTION (-1)
-    // here and you will bounce back to the point of the AV.
-    return EXCEPTION_EXECUTE_HANDLER;
-
-}
-
 //==========================================================================
 // Installs a handler to unwind exception frames, but not catch the exception
 //==========================================================================
@@ -319,7 +293,7 @@ void UnwindAndContinueRethrowHelperInsideCatch(Frame* pEntryFrame, Exception* pE
 VOID DECLSPEC_NORETURN UnwindAndContinueRethrowHelperAfterCatch(Frame* pEntryFrame, Exception* pException);
 
 #ifdef FEATURE_PAL
-VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
+VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex, bool isHardwareException);
 
 #define INSTALL_MANAGED_EXCEPTION_DISPATCHER        \
         PAL_SEHException exCopy;                    \
@@ -330,12 +304,12 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
         }                                           \
         catch (PAL_SEHException& ex)                \
         {                                           \
-            exCopy = ex;                            \
+            exCopy = std::move(ex);                 \
             hasCaughtException = true;              \
         }                                           \
         if (hasCaughtException)                     \
         {                                           \
-            DispatchManagedException(exCopy);       \
+            DispatchManagedException(exCopy, false);\
         }
 
 // Install trap that catches unhandled managed exception and dumps its stack
@@ -356,7 +330,7 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
             UNREACHABLE();                                                                          \
         }
 
-#else
+#else // FEATURE_PAL
 
 #define INSTALL_MANAGED_EXCEPTION_DISPATCHER
 #define UNINSTALL_MANAGED_EXCEPTION_DISPATCHER
@@ -379,13 +353,7 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
 #define INSTALL_UNWIND_AND_CONTINUE_HANDLER                                                 \
     INSTALL_UNWIND_AND_CONTINUE_HANDLER_NO_PROBE                                            \
     /* The purpose of the INSTALL_UNWIND_AND_CONTINUE_HANDLER is to translate an exception to a managed */ \
-    /* exception before it hits managed code.  The transition to SO_INTOLERANT code does not logically belong here. */ \
-    /* However, we don't want to miss any probe points and the intersection between a probe point and installing */ \
-    /* an  INSTALL_UNWIND_AND_CONTINUE_HANDLER is very high.  The probes are very cheap, so we can tolerate */ \
-    /* those few places where we are probing and don't need to. */ \
-    /* Ideally, we would instead have an encompassing ENTER_SO_INTOLERANT_CODE macro that would */ \
-    /* include INSTALL_UNWIND_AND_CONTINUE_HANDLER */                                       \
-    BEGIN_SO_INTOLERANT_CODE(GET_THREAD());
+    /* exception before it hits managed code. */
 
 // Optimized version for helper method frame. Avoids redundant GetThread() calls.
 #define INSTALL_UNWIND_AND_CONTINUE_HANDLER_FOR_HMF(pHelperFrame)                           \
@@ -396,8 +364,7 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
         SCAN_EHMARKER();                                                                    \
         if (true) PAL_CPP_TRY {                                                             \
             SCAN_EHMARKER_TRY();                                                            \
-            DEBUG_ASSURE_NO_RETURN_BEGIN(IUACH);                                            \
-            BEGIN_SO_INTOLERANT_CODE(GET_THREAD());
+            DEBUG_ASSURE_NO_RETURN_BEGIN(IUACH);
 
 #define UNINSTALL_UNWIND_AND_CONTINUE_HANDLER_NO_PROBE                                      \
             DEBUG_ASSURE_NO_RETURN_END(IUACH)                                               \
@@ -421,8 +388,7 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
     }                                                                                       \
 
 #define UNINSTALL_UNWIND_AND_CONTINUE_HANDLER                                               \
-    END_SO_INTOLERANT_CODE;                                                                 \
-    UNINSTALL_UNWIND_AND_CONTINUE_HANDLER_NO_PROBE;                                         \
+    UNINSTALL_UNWIND_AND_CONTINUE_HANDLER_NO_PROBE;
 
 #endif // DACCESS_COMPILE || CROSSGEN_COMPILE
 
@@ -456,7 +422,7 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex);
 #define CANNOTTHROWCOMPLUSEXCEPTION() ANNOTATION_NOTHROW; \
     COMPlusCannotThrowExceptionHelper _dummyvariable(TRUE, __FUNCTION__, __FILE__, __LINE__);
 
-extern char *g_ExceptionFile;
+extern const char *g_ExceptionFile;
 extern DWORD g_ExceptionLine;
 
 #define THROWLOG() ( g_ExceptionFile = __FILE__, g_ExceptionLine = __LINE__, TRUE )
@@ -466,9 +432,6 @@ extern DWORD g_ExceptionLine;
 #define COMPlusThrowHR           if(THROWLOG() && 0) { } else RealCOMPlusThrowHR
 #define COMPlusThrowWin32        if(THROWLOG() && 0) { } else RealCOMPlusThrowWin32
 #define COMPlusThrowOM           if(THROWLOG() && 0) { } else RealCOMPlusThrowOM
-#ifdef FEATURE_STACK_PROBE
-#define COMPlusThrowSO           if(THROWLOG() && 0) { } else RealCOMPlusThrowSO
-#endif
 #define COMPlusThrowArithmetic   if(THROWLOG() && 0) { } else RealCOMPlusThrowArithmetic
 #define COMPlusThrowArgumentNull if(THROWLOG() && 0) { } else RealCOMPlusThrowArgumentNull
 #define COMPlusThrowArgumentOutOfRange if(THROWLOG() && 0) { } else RealCOMPlusThrowArgumentOutOfRange
@@ -491,9 +454,6 @@ extern DWORD g_ExceptionLine;
 #endif
 #define COMPlusThrowWin32                   RealCOMPlusThrowWin32
 #define COMPlusThrowOM                      RealCOMPlusThrowOM
-#ifdef FEATURE_STACK_PROBE
-#define COMPlusThrowSO                      RealCOMPlusThrowSO
-#endif
 #define COMPlusThrowArithmetic              RealCOMPlusThrowArithmetic
 #define COMPlusThrowArgumentNull            RealCOMPlusThrowArgumentNull
 #define COMPlusThrowArgumentOutOfRange      RealCOMPlusThrowArgumentOutOfRange
@@ -507,7 +467,6 @@ ThrowWin32
 ThrowLastError       -->ThrowWin32(GetLastError())
 ThrowOutOfMemory        COMPlusThrowOM defers to this
 ThrowStackOverflow      COMPlusThrowSO defers to this
-ThrowMessage            ThrowHR(E_FAIL, Message)
 
 */
 
@@ -518,7 +477,6 @@ ThrowMessage            ThrowHR(E_FAIL, Message)
 #define ThrowHR             COMPlusThrowHR
 #define ThrowWin32          COMPlusThrowWin32
 #define ThrowLastError()    COMPlusThrowWin32(GetLastError())
-#define ThrowMessage        "Don't use this in the VM directory"
 
 */
 
@@ -545,14 +503,12 @@ void COMPlusCooperativeTransitionHandler(Frame* pFrame);
   {                                                 \
     MAKE_CURRENT_THREAD_AVAILABLE();                \
     BEGIN_GCX_ASSERT_PREEMP;                        \
-    BEGIN_SO_INTOLERANT_CODE(CURRENT_THREAD);       \
     CoopTransitionHolder __CoopTransition(CURRENT_THREAD); \
     DEBUG_ASSURE_NO_RETURN_BEGIN(COOP_TRANSITION)
 
 #define COOPERATIVE_TRANSITION_END()                \
     DEBUG_ASSURE_NO_RETURN_END(COOP_TRANSITION)     \
     __CoopTransition.SuppressRelease();             \
-    END_SO_INTOLERANT_CODE;                         \
     END_GCX_ASSERT_PREEMP;                          \
   }
 

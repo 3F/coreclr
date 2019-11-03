@@ -17,24 +17,20 @@
 
 #include "bindertypes.hpp"
 
-extern LocaleID g_lcid;
-
 namespace BINDER_SPACE
 {
     inline BOOL EqualsCaseInsensitive(SString &a, SString &b)
     {
-        return a.EqualsCaseInsensitive(b, g_lcid);
+        return a.EqualsCaseInsensitive(b);
     }
 
     inline ULONG HashCaseInsensitive(SString &string)
     {
-        return string.HashCaseInsensitive(g_lcid);
+        return string.HashCaseInsensitive();
     }
 
     HRESULT FileOrDirectoryExists(PathString &path);
     HRESULT FileOrDirectoryExistsLog(PathString &path);
-
-    BOOL IsURL(SString &urlOrPath);
 
     void MutateUrlToPath(SString &urlOrPath);
     void MutatePathToUrl(SString &pathOrUrl);

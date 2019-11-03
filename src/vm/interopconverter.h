@@ -111,19 +111,6 @@ enum ComIpType
 
 
 //--------------------------------------------------------------------------------
-// GetIUnknownForMarshalByRefInServerDomain
-// setup a CCW for Transparent proxy/marshalbyref in the server domain
-// either the object is in-proc & the domains match, or its out-of proc
-// and we don't care about appdomains
-IUnknown* GetIUnknownForMarshalByRefInServerDomain(OBJECTREF* poref);
-
-//--------------------------------------------------------------------------------
-// GetIUnknownForTransparentProxy
-// delegates the call to the managed implementation in the real proxy
-
-IUnknown* GetIUnknownForTransparentProxy(OBJECTREF* poref, BOOL fIsBeingMarshalled);
-
-//--------------------------------------------------------------------------------
 // IUnknown *GetComIPFromObjectRef(OBJECTREF *poref, MethodTable *pMT, ...);
 // Convert ObjectRef to a COM IP, based on MethodTable* pMT.
 IUnknown *GetComIPFromObjectRef(OBJECTREF *poref, MethodTable *pMT, BOOL bSecurityCheck = TRUE, BOOL bEnableCustomizedQueryInterface = TRUE);
@@ -156,27 +143,6 @@ inline void GetObjectRefFromComIP(OBJECTREF* pObjOut, IUnknown *pUnk, MethodTabl
     WRAPPER_NO_CONTRACT;
     return GetObjectRefFromComIP(pObjOut, &pUnk, pMTClass, pItfMT, dwFlags);
 }
-
-#ifdef FEATURE_REMOTING // used only by remoting
-//--------------------------------------------------------
-// managed serialization helpers
-//--------------------------------------------------------
-// ConvertObjectToBSTR
-// serializes object to a BSTR, caller needs to SysFree the Bstr
-// and GCPROTECT the oref parameter.
-BOOL ConvertObjectToBSTR(OBJECTREF* oref, BOOL fCrossRuntime, BSTR* pBStr);
-
-
-//--------------------------------------------------------------------------------
-// ConvertBSTRToObject
-// deserializes a BSTR, created using ConvertObjectToBSTR, this api SysFree's the BSTR
-OBJECTREF ConvertBSTRToObject(BSTR bstr, BOOL fCrossRuntime);
-#endif
-
-//--------------------------------------------------------------------------------
-// UnMarshalObjectForCurrentDomain
-// unmarshal the managed object for the current domain
-BOOL UnMarshalObjectForCurrentDomain(ADID pObjDomain, ComCallWrapper* pWrap, OBJECTREF* pResult);
 
 #endif // FEATURE_COMINTEROP
 

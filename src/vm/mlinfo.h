@@ -31,6 +31,7 @@ enum DispatchWrapperType
 {
     DispatchWrapperType_Unknown         = 0x00000001,
     DispatchWrapperType_Dispatch        = 0x00000002,
+    //DispatchWrapperType_Record          = 0x00000004,
     DispatchWrapperType_Error           = 0x00000008,
     DispatchWrapperType_Currency        = 0x00000010,
     DispatchWrapperType_BStr            = 0x00000020,
@@ -82,8 +83,6 @@ struct OverrideProcArgs
         struct
         {
             VARTYPE         m_vt;
-            UINT16          m_optionalbaseoffset; //for fast marshaling, offset of dataptr if known and less than 64k (0 otherwise)
-            MethodTable*    m_pMT;
 #ifdef FEATURE_COMINTEROP
             SIZE_T          m_cbElementSize;
             WinMDAdapter::RedirectedTypeIndex m_redirectedTypeIndex;
@@ -225,58 +224,6 @@ public:
         return m_hndSystemPCEventArgsType;
     }
 
-    ABI::Windows::UI::Xaml::Interop::INotifyCollectionChangedEventArgsFactory *GetNCCEventArgsFactory()
-    {
-        CONTRACTL
-        {
-            THROWS;
-            GC_TRIGGERS;    // For potential COOP->PREEMP->COOP switch
-            MODE_ANY;
-            PRECONDITION(!GetAppDomain()->IsCompilationDomain()); 
-        }
-        CONTRACTL_END;   
-
-        if (m_pNCCEventArgsFactory.Load() == NULL)
-        {
-            GCX_PREEMP();
-            SafeComHolderPreemp<ABI::Windows::UI::Xaml::Interop::INotifyCollectionChangedEventArgsFactory> pNCCEventArgsFactory;
-
-            IfFailThrow(clr::winrt::GetActivationFactory(g_WinRTNotifyCollectionChangedEventArgsNameW, (ABI::Windows::UI::Xaml::Interop::INotifyCollectionChangedEventArgsFactory **)&pNCCEventArgsFactory));
-            _ASSERTE_MSG(pNCCEventArgsFactory, "Got NULL NCCEventArgs factory!");
-
-            if (InterlockedCompareExchangeT(&m_pNCCEventArgsFactory, (ABI::Windows::UI::Xaml::Interop::INotifyCollectionChangedEventArgsFactory *)pNCCEventArgsFactory, NULL) == NULL)
-                pNCCEventArgsFactory.SuppressRelease();            
-        }
-
-        return m_pNCCEventArgsFactory;
-    }
-
-    ABI::Windows::UI::Xaml::Data::IPropertyChangedEventArgsFactory *GetPCEventArgsFactory()
-    {
-        CONTRACTL
-        {
-            THROWS;
-            GC_TRIGGERS;    // For potential COOP->PREEMP->COOP switch
-            MODE_ANY;
-            PRECONDITION(!GetAppDomain()->IsCompilationDomain()); 
-        }
-        CONTRACTL_END;   
-
-        if (m_pPCEventArgsFactory.Load() == NULL)
-        {
-            GCX_PREEMP();
-            SafeComHolderPreemp<ABI::Windows::UI::Xaml::Data::IPropertyChangedEventArgsFactory> pPCEventArgsFactory;
-
-            IfFailThrow(clr::winrt::GetActivationFactory(g_WinRTPropertyChangedEventArgsNameW, (ABI::Windows::UI::Xaml::Data::IPropertyChangedEventArgsFactory **)&pPCEventArgsFactory));
-            _ASSERTE_MSG(pPCEventArgsFactory, "Got NULL PCEventArgs factory!");
-
-            if (InterlockedCompareExchangeT(&m_pPCEventArgsFactory, (ABI::Windows::UI::Xaml::Data::IPropertyChangedEventArgsFactory *)pPCEventArgsFactory, NULL) == NULL)
-                pPCEventArgsFactory.SuppressRelease();            
-        }
-
-        return m_pPCEventArgsFactory;
-    }
-
     MethodDesc *GetSystemNCCEventArgsToWinRTNCCEventArgsMD()
     {
         LIMITED_METHOD_CONTRACT;
@@ -301,14 +248,6 @@ public:
         return m_pWinRTPCEventArgsToSystemPCEventArgsMD;
     }
 
-#if defined(_DEBUG) && !defined(FEATURE_CORECLR)
-    BOOL IsEventArgsHelperMethod(MethodDesc *pMD)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return (pMD == m_pSystemNCCEventArgsToWinRTNCCEventArgsMD || pMD == m_pWinRTNCCEventArgsToSystemNCCEventArgsMD ||
-                pMD == m_pSystemPCEventArgsToWinRTPCEventArgsMD   || pMD == m_pWinRTPCEventArgsToSystemPCEventArgsMD);
-    }
-#endif // #if defined(_DEBUG) && !defined(FEATURE_CORECLR)
 
 private:
     TypeHandle m_hndSystemNCCEventArgsType;
@@ -318,9 +257,6 @@ private:
     MethodDesc *m_pWinRTNCCEventArgsToSystemNCCEventArgsMD;
     MethodDesc *m_pSystemPCEventArgsToWinRTPCEventArgsMD;
     MethodDesc *m_pWinRTPCEventArgsToSystemPCEventArgsMD;
-
-    VolatilePtr<ABI::Windows::UI::Xaml::Interop::INotifyCollectionChangedEventArgsFactory> m_pNCCEventArgsFactory;
-    VolatilePtr<ABI::Windows::UI::Xaml::Data::IPropertyChangedEventArgsFactory> m_pPCEventArgsFactory;
 };
 
 class UriMarshalingInfo
@@ -384,13 +320,6 @@ public:
         return m_SystemUriOriginalStringGetterMD;
     }
 
-#if defined(_DEBUG) && !defined(FEATURE_CORECLR)
-    BOOL IsUriHelperMethod(MethodDesc *pMD)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return pMD == m_SystemUriCtorMD || pMD == m_SystemUriOriginalStringGetterMD;
-    }
-#endif // #if defined(_DEBUG) && !defined(FEATURE_CORECLR)
 
 private:
     TypeHandle m_hndSystemUriType;
@@ -429,13 +358,6 @@ public:
         return m_SystemColorToOleColorMD;
     }
 
-#if defined(_DEBUG) && !defined(FEATURE_CORECLR)
-    BOOL IsOleColorHelperMethod(MethodDesc *pMD)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return pMD == m_OleColorToSystemColorMD || pMD == m_SystemColorToOleColorMD;
-    }
-#endif // #if defined(_DEBUG) && !defined(FEATURE_CORECLR)
 
 private:
     TypeHandle  m_hndColorType;
@@ -449,7 +371,7 @@ private:
 class EEMarshalingData
 {
 public:
-    EEMarshalingData(BaseDomain *pDomain, LoaderHeap *pHeap, CrstBase *pCrst);
+    EEMarshalingData(LoaderAllocator *pAllocator, CrstBase *pCrst);
     ~EEMarshalingData();
 
     // EEMarshalingData's are always allocated on the loader heap so we need to redefine
@@ -470,25 +392,6 @@ public:
     UriMarshalingInfo *GetUriMarshalingInfo();
     EventArgsMarshalingInfo *GetEventArgsMarshalingInfo();
 
-#if defined(_DEBUG) && !defined(FEATURE_CORECLR)
-    BOOL IsOleColorHelperMethod(MethodDesc *pMD)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pOleColorInfo != NULL && m_pOleColorInfo->IsOleColorHelperMethod(pMD);
-    }
-
-    BOOL IsUriHelperMethod(MethodDesc *pMD)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pUriInfo != NULL && m_pUriInfo->IsUriHelperMethod(pMD);
-    }
-
-    BOOL IsEventArgsHelperMethod(MethodDesc *pMD)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pEventArgsInfo != NULL && m_pEventArgsInfo->IsEventArgsHelperMethod(pMD);
-    }
-#endif // #if defined(_DEBUG) && !defined(FEATURE_CORECLR)
 
 #endif // FEATURE_COMINTEROP
 
@@ -497,14 +400,15 @@ private:
     EECMHelperHashTable                 m_CMHelperHashtable;
     EEPtrHashTable                      m_SharedCMHelperToCMInfoMap;
 #endif // CROSSGEN_COMPILE
+    LoaderAllocator*                    m_pAllocator;
     LoaderHeap*                         m_pHeap;
-    BaseDomain*                         m_pDomain;
     CMINFOLIST                          m_pCMInfoList;
 #ifdef FEATURE_COMINTEROP
     OleColorMarshalingInfo*             m_pOleColorInfo;
     UriMarshalingInfo*                  m_pUriInfo;
     EventArgsMarshalingInfo*            m_pEventArgsInfo;
 #endif // FEATURE_COMINTEROP
+    CrstBase*                           m_lock;
 };
 
 struct ItfMarshalInfo;
@@ -551,6 +455,7 @@ public:
                 BOOL BestFit,
                 BOOL ThrowOnUnmappableChar,
                 BOOL fEmitsIL,
+                BOOL onInstanceMethod,
                 MethodDesc* pMD = NULL,
                 BOOL fUseCustomMarshal = TRUE
 #ifdef _DEBUG
@@ -565,8 +470,7 @@ public:
     VOID EmitOrThrowInteropParamException(NDirectStubLinker* psl, BOOL fMngToNative, UINT resID, UINT paramIdx);
 
     // These methods retrieve the information for different element types.
-    HRESULT HandleArrayElemType(NativeTypeParamInfo *pParamInfo, 
-                                UINT16 optbaseoffset, 
+    HRESULT HandleArrayElemType(NativeTypeParamInfo *pParamInfo,
                                 TypeHandle elemTypeHnd, 
                                 int iRank, 
                                 BOOL fNoLowerBounds, 
@@ -986,7 +890,7 @@ protected:
 VOID ThrowInteropParamException(UINT resID, UINT paramIdx);
 
 VOID CollateParamTokens(IMDInternalImport *pInternalImport, mdMethodDef md, ULONG numargs, mdParamDef *aParams);
-bool IsUnsupportedValueTypeReturn(MetaSig& msig);
+bool IsUnsupportedTypedrefReturn(MetaSig& msig);
 
 void FindCopyCtor(Module *pModule, MethodTable *pMT, MethodDesc **pMDOut);
 void FindDtor(Module *pModule, MethodTable *pMT, MethodDesc **pMDOut);

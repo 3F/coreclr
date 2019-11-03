@@ -15,18 +15,6 @@
 
 #include "clrprivbinderutil.h"
 
-inline BOOL CoreBindResult::IsFromGAC()
-{
-    LIMITED_METHOD_CONTRACT;
-    return m_bIsFromGAC;
-};
-
-inline BOOL CoreBindResult::IsOnTpaList()
-{
-    LIMITED_METHOD_CONTRACT;
-    return m_bIsOnTpaList;
-};
-
 inline BOOL CoreBindResult::Found()
 {
     LIMITED_METHOD_CONTRACT;
@@ -47,7 +35,7 @@ inline BOOL CoreBindResult::IsMscorlib()
 #ifndef CROSSGEN_COMPILE
     return pAssembly->GetAssemblyName()->IsMscorlib();
 #else
-    return (pAssembly->GetPath()).EndsWithCaseInsensitive(SString(CoreLibName_IL_W), PEImage::GetFileSystemLocale());
+    return (pAssembly->GetPath()).EndsWithCaseInsensitive(SString(CoreLibName_IL_W));
 #endif
 }
 
@@ -72,14 +60,12 @@ inline PEImage* CoreBindResult::GetPEImage()
     return m_pAssembly?BINDER_SPACE::GetAssemblyFromPrivAssemblyFast(m_pAssembly)->GetNativeOrILPEImage():NULL;
 };
 
-inline void CoreBindResult::Init(ICLRPrivAssembly* pAssembly, BOOL bFromGAC, BOOL bOnTpaList = FALSE)
+inline void CoreBindResult::Init(ICLRPrivAssembly* pAssembly)
 {
     WRAPPER_NO_CONTRACT;
     m_pAssembly=pAssembly;
     if(pAssembly)
         pAssembly->AddRef();
-    m_bIsFromGAC=bFromGAC;
-    m_bIsOnTpaList = bOnTpaList;
     m_hrBindResult = S_OK;
 }
 
@@ -87,8 +73,6 @@ inline void CoreBindResult::Reset()
 {
     WRAPPER_NO_CONTRACT;
     m_pAssembly=NULL;
-    m_bIsFromGAC=FALSE;
-    m_bIsOnTpaList=FALSE;
     m_hrBindResult = S_OK;
 }
 #ifdef FEATURE_PREJIT

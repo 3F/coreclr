@@ -461,7 +461,7 @@ HRESULT CeeFileGenWriter::setOutputFileName(__in LPWSTR fileName)
 {
     if (m_outputFileName)
         delete[] m_outputFileName;
-    int len = lstrlenW(fileName) + 1;
+    size_t len = wcslen(fileName) + 1;
     m_outputFileName = (LPWSTR)new (nothrow) WCHAR[len];
     TESTANDRETURN(m_outputFileName!=NULL, E_OUTOFMEMORY);
     wcscpy_s(m_outputFileName, len, fileName);
@@ -472,7 +472,7 @@ HRESULT CeeFileGenWriter::setResourceFileName(__in LPWSTR fileName)
 {
     if (m_resourceFileName)
         delete[] m_resourceFileName;
-    int len = lstrlenW(fileName) + 1;
+    size_t len = wcslen(fileName) + 1;
     m_resourceFileName = (LPWSTR)new (nothrow) WCHAR[len];
     TESTANDRETURN(m_resourceFileName!=NULL, E_OUTOFMEMORY);
     wcscpy_s(m_resourceFileName, len, fileName);
@@ -483,7 +483,7 @@ HRESULT CeeFileGenWriter::setLibraryName(__in LPWSTR libraryName)
 {
     if (m_libraryName)
         delete[] m_libraryName;
-    int len = lstrlenW(libraryName) + 1;
+    size_t len = wcslen(libraryName) + 1;
     m_libraryName = (LPWSTR)new (nothrow) WCHAR[len];
     TESTANDRETURN(m_libraryName != NULL, E_OUTOFMEMORY);
     wcscpy_s(m_libraryName, len, libraryName);
@@ -1077,7 +1077,7 @@ BOOL CeeFileGenWriter::RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD
         pathToCvtRes(wszSystemDir.GetUnicode(), m_pathToCvtRes, nullptr, &cvtres);
     }
 
-    WCHAR* wzMachine;
+    const WCHAR* wzMachine;
     if(pewriter.isIA64())
         wzMachine = L"IA64";
     else if(pewriter.isAMD64())
@@ -1271,6 +1271,13 @@ HRESULT CeeFileGenWriter::emitResourceSection()
         const BYTE *pbStartOfMappedMem;
         IMAGE_SECTION_HEADER *rsrc[2] = { NULL, NULL };
         S_SIZE_T cbTotalSizeOfRawData;
+
+        char *data = NULL;
+        SIZE_T cReloc = 0;
+        IMAGE_RELOCATION *pReloc = NULL;
+        SIZE_T cSymbol = 0;
+        IMAGE_SYMBOL *pSymbolTable = NULL;
+
         // create a mapped view of the .res file
         pParam->hFile = WszCreateFile(pParam->szResFileName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (pParam->hFile == INVALID_HANDLE_VALUE)
@@ -1412,7 +1419,7 @@ HRESULT CeeFileGenWriter::emitResourceSection()
         if (FAILED(pParam->hr)) goto lDone;
 
         rsrcSection->directoryEntry(IMAGE_DIRECTORY_ENTRY_RESOURCE);
-        char *data = rsrcSection->getBlock(static_cast<unsigned>(cbTotalSizeOfRawData.Value()), 8);
+        data = rsrcSection->getBlock(static_cast<unsigned>(cbTotalSizeOfRawData.Value()), 8);
         if(data == NULL)
         {
             pParam->hr = E_OUTOFMEMORY;
@@ -1423,11 +1430,11 @@ HRESULT CeeFileGenWriter::emitResourceSection()
         memcpy(data, (char *)pParam->hMod + VAL32(rsrc[0]->PointerToRawData), VAL32(rsrc[0]->SizeOfRawData));
 
         // Map all the relocs in .rsrc$01 using the reloc and symbol tables in the COFF object.,
-        SIZE_T            cReloc        = 0;         // Total number of relocs
-        IMAGE_RELOCATION *pReloc        = NULL;      // Reloc table start
+        cReloc        = 0;         // Total number of relocs
+        pReloc        = NULL;      // Reloc table start
 
-        SIZE_T            cSymbol       = 0;         // Total number of symbols
-        IMAGE_SYMBOL     *pSymbolTable  = NULL;      // Symbol table start
+        cSymbol       = 0;         // Total number of symbols
+        pSymbolTable  = NULL;      // Symbol table start
 
         {
             // Check that the relocations and symbols lie within the resource

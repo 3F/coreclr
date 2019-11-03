@@ -94,7 +94,7 @@
 // use g_profControlBlock.pProfInterface. And if the reader clean-reads the status before
 // the buffers were flushed, then the reader will have incremented its evacuation counter
 // first, which the writer will be sure to see in (c).  For more details about how the
-// evacuation counters work, see code:ProfilingAPIDetach::IsProfilerEvacuated.
+// evacuation counters work, see code:ProfilingAPIUtility::IsProfilerEvacuated.
 // 
 // WHEN ARE BEGIN/END_PIN_PROFILER REQUIRED?
 // 
@@ -138,12 +138,8 @@
 #include "profilinghelper.inl"
 #include "eemessagebox.h"
 
-#if defined(FEATURE_PROFAPI_EVENT_LOGGING) && !defined(FEATURE_CORECLR)
-#include <eventmsg.h>
-#endif // FEATURE_PROFAPI_EVENT_LOGGING) && !FEATURE_CORECLR
 
 #ifdef FEATURE_PROFAPI_ATTACH_DETACH 
-#include "profattach.h"
 #include "profdetach.h"
 #endif // FEATURE_PROFAPI_ATTACH_DETACH 
 
@@ -168,7 +164,6 @@ BOOL CORProfilerBypassSecurityChecks()
         NOTHROW;
         GC_NOTRIGGER;
         CANNOT_TAKE_LOCK;
-        SO_NOT_MAINLINE;
     }
     CONTRACTL_END;
 
@@ -237,8 +232,7 @@ void CurrentProfilerStatus::Set(ProfilerStatus newProfStatus)
             break;
 
         case kProfStatusNone:
-            _ASSERTE((newProfStatus == kProfStatusInitializingForStartupLoad) ||
-                (newProfStatus == kProfStatusInitializingForAttachLoad));
+            _ASSERTE(newProfStatus == kProfStatusPreInitialize);
             break;
 
         case kProfStatusDetaching:
@@ -254,6 +248,12 @@ void CurrentProfilerStatus::Set(ProfilerStatus newProfStatus)
         case kProfStatusActive:
             _ASSERTE((newProfStatus == kProfStatusNone) ||
                 (newProfStatus == kProfStatusDetaching));
+            break;
+
+        case kProfStatusPreInitialize:
+            _ASSERTE((newProfStatus == kProfStatusNone) ||
+                (newProfStatus == kProfStatusInitializingForStartupLoad) ||
+                (newProfStatus == kProfStatusInitializingForAttachLoad));
             break;
         }
 
@@ -368,20 +368,6 @@ void ProfilingAPIUtility::LogProfEventVA(
     }
     CONTRACTL_END;
 
-#ifndef FEATURE_PROFAPI_EVENT_LOGGING
-
-
-    // Rotor messages go to message boxes
-
-    EEMessageBoxCatastrophic(
-        iStringResourceID,              // Text message to display
-        IDS_EE_PROFILING_FAILURE,       // Titlebar of message box
-        insertionArgs);                 // Insertion strings for text message
-
-#else // FEATURE_PROFAPI_EVENT_LOGGING
-    
-    // Non-rotor messages go to the event log
-
     StackSString messageFromResource;
     StackSString messageToLog;
 
@@ -398,32 +384,8 @@ void ProfilingAPIUtility::LogProfEventVA(
 
     AppendSupplementaryInformation(iStringResourceID, &messageToLog);
 
-#if defined(FEATURE_CORECLR)
-    // CoreCLR on Windows ouputs debug strings for diagnostic messages.
+    // Ouput debug strings for diagnostic messages.
     WszOutputDebugString(messageToLog);
-#else
-    // Get the user SID for the current process, so it can be provided to the event
-    // logging API, which will then fill out the "User" field in the event log entry. If
-    // this fails, that's not fatal. We can just pass NULL for the PSID, and the "User"
-    // field will be left blank.
-    PSID psid = NULL;
-    HRESULT hr = GetCurrentProcessUserSid(&psid);
-    if (FAILED(hr))
-    {
-        // No biggie.  Just pass in a NULL psid, and the User field will be empty
-        _ASSERTE(psid == NULL);
-    }
-
-    // On desktop CLR builds, the profiling API uses the event log for end-user-friendly
-    // diagnostic messages.
-    ReportEventCLR(wEventType,             // wType
-                   0,                      // wCategory
-                   COR_Profiler,           // dwEventID
-                   psid,                   // lpUserSid
-                   &messageToLog);         // uh duh
-#endif // FEATURE_CORECLR
-
-#endif // FEATURE_PROFAPI_EVENT_LOGGING
 }
 
 // See code:ProfilingAPIUtility.LogProfEventVA for description of arguments.
@@ -465,10 +427,6 @@ void ProfilingAPIUtility::LogProfInfo(int iStringResourceID, ...)
     }
     CONTRACTL_END;
 
-// Rotor uses message boxes instead of event log, and it would be disruptive to
-// pop a messagebox in the user's face every time an app runs with a profiler
-// configured to load.  So only log this only when we don't do a pop-up.
-#ifdef FEATURE_PROFAPI_EVENT_LOGGING
     va_list insertionArgs;
     va_start(insertionArgs, iStringResourceID);
     LogProfEventVA(
@@ -476,7 +434,6 @@ void ProfilingAPIUtility::LogProfInfo(int iStringResourceID, ...)
         EVENTLOG_INFORMATION_TYPE, 
         insertionArgs);
     va_end(insertionArgs);
-#endif //FEATURE_PROFAPI_EVENT_LOGGING
 }
 
 #ifdef PROF_TEST_ONLY_FORCE_ELT
@@ -485,9 +442,9 @@ void ProfilingAPIUtility::LogProfInfo(int iStringResourceID, ...)
 // InitializeProfiling() below solely for the debug-only, test-only code to allow
 // enter/leave/tailcall to be turned on at startup without a profiler. See
 // code:ProfControlBlock#TestOnlyELT
-EXTERN_C void __stdcall ProfileEnterNaked(UINT_PTR clientData);
-EXTERN_C void __stdcall ProfileLeaveNaked(UINT_PTR clientData);
-EXTERN_C void __stdcall ProfileTailcallNaked(UINT_PTR clientData);
+EXTERN_C void STDMETHODCALLTYPE ProfileEnterNaked(UINT_PTR clientData);
+EXTERN_C void STDMETHODCALLTYPE ProfileLeaveNaked(UINT_PTR clientData);
+EXTERN_C void STDMETHODCALLTYPE ProfileTailcallNaked(UINT_PTR clientData);
 #endif //PROF_TEST_ONLY_FORCE_ELT
 
 // ----------------------------------------------------------------------------
@@ -732,11 +689,7 @@ HRESULT ProfilingAPIUtility::AttemptLoadProfilerForStartup()
     // Find out if profiling is enabled
     DWORD fProfEnabled = 0;
 
-#ifdef FEATURE_CORECLR
     fProfEnabled = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_CORECLR_ENABLE_PROFILING);
-#else //FEATURE_CORECLR
-    fProfEnabled = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_COR_ENABLE_PROFILING);
-#endif //FEATURE_CORECLR
 
     // If profiling is not enabled, return.
     if (fProfEnabled == 0)
@@ -751,7 +704,6 @@ HRESULT ProfilingAPIUtility::AttemptLoadProfilerForStartup()
     NewArrayHolder<WCHAR> wszClsid(NULL);
     NewArrayHolder<WCHAR> wszProfilerDLL(NULL);
 
-#ifdef FEATURE_CORECLR
     IfFailRet(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_CORECLR_PROFILER, &wszClsid));
 
 #if defined(_TARGET_X86_)
@@ -763,19 +715,6 @@ HRESULT ProfilingAPIUtility::AttemptLoadProfilerForStartup()
     {
         IfFailRet(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_CORECLR_PROFILER_PATH, &wszProfilerDLL));
     }
-#else // FEATURE_CORECLR
-    IfFailRet(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_COR_PROFILER, &wszClsid));
-    
-#if defined(_TARGET_X86_)
-    IfFailRet(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_COR_PROFILER_PATH_32, &wszProfilerDLL));
-#elif defined(_TARGET_AMD64_)
-    IfFailRet(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_COR_PROFILER_PATH_64, &wszProfilerDLL));
-#endif 
-    if(wszProfilerDLL == NULL)
-    {    
-        IfFailRet(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_COR_PROFILER_PATH, &wszProfilerDLL));
-    }
-#endif // FEATURE_CORECLR
     
     // If the environment variable doesn't exist, profiling is not enabled.
     if (wszClsid == NULL)
@@ -884,38 +823,13 @@ HRESULT ProfilingAPIUtility::PerformDeferredInit()
     return S_OK;
 }
 
-// ----------------------------------------------------------------------------
-// ProfilingAPIUtility::LoadProfiler
-//
-// Description: 
-//    Outermost common code for loading the profiler DLL.  Both startup and attach code
-//    paths use this.
-//
-// Arguments:
-//    * loadType - Startup load or attach load?
-//    * pClsid - Profiler's CLSID
-//    * wszClsid - Profiler's CLSID (or progid) in string form, for event log messages
-//    * wszProfilerDLL - Profiler's DLL path
-//    * pvClientData - For attach loads, this is the client data the trigger wants to
-//        pass to the profiler DLL
-//    * cbClientData - For attach loads, size of client data in bytes
-//    * dwConcurrentGCWaitTimeoutInMs - Time out for wait operation on concurrent GC. Attach scenario only
-//
-// Return Value:
-//    HRESULT indicating success or failure of the load
-//
-// Notes:
-//    * On failure, this function or a callee will have logged an event
-//
-
 // static
-HRESULT ProfilingAPIUtility::LoadProfiler(
-        LoadType loadType,
-        const CLSID * pClsid,
-        LPCWSTR wszClsid, 
+HRESULT ProfilingAPIUtility::DoPreInitialization(
+        EEToProfInterfaceImpl *pEEProf,
+        const CLSID *pClsid,
+        LPCWSTR wszClsid,
         LPCWSTR wszProfilerDLL,
-        LPVOID pvClientData,
-        UINT cbClientData,
+        LoadType loadType,
         DWORD dwConcurrentGCWaitTimeoutInMs)
 {
     CONTRACTL
@@ -928,25 +842,14 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
         CAN_TAKE_LOCK;
 
         MODE_ANY;
+        PRECONDITION(pEEProf != NULL);
+        PRECONDITION(pClsid != NULL);
+        PRECONDITION(wszClsid != NULL);
+        PRECONDITION(wszProfilerDLL != NULL);
     }
     CONTRACTL_END;
 
-    if (g_fEEShutDown)
-    {
-        return CORPROF_E_RUNTIME_UNINITIALIZED;            
-    }
-    
-    enum ProfilerCompatibilityFlag
-    {
-        // Default: disable V2 profiler
-        kDisableV2Profiler = 0x0,
-
-        // Enable V2 profilers
-        kEnableV2Profiler  = 0x1,
-
-        // Disable Profiling
-        kPreventLoad       = 0x2,
-    };
+    _ASSERTE(s_csStatus != NULL);
 
     ProfilerCompatibilityFlag profilerCompatibilityFlag = kDisableV2Profiler;
     NewArrayHolder<WCHAR> wszProfilerCompatibilitySetting(NULL);
@@ -980,33 +883,8 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
         }
     }
 
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
-    hr = PerformDeferredInit();
-    if (FAILED(hr))
-    {
-        LOG((
-            LF_CORPROF, 
-            LL_ERROR, 
-            "**PROF: ProfilingAPIUtility::PerformDeferredInit failed. hr=0x%x.\n",
-            hr));
-        LogProfError(IDS_E_PROF_INTERNAL_INIT, wszClsid, hr);
-        return hr;
-    }
-
-    // Valid loadType?
-    _ASSERTE((loadType == kStartupLoad) || (loadType == kAttachLoad));
-
-    // If a nonzero client data size is reported, there'd better be client data!
-    _ASSERTE((cbClientData == 0) || (pvClientData != NULL));
-
-    // Client data is currently only specified on attach
-    _ASSERTE((pvClientData == NULL) || (loadType == kAttachLoad));
-
-    // Don't be telling me to load a profiler if there already is one.
-    _ASSERTE(g_profControlBlock.curProfStatus.Get() == kProfStatusNone);
-
-    // Create the ProfToEE interface to provide to the profiling services
     NewHolder<ProfToEEInterfaceImpl> pProfEE(new (nothrow) ProfToEEInterfaceImpl());
     if (pProfEE == NULL)
     {
@@ -1026,15 +904,6 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
 
     // Provide the newly created and inited interface
     LOG((LF_CORPROF, LL_INFO10, "**PROF: Profiling code being provided with EE interface.\n"));
-
-    // Create a new EEToProf object
-    NewHolder<EEToProfInterfaceImpl> pEEProf(new (nothrow) EEToProfInterfaceImpl());
-    if (pEEProf == NULL)
-    {
-        LOG((LF_CORPROF, LL_ERROR, "**PROF: Unable to allocate EEToProfInterfaceImpl.\n"));
-        LogProfError(IDS_E_PROF_INTERNAL_INIT, wszClsid, E_OUTOFMEMORY);
-        return E_OUTOFMEMORY;
-    }
 
 #ifdef FEATURE_PROFAPI_ATTACH_DETACH
     // We're about to load the profiler, so first make sure we successfully create the
@@ -1092,14 +961,6 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
 
         _ASSERTE(profilerCompatibilityFlag == kEnableV2Profiler);
 
-        // To prevent V2 profilers from AV, once a V2 profiler is already loaded by a V2 rutnime in the process, 
-        // V4 runtime will not try to load the V2 profiler again.
-        if (IsV2RuntimeLoaded())
-        {
-            LogProfInfo(IDS_PROF_V2PROFILER_ALREADY_LOADED, wszClsid);
-            return S_OK;
-        }
-
         LOG((LF_CORPROF, LL_INFO10, "**PROF: COMPlus_ProfAPI_ProfilerCompatibilitySetting is set to EnableV2Profiler. "
              "The configured V2 profiler is going to be initialized.\n"));
 
@@ -1109,7 +970,115 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
                     wszClsid);
     }
 
-    _ASSERTE(s_csStatus != NULL);
+    return hr;
+}
+
+// ----------------------------------------------------------------------------
+// ProfilingAPIUtility::LoadProfiler
+//
+// Description: 
+//    Outermost common code for loading the profiler DLL.  Both startup and attach code
+//    paths use this.
+//
+// Arguments:
+//    * loadType - Startup load or attach load?
+//    * pClsid - Profiler's CLSID
+//    * wszClsid - Profiler's CLSID (or progid) in string form, for event log messages
+//    * wszProfilerDLL - Profiler's DLL path
+//    * pvClientData - For attach loads, this is the client data the trigger wants to
+//        pass to the profiler DLL
+//    * cbClientData - For attach loads, size of client data in bytes
+//    * dwConcurrentGCWaitTimeoutInMs - Time out for wait operation on concurrent GC. Attach scenario only
+//
+// Return Value:
+//    HRESULT indicating success or failure of the load
+//
+// Notes:
+//    * On failure, this function or a callee will have logged an event
+//
+
+// static
+HRESULT ProfilingAPIUtility::LoadProfiler(
+        LoadType loadType,
+        const CLSID * pClsid,
+        LPCWSTR wszClsid, 
+        LPCWSTR wszProfilerDLL,
+        LPVOID pvClientData,
+        UINT cbClientData,
+        DWORD dwConcurrentGCWaitTimeoutInMs)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+
+        // This causes events to be logged, which loads resource strings,
+        // which takes locks.
+        CAN_TAKE_LOCK;
+
+        MODE_ANY;
+    }
+    CONTRACTL_END;
+
+    if (g_fEEShutDown)
+    {
+        return CORPROF_E_RUNTIME_UNINITIALIZED;            
+    }
+    
+    // Valid loadType?
+    _ASSERTE((loadType == kStartupLoad) || (loadType == kAttachLoad));
+
+    // If a nonzero client data size is reported, there'd better be client data!
+    _ASSERTE((cbClientData == 0) || (pvClientData != NULL));
+
+    // Client data is currently only specified on attach
+    _ASSERTE((pvClientData == NULL) || (loadType == kAttachLoad));
+    
+    HRESULT hr = PerformDeferredInit();
+    if (FAILED(hr))
+    {
+        LOG((
+            LF_CORPROF, 
+            LL_ERROR, 
+            "**PROF: ProfilingAPIUtility::PerformDeferredInit failed. hr=0x%x.\n",
+            hr));
+        LogProfError(IDS_E_PROF_INTERNAL_INIT, wszClsid, hr);
+        return hr;
+    }
+
+    {
+        // To prevent race conditions we need to signal that a load is already happening.
+        // The diagnostics server is single threaded, but it can potentially be
+        // racing with the startup path, or theoretically in the future it could be
+        // racing with another attach request if the diagnostic server becomes 
+        // multithreaded.
+        CRITSEC_Holder csh(s_csStatus);
+
+        if (g_profControlBlock.curProfStatus.Get() != kProfStatusNone)
+        {
+            return CORPROF_E_PROFILER_ALREADY_ACTIVE;
+        }
+
+        g_profControlBlock.curProfStatus.Set(kProfStatusPreInitialize);
+    }
+
+    NewHolder<EEToProfInterfaceImpl> pEEProf(new (nothrow) EEToProfInterfaceImpl());
+    if (pEEProf == NULL)
+    {
+        LOG((LF_CORPROF, LL_ERROR, "**PROF: Unable to allocate EEToProfInterfaceImpl.\n"));
+        LogProfError(IDS_E_PROF_INTERNAL_INIT, wszClsid, E_OUTOFMEMORY);
+        return E_OUTOFMEMORY;
+    }
+
+    // Create the ProfToEE interface to provide to the profiling services
+    hr = DoPreInitialization(pEEProf, pClsid, wszClsid, wszProfilerDLL, loadType, dwConcurrentGCWaitTimeoutInMs);
+    if (FAILED(hr))
+    {
+        CRITSEC_Holder csh(s_csStatus);
+        g_profControlBlock.curProfStatus.Set(kProfStatusNone);
+        return hr;
+    }
+
     {
         // All modification of the profiler's status and
         // g_profControlBlock.pProfInterface need to be serialized against each other,
@@ -1236,9 +1205,15 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
         // and kill objects without relocating and thus not doing a heap walk.
         if (CORProfilerTrackGC())
         {
-            LOG((LF_CORPROF, LL_INFO10, "**PROF: Turning off concurrent GC at startup.\n"));       
-            g_pConfig->SetGCconcurrent(0);
-            LOG((LF_CORPROF, LL_INFO10, "**PROF: Concurrent GC has been turned off at startup.\n"));       
+            LOG((LF_CORPROF, LL_INFO10, "**PROF: Turning off concurrent GC at startup.\n"));
+            // Previously we would use SetGCConcurrent(0) to indicate to the GC that it shouldn't even
+            // attempt to use concurrent GC. The standalone GC feature create a cycle during startup,
+            // where the profiler couldn't set startup flags for the GC. To overcome this, we call
+            // TempraryDisableConcurrentGC and never enable it again. This has a perf cost, since the
+            // GC will create concurrent GC data structures, but it is acceptable in the context of
+            // this kind of profiling.
+            GCHeapUtilities::GetGCHeap()->TemporaryDisableConcurrentGC();
+            LOG((LF_CORPROF, LL_INFO10, "**PROF: Concurrent GC has been turned off at startup.\n"));
         }
     }
 
@@ -1313,6 +1288,97 @@ HRESULT ProfilingAPIUtility::LoadProfiler(
 
 //---------------------------------------------------------------------------------------
 //
+// Performs the evacuation checks by grabbing the thread store lock, iterating through
+// all EE Threads, and querying each one's evacuation counter.  If they're all 0, the
+// profiler is ready to be unloaded.
+//
+// Return Value:
+//    Nonzero iff the profiler is fully evacuated and ready to be unloaded.
+//
+
+// static
+BOOL ProfilingAPIUtility::IsProfilerEvacuated()
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        GC_TRIGGERS;
+        MODE_ANY;
+        CAN_TAKE_LOCK;
+    }
+    CONTRACTL_END;
+
+    _ASSERTE(g_profControlBlock.curProfStatus.Get() == kProfStatusDetaching);
+
+    // Check evacuation counters on all the threads (see
+    // code:ProfilingAPIUtility::InitializeProfiling#LoadUnloadCallbackSynchronization
+    // for details). Doing this under the thread store lock not only ensures we can
+    // iterate through the Thread objects safely, but also forces us to serialize with
+    // the GC. The latter is important, as server GC enters the profiler on non-EE
+    // Threads, and so no evacuation counters might be incremented during server GC even
+    // though control could be entering the profiler.
+    {
+        ThreadStoreLockHolder TSLockHolder;
+
+        Thread * pThread = ThreadStore::GetAllThreadList(
+            NULL,   // cursor thread; always NULL to begin with
+            0,      // mask to AND with Thread::m_State to filter returned threads 
+            0);     // bits to match the result of the above AND.  (m_State & 0 == 0,
+                    // so we won't filter out any threads)
+
+        // Note that, by not filtering out any of the threads, we're intentionally including
+        // stuff like TS_Dead or TS_Unstarted.  But that keeps us on the safe
+        // side.  If an EE Thread object exists, we want to check its counters to be
+        // absolutely certain it isn't executing in a profiler.
+
+        while (pThread != NULL)
+        {
+            // Note that pThread is still in motion as we check its evacuation counter.
+            // This is ok, because we've already changed the profiler status to
+            // kProfStatusDetaching and flushed CPU buffers. So at this point the counter
+            // will typically only go down to 0 (and not increment anymore), with one
+            // small exception (below). So if we get a read of 0 below, the counter will
+            // typically stay there. Specifically:
+            //     * pThread is most likely not about to increment its evacuation counter
+            //         from 0 to 1 because pThread sees that the status is
+            //         kProfStatusDetaching.
+            //     * Note that there is a small race where pThread might actually
+            //         increment its evac counter from 0 to 1 (if it dirty-read the
+            //         profiler status a tad too early), but that implies that when
+            //         pThread rechecks the profiler status (clean read) then pThread
+            //         will immediately decrement the evac counter back to 0 and avoid
+            //         calling into the EEToProfInterfaceImpl pointer.
+            // 
+            // (see
+            // code:ProfilingAPIUtility::InitializeProfiling#LoadUnloadCallbackSynchronization
+            // for details)
+            DWORD dwEvacCounter = pThread->GetProfilerEvacuationCounter();
+            if (dwEvacCounter != 0)
+            {
+                LOG((
+                    LF_CORPROF,
+                    LL_INFO100,
+                    "**PROF: Profiler not yet evacuated because OS Thread ID 0x%x has evac counter of %d (decimal).\n",
+                    pThread->GetOSThreadId(),
+                    dwEvacCounter));
+                return FALSE;
+            }
+
+            pThread = ThreadStore::GetAllThreadList(pThread, 0, 0);
+        }
+    }
+
+    // FUTURE: When rejit feature crew complete, add code to verify all rejitted
+    // functions are fully reverted and off of all stacks.  If this is very easy to
+    // verify (e.g., checking a single value), consider putting it above the loop
+    // above so we can early-out quicker if rejitted code is still around.
+
+    // We got this far without returning, so the profiler is fully evacuated
+    return TRUE;
+}
+
+//---------------------------------------------------------------------------------------
+//
 // This is the top-most level of profiling API teardown, and is called directly by
 // EEShutDownHelper() (in ceemain.cpp). This cleans up internal structures relating to
 // the Profiling API. If we're not in process teardown, then this also releases the
@@ -1367,6 +1433,7 @@ void ProfilingAPIUtility::TerminateProfiling()
             // them give a GetEEToProfPtr() equal to g_profControlBlock.pProfInterface.
             return;
         }
+#endif // FEATURE_PROFAPI_ATTACH_DETACH
 
         if (g_profControlBlock.curProfStatus.Get() == kProfStatusActive)
         {
@@ -1378,13 +1445,13 @@ void ProfilingAPIUtility::TerminateProfiling()
             // that the status has been changed to kProfStatusDetaching, no new threads will
             // attempt to enter the profiler. But use the detach evacuation counters to see
             // if other threads already began to enter the profiler.
-            if (!ProfilingAPIDetach::IsProfilerEvacuated())
+            if (!ProfilingAPIUtility::IsProfilerEvacuated())
             {
                 // Other threads might be entering the profiler, so just skip cleanup
                 return;
             }
         }
-#endif // FEATURE_PROFAPI_ATTACH_DETACH
+
 
         // If we have a profiler callback wrapper and / or info implementation
         // active, then terminate them.
@@ -1413,7 +1480,7 @@ void ProfilingAPIUtility::TerminateProfiling()
         {
             // We know for sure GC has been fully initialized as we've turned off concurrent GC before
             _ASSERTE(IsGarbageCollectorFullyInitialized());
-            GCHeap::GetGCHeap()->TemporaryEnableConcurrentGC();
+            GCHeapUtilities::GetGCHeap()->TemporaryEnableConcurrentGC();
             g_profControlBlock.fConcurrentGCDisabledForAttach = FALSE;
         }
 

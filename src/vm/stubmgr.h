@@ -26,6 +26,22 @@
 // The set of stub managers is extensible, but should be kept to a reasonable number
 // as they are currently linearly searched & queried for each stub.
 //
+//
+// IMPORTANT IMPLEMENTATION NOTE: Due to code versioning, tracing through a jitted code 
+// call is a speculative exercise. A trace could predict that calling method Foo would run 
+// jitted code at address 0x1234, however afterwards code versioning redirects Foo to call
+// an alternate jitted code body at address 0x5678. To handle this stub managers should
+// either: 
+//  a) stop tracing at offset zero of the newly called jitted code. The debugger knows
+//     to treat offset 0 in jitted code as potentially being any jitted code instance
+//  b) trace all the way through the jitted method such that regardless of which jitted
+//     code instance gets called the trace will still end at the predicted location.
+//
+//  If we wanted to be more rigorous about this we should probably have different trace
+//  results for intra-jitted and inter-jitted trace results but given the relative
+//  stability of this part of the code I haven't attacked that problem right now. It does
+//  work as-is.
+//
 
 
 #ifndef __stubmgr_h__
@@ -77,7 +93,6 @@ public:
     // The addr is in unmanaged code. Used for Step-in from managed to native.
     void InitForUnmanaged(PCODE addr)
     {
-        STATIC_CONTRACT_SO_TOLERANT;
         this->type = TRACE_UNMANAGED;
         this->address = addr;
         this->stubManager = NULL;        
@@ -86,7 +101,6 @@ public:
     // The addr is inside jitted code (eg, there's a JitManaged that will claim it)
     void InitForManaged(PCODE addr)
     {
-        STATIC_CONTRACT_SO_TOLERANT;
         this->type = TRACE_MANAGED;
         this->address = addr;
         this->stubManager = NULL;
@@ -95,7 +109,6 @@ public:
     // Initialize for an unmanaged entry stub.
     void InitForUnmanagedStub(PCODE addr)
     {
-        STATIC_CONTRACT_SO_TOLERANT;
         this->type = TRACE_ENTRY_STUB;
         this->address = addr;
         this->stubManager = NULL;
@@ -104,7 +117,6 @@ public:
     // Initialize for a stub.
     void InitForStub(PCODE addr)
     {
-        STATIC_CONTRACT_SO_TOLERANT;
         this->type = TRACE_STUB;
         this->address = addr;
         this->stubManager = NULL;
@@ -120,7 +132,6 @@ public:
     // call pStubManager->TraceManager() to get the next TraceDestination.
     void InitForManagerPush(PCODE addr, StubManager * pStubManager)
     {
-        STATIC_CONTRACT_SO_TOLERANT;
         this->type = TRACE_MGR_PUSH;
         this->address = addr;
         this->stubManager = pStubManager;
@@ -445,7 +456,7 @@ class PrecodeStubManager : public StubManager
 #ifndef DACCESS_COMPILE
     virtual BOOL TraceManager(Thread *thread,
                               TraceDestination *trace,
-                              CONTEXT *pContext,
+                              T_CONTEXT *pContext,
                               BYTE **pRetAddr);
 #endif
 
@@ -509,7 +520,7 @@ class StubLinkStubManager : public StubManager
 #ifndef DACCESS_COMPILE
     virtual BOOL TraceManager(Thread *thread,
                               TraceDestination *trace,
-                              CONTEXT *pContext,
+                              T_CONTEXT *pContext,
                               BYTE **pRetAddr);
 #endif
 
@@ -646,7 +657,7 @@ class RangeSectionStubManager : public StubManager
 #ifndef DACCESS_COMPILE
     virtual BOOL TraceManager(Thread *thread,
                               TraceDestination *trace,
-                              CONTEXT *pContext,
+                              T_CONTEXT *pContext,
                               BYTE **pRetAddr);
 #endif
 
@@ -708,7 +719,7 @@ class ILStubManager : public StubManager
 
     virtual BOOL TraceManager(Thread *thread,
                               TraceDestination *trace,
-                              CONTEXT *pContext,
+                              T_CONTEXT *pContext,
                               BYTE **pRetAddr);
 #endif
 
@@ -752,7 +763,7 @@ class InteropDispatchStubManager : public StubManager
 #ifndef DACCESS_COMPILE
     virtual BOOL TraceManager(Thread *thread,
                               TraceDestination *trace,
-                              CONTEXT *pContext,
+                              T_CONTEXT *pContext,
                               BYTE **pRetAddr);
 #endif
 
@@ -797,7 +808,7 @@ class DelegateInvokeStubManager : public StubManager
     virtual BOOL CheckIsStub_Internal(PCODE stubStartAddress);
 
 #if !defined(DACCESS_COMPILE)
-    virtual BOOL TraceManager(Thread *thread, TraceDestination *trace, CONTEXT *pContext, BYTE **pRetAddr);
+    virtual BOOL TraceManager(Thread *thread, TraceDestination *trace, T_CONTEXT *pContext, BYTE **pRetAddr);
     static BOOL TraceDelegateObject(BYTE *orDel, TraceDestination *trace);
 #endif // DACCESS_COMPILE
 
@@ -846,7 +857,7 @@ public:
     TailCallStubManager() : StubManager() {WRAPPER_NO_CONTRACT;}
     ~TailCallStubManager() {WRAPPER_NO_CONTRACT;}
 
-    virtual BOOL TraceManager(Thread * pThread, TraceDestination * pTrace, CONTEXT * pContext, BYTE ** ppRetAddr);
+    virtual BOOL TraceManager(Thread * pThread, TraceDestination * pTrace, T_CONTEXT * pContext, BYTE ** ppRetAddr);
 
     static bool IsTailCallStubHelper(PCODE code);
 #endif // DACCESS_COMPILE
@@ -901,7 +912,7 @@ public:
         return dac_cast<PTR_Object>(pContext->Rcx);
 #endif
 #elif defined(_TARGET_ARM_)
-        return dac_cast<PTR_Object>(pContext->R0);
+        return dac_cast<PTR_Object>((TADDR)pContext->R0);
 #elif defined(_TARGET_ARM64_)
         return dac_cast<PTR_Object>(pContext->X0);
 #else
@@ -918,6 +929,8 @@ public:
         return pContext->Rax;
 #elif defined(_TARGET_ARM_)
         return pContext->R12;
+#elif defined(_TARGET_ARM64_)
+        return pContext->X12;
 #else
         PORTABILITY_ASSERT("StubManagerHelpers::GetTailCallTarget");
         return NULL;
@@ -933,7 +946,7 @@ public:
 #elif defined(_TARGET_ARM_)
         return pContext->R12;
 #elif defined(_TARGET_ARM64_)
-        return pContext->X15;
+        return pContext->X12;
 #else
         PORTABILITY_ASSERT("StubManagerHelpers::GetHiddenArg");
         return NULL;
@@ -960,9 +973,9 @@ public:
         Thread::VirtualUnwindCallFrame(&context);
         Thread::VirtualUnwindCallFrame(&context);
 
-        return pContext->Rip;
+        return context.Rip;
 #elif defined(_TARGET_ARM_)
-        return *((PCODE *)pContext->R11 + 1);      
+        return *((PCODE *)((TADDR)pContext->R11) + 1);
 #elif defined(_TARGET_ARM64_)
         return *((PCODE *)pContext->Fp + 1);      
 #else
@@ -984,7 +997,7 @@ public:
 #endif
 #elif defined(_TARGET_ARM_)
         return pContext->R1;
-#elif defined(_TARGET_ARM_)
+#elif defined(_TARGET_ARM64_)
         return pContext->X1;
 #else
         PORTABILITY_ASSERT("StubManagerHelpers::GetSecondArg");

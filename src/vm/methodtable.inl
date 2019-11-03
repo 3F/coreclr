@@ -23,24 +23,26 @@ inline PTR_EEClass MethodTable::GetClass_NoLogging()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
+    TADDR addr = ReadPointer(this, &MethodTable::m_pCanonMT);
+
 #ifdef _DEBUG 
-    LowBits lowBits = union_getLowBits(m_pCanonMT);
+    LowBits lowBits = union_getLowBits(addr);
     if (lowBits == UNION_EECLASS)
     {
-        return PTR_EEClass(m_pCanonMT);
+        return PTR_EEClass(addr);
     }
     else if (lowBits == UNION_METHODTABLE)
     {
         // pointer to canonical MethodTable.
-        TADDR canonicalMethodTable = union_getPointer(m_pCanonMT);
-        return PTR_EEClass(PTR_MethodTable(canonicalMethodTable)->m_pCanonMT);
+        TADDR canonicalMethodTable = union_getPointer(addr);
+        return PTR_EEClass(ReadPointer((MethodTable *) PTR_MethodTable(canonicalMethodTable), &MethodTable::m_pCanonMT));
     }
 #ifdef FEATURE_PREJIT
     else if (lowBits == UNION_INDIRECTION)
     {
         // pointer to indirection cell that points to canonical MethodTable
-        TADDR canonicalMethodTable = *PTR_TADDR(union_getPointer(m_pCanonMT));
-        return PTR_EEClass(PTR_MethodTable(canonicalMethodTable)->m_pCanonMT);
+        TADDR canonicalMethodTable = *PTR_TADDR(union_getPointer(addr));
+        return PTR_EEClass(ReadPointer((MethodTable *) PTR_MethodTable(canonicalMethodTable), &MethodTable::m_pCanonMT));
     }
 #endif
 #ifdef DACCESS_COMPILE
@@ -51,8 +53,6 @@ inline PTR_EEClass MethodTable::GetClass_NoLogging()
     return NULL;
 
 #else
-
-    TADDR addr = m_pCanonMT;
 
     if ((addr & 2) == 0)
     {
@@ -65,12 +65,12 @@ inline PTR_EEClass MethodTable::GetClass_NoLogging()
     {
         // pointer to indirection cell that points to canonical MethodTable
         TADDR canonicalMethodTable = *PTR_TADDR(addr - 3);
-        return PTR_EEClass(PTR_MethodTable(canonicalMethodTable)->m_pCanonMT);
+        return PTR_EEClass(ReadPointer((MethodTable *) PTR_MethodTable(canonicalMethodTable), &MethodTable::m_pCanonMT));
     }
 #endif
 
     // pointer to canonical MethodTable.
-    return PTR_EEClass(PTR_MethodTable(addr - 2)->m_pCanonMT);
+    return PTR_EEClass(ReadPointer((MethodTable *) PTR_MethodTable(addr - 2), &MethodTable::m_pCanonMT));
 #endif
 }
 
@@ -79,7 +79,6 @@ inline PTR_EEClass MethodTable::GetClass()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    _ASSERTE_IMPL(!IsAsyncPinType());
     _ASSERTE_IMPL(GetClass_NoLogging() != NULL);
 
     g_IBCLogger.LogEEClassAndMethodTableAccess(this);
@@ -113,25 +112,27 @@ inline BOOL MethodTable::IsClassPointerValid()
     WRAPPER_NO_CONTRACT;
     SUPPORTS_DAC;
 
-    LowBits lowBits = union_getLowBits(m_pCanonMT);
+    TADDR addr = ReadPointer(this, &MethodTable::m_pCanonMT);
+
+    LowBits lowBits = union_getLowBits(addr);
     if (lowBits == UNION_EECLASS)
     {
-        return (m_pEEClass != NULL);
+        return !m_pEEClass.IsNull();
     }
     else if (lowBits == UNION_METHODTABLE)
     {
         // pointer to canonical MethodTable.
-        TADDR canonicalMethodTable = union_getPointer(m_pCanonMT);
-        return (PTR_MethodTable(canonicalMethodTable)->m_pEEClass != NULL);
+        TADDR canonicalMethodTable = union_getPointer(addr);
+        return !PTR_MethodTable(canonicalMethodTable)->m_pEEClass.IsNull();
     }
 #ifdef FEATURE_PREJIT
     else if (lowBits == UNION_INDIRECTION)
     {
         // pointer to indirection cell that points to canonical MethodTable
-        TADDR canonicalMethodTable = *PTR_TADDR(union_getPointer(m_pCanonMT));
+        TADDR canonicalMethodTable = *PTR_TADDR(union_getPointer(addr));
         if (CORCOMPILE_IS_POINTER_TAGGED(canonicalMethodTable))
             return FALSE;
-        return (PTR_MethodTable(canonicalMethodTable)->m_pEEClass != NULL);
+        return !PTR_MethodTable(canonicalMethodTable)->m_pEEClass.IsNull();
     }
 #endif
     _ASSERTE(!"Malformed m_pEEClass in MethodTable");
@@ -161,7 +162,7 @@ inline PTR_Module MethodTable::GetZapModule()
     PTR_Module zapModule = NULL;
     if (IsZapped())
     {
-        zapModule = m_pLoaderModule;
+        zapModule = ReadPointer(this, &MethodTable::m_pLoaderModule);
     }
 
     return zapModule;
@@ -171,7 +172,7 @@ inline PTR_Module MethodTable::GetZapModule()
 inline PTR_Module MethodTable::GetLoaderModule() 
 {
     LIMITED_METHOD_DAC_CONTRACT;
-    return m_pLoaderModule;
+    return ReadPointer(this, &MethodTable::m_pLoaderModule);
 }
 
 inline PTR_LoaderAllocator MethodTable::GetLoaderAllocator() 
@@ -187,7 +188,7 @@ inline PTR_LoaderAllocator MethodTable::GetLoaderAllocator()
 inline void MethodTable::SetLoaderModule(Module* pModule) 
 {
     WRAPPER_NO_CONTRACT;
-    m_pLoaderModule = pModule;
+    m_pLoaderModule.SetValue(pModule);
 }
 
 inline void MethodTable::SetLoaderAllocator(LoaderAllocator* pAllocator) 
@@ -195,7 +196,7 @@ inline void MethodTable::SetLoaderAllocator(LoaderAllocator* pAllocator)
     LIMITED_METHOD_CONTRACT;
     _ASSERTE(pAllocator == GetLoaderAllocator());
 
-    if (pAllocator->Id()->IsCollectible())
+    if (pAllocator->IsCollectible())
     {
         SetFlag(enum_flag_Collectible);
     }
@@ -321,22 +322,6 @@ inline DWORD MethodTable::GetAttrClass()
 }
 
 //==========================================================================================
-inline BOOL MethodTable::IsSerializable()
-{
-    WRAPPER_NO_CONTRACT;
-    return GetClass()->IsSerializable();
-}
-
-//==========================================================================================
-inline BOOL MethodTable::ContainsStackPtr()
-{
-    WRAPPER_NO_CONTRACT;
-    return (this == g_ArgumentHandleMT || 
-            this == g_ArgIteratorMT ||
-            this == g_TypedReferenceMT);
-}
-
-//==========================================================================================
 inline BOOL MethodTable::SupportsGenericInterop(TypeHandle::InteropKind interopKind,
                         MethodTable::Mode mode /*= modeAll*/)
 {
@@ -355,14 +340,6 @@ inline BOOL MethodTable::SupportsGenericInterop(TypeHandle::InteropKind interopK
 #endif // FEATURE_COMINTEROP
 }
 
-#ifdef FEATURE_REMOTING
-//==========================================================================================
-inline BOOL MethodTable::CannotBeBlittedByObjectCloner()
-{
-    WRAPPER_NO_CONTRACT;
-    return GetClass()->CannotBeBlittedByObjectCloner();
-}
-#endif
 
 //==========================================================================================
 inline BOOL MethodTable::IsNotTightlyPacked()
@@ -379,32 +356,6 @@ inline BOOL MethodTable::HasFieldsWhichMustBeInited()
 }
 
 //==========================================================================================
-inline BOOL MethodTable::SupportsAutoNGen()
-{
-    LIMITED_METHOD_CONTRACT;
-#ifndef FEATURE_CORECLR
-    return GetAssembly()->SupportsAutoNGen();
-#else
-    return FALSE;
-#endif
-}
-
-//==========================================================================================
-inline BOOL MethodTable::RunCCTorAsIfNGenImageExists()
-{
-    LIMITED_METHOD_CONTRACT;
-#ifndef FEATURE_CORECLR
-    return this->SupportsAutoNGen();
-#else
-#ifdef FEATURE_CORESYSTEM
-    return TRUE; // On our coresystem builds we will always be using triton in the customer scenario.
-#else
-    return FALSE;
-#endif
-#endif
-}
-
-//==========================================================================================
 inline BOOL MethodTable::IsAbstract()
 {
     WRAPPER_NO_CONTRACT;
@@ -412,35 +363,6 @@ inline BOOL MethodTable::IsAbstract()
 }
 
 //==========================================================================================
-#ifdef FEATURE_REMOTING
-inline BOOL MethodTable::HasRemotableMethodInfo()
-{
-    WRAPPER_NO_CONTRACT;
-    return (IsMarshaledByRef() || IsInterface() || this == g_pObjectClass || g_pObjectClass == NULL) && IsCanonicalMethodTable();
-}
-
-//==========================================================================================
-inline void MethodTable::SetHasRemotingVtsInfo()
-{
-    LIMITED_METHOD_CONTRACT;
-    SetFlag(enum_flag_HasRemotingVtsInfo);
-}
-
-//==========================================================================================
-inline BOOL MethodTable::HasRemotingVtsInfo()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-    return GetFlag(enum_flag_HasRemotingVtsInfo);
-}
-
-//==========================================================================================
-inline PTR_RemotingVtsInfo MethodTable::GetRemotingVtsInfo()
-{
-    WRAPPER_NO_CONTRACT;
-    _ASSERTE(HasRemotingVtsInfo());
-    return *GetRemotingVtsInfoPtr();
-}
-#endif // FEATURE_REMOTING
 
 #ifdef FEATURE_COMINTEROP
 //==========================================================================================
@@ -534,42 +456,7 @@ inline BOOL MethodTable::GetGuidForWinRT(GUID *pGuid)
     return bRes;
 }
 
-
 #endif // FEATURE_COMINTEROP
-
-//==========================================================================================
-// The following two methods produce correct results only if this type is
-// marked Serializable (verified by assert in checked builds) and the field
-// in question was introduced in this type (the index is the FieldDesc
-// index).
-inline BOOL MethodTable::IsFieldNotSerialized(DWORD dwFieldIndex)
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE(IsSerializable());
-#ifdef FEATURE_REMOTING
-    if (!HasRemotingVtsInfo())
-        return FALSE;
-
-    return GetRemotingVtsInfo()->IsNotSerialized(dwFieldIndex);
-#else
-    return FALSE;
-#endif
-}
-
-//==========================================================================================
-inline BOOL MethodTable::IsFieldOptionallySerialized(DWORD dwFieldIndex)
-{
-    LIMITED_METHOD_CONTRACT;
-    _ASSERTE(IsSerializable());
-#ifdef FEATURE_REMOTING
-    if (!HasRemotingVtsInfo())
-        return FALSE;
-
-    return GetRemotingVtsInfo()->IsOptionallySerialized(dwFieldIndex);
-#else
-    return FALSE;
-#endif
-}
 
 //==========================================================================================
 // Is pParentMT System.Enum? (Cannot be called before System.Enum is loaded.)
@@ -711,16 +598,14 @@ inline MethodDesc* MethodTable::GetMethodDescForSlot(DWORD slot)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
 
     PCODE pCode = GetRestoredSlot(slot);
 
-    // This is an optimization that we can take advantage of if we're trying
-    // to get the MethodDesc for an interface virtual, since their slots
-    // always point to the stub.
+    // This is an optimization that we can take advantage of if we're trying to get the MethodDesc 
+    // for an interface virtual, since their slots usually point to stub.
     if (IsInterface() && slot < GetNumVirtuals())
     {
         return MethodDesc::GetMethodDescFromStubAddr(pCode);
@@ -730,6 +615,17 @@ inline MethodDesc* MethodTable::GetMethodDescForSlot(DWORD slot)
 }
 
 #ifndef DACCESS_COMPILE 
+
+//==========================================================================================
+inline void MethodTable::CopySlotFrom(UINT32 slotNumber, MethodDataWrapper &hSourceMTData, MethodTable *pSourceMT)
+{
+    WRAPPER_NO_CONTRACT;
+
+    MethodDesc *pMD = hSourceMTData->GetImplMethodDesc(slotNumber);
+    _ASSERTE(CheckPointer(pMD));
+    _ASSERTE(pMD == pSourceMT->GetMethodDescForSlot(slotNumber));
+    SetSlot(slotNumber, pMD->GetInitialEntryPointForCopiedSlot());
+}
 
 //==========================================================================================
 inline INT32 MethodTable::MethodIterator::GetNumMethods() const
@@ -953,10 +849,10 @@ inline DWORD MethodTable::GetNumVtableIndirections(DWORD wNumVirtuals)
 }
 
 //==========================================================================================
-inline PTR_PTR_PCODE MethodTable::GetVtableIndirections()
+inline DPTR(MethodTable::VTableIndir_t) MethodTable::GetVtableIndirections()
 {
     LIMITED_METHOD_DAC_CONTRACT;
-    return dac_cast<PTR_PTR_PCODE>(dac_cast<TADDR>(this) + sizeof(MethodTable));
+    return dac_cast<DPTR(VTableIndir_t)>(dac_cast<TADDR>(this) + sizeof(MethodTable));
 }
 
 //==========================================================================================
@@ -1018,24 +914,24 @@ inline DWORD MethodTable::VtableIndirectionSlotIterator::GetOffsetFromMethodTabl
     WRAPPER_NO_CONTRACT;
     PRECONDITION(m_i != (DWORD) -1 && m_i < m_count);
     
-    return GetVtableOffset() + sizeof(PTR_PCODE) * m_i;
+    return GetVtableOffset() + sizeof(VTableIndir_t) * m_i;
 }
 
 //==========================================================================================
-inline PTR_PCODE MethodTable::VtableIndirectionSlotIterator::GetIndirectionSlot()
+inline DPTR(MethodTable::VTableIndir2_t) MethodTable::VtableIndirectionSlotIterator::GetIndirectionSlot()
 {
     LIMITED_METHOD_DAC_CONTRACT;
     PRECONDITION(m_i != (DWORD) -1 && m_i < m_count);
 
-    return *m_pSlot;
+    return m_pSlot->GetValueMaybeNull(dac_cast<TADDR>(m_pSlot));
 }
 
 //==========================================================================================
 #ifndef DACCESS_COMPILE
-inline void MethodTable::VtableIndirectionSlotIterator::SetIndirectionSlot(PTR_PCODE pChunk)
+inline void MethodTable::VtableIndirectionSlotIterator::SetIndirectionSlot(DPTR(MethodTable::VTableIndir2_t) pChunk)
 {
     LIMITED_METHOD_CONTRACT;
-    *m_pSlot = pChunk;
+    m_pSlot->SetValueMaybeNull(pChunk);
 }
 #endif
 
@@ -1213,8 +1109,10 @@ inline PTR_MethodTable MethodTable::GetCanonicalMethodTable()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
+    TADDR addr = ReadPointer(this, &MethodTable::m_pCanonMT);
+
 #ifdef _DEBUG
-    LowBits lowBits = union_getLowBits(m_pCanonMT);
+    LowBits lowBits = union_getLowBits(addr);
     if (lowBits == UNION_EECLASS)
     {
         return dac_cast<PTR_MethodTable>(this);
@@ -1222,18 +1120,17 @@ inline PTR_MethodTable MethodTable::GetCanonicalMethodTable()
     else if (lowBits == UNION_METHODTABLE)
     {
         // pointer to canonical MethodTable.
-        return PTR_MethodTable(union_getPointer(m_pCanonMT));
+        return PTR_MethodTable(union_getPointer(addr));
     }
 #ifdef FEATURE_PREJIT
     else if (lowBits == UNION_INDIRECTION)
     {
-        return PTR_MethodTable(*PTR_TADDR(union_getPointer(m_pCanonMT)));
+        return PTR_MethodTable(*PTR_TADDR(union_getPointer(addr)));
     }
 #endif
     _ASSERTE(!"Malformed m_pCanonMT in MethodTable");
     return NULL;
 #else
-    TADDR addr = m_pCanonMT;
 
     if ((addr & 2) == 0)
         return dac_cast<PTR_MethodTable>(this);
@@ -1253,11 +1150,12 @@ inline TADDR MethodTable::GetCanonicalMethodTableFixup()
     LIMITED_METHOD_DAC_CONTRACT;
 
 #ifdef FEATURE_PREJIT
-    LowBits lowBits = union_getLowBits(m_pCanonMT);
+    TADDR addr = ReadPointer(this, &MethodTable::m_pCanonMT);
+    LowBits lowBits = union_getLowBits(addr);
     if (lowBits == UNION_INDIRECTION)
     {
         // pointer to canonical MethodTable.
-        return *PTR_TADDR(union_getPointer(m_pCanonMT));
+        return *PTR_TADDR(union_getPointer(addr));
     }
     else
 #endif
@@ -1296,6 +1194,15 @@ inline IMDInternalImport* MethodTable::GetMDImport()
 }
 
 //==========================================================================================
+inline HRESULT MethodTable::GetCustomAttribute(
+                               WellKnownAttribute attribute,
+                               const void  **ppData,
+                               ULONG *pcbData)
+{
+    return GetModule()->GetCustomAttribute(GetCl(), attribute, ppData, pcbData);
+}
+
+//==========================================================================================
 inline BOOL MethodTable::IsSealed()
 {
     LIMITED_METHOD_CONTRACT;
@@ -1320,7 +1227,7 @@ inline BOOL MethodTable::HasExplicitSize()
 inline DWORD MethodTable::GetPerInstInfoSize()
 {
     LIMITED_METHOD_DAC_CONTRACT;
-    return GetNumDicts() * sizeof(TypeHandle*);
+    return GetNumDicts() * sizeof(PerInstInfoElem_t);
 }
 
 //==========================================================================================
@@ -1372,7 +1279,7 @@ inline BOOL MethodTable::IsCanonicalMethodTable()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    return (union_getLowBits(m_pCanonMT) == UNION_EECLASS);
+    return (union_getLowBits(ReadPointer(this, &MethodTable::m_pCanonMT)) == UNION_EECLASS);
 }
 
 //==========================================================================================
@@ -1406,7 +1313,7 @@ inline PTR_InterfaceInfo MethodTable::GetInterfaceMap()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    return dac_cast<PTR_InterfaceInfo>(m_pMultipurposeSlot2); // m_pInterfaceMap
+    return ReadPointer(this, &MethodTable::m_pInterfaceMap);
 }
 
 //==========================================================================================
@@ -1419,7 +1326,7 @@ FORCEINLINE TADDR MethodTable::GetMultipurposeSlotPtr(WFLAGS2_ENUM flag, const B
     DWORD offset = offsets[GetFlag((WFLAGS2_ENUM)(flag - 1))];
 
     if (offset >= sizeof(MethodTable)) {
-        offset += GetNumVtableIndirections() * sizeof(PTR_PCODE);
+        offset += GetNumVtableIndirections() * sizeof(VTableIndir_t);
     }
 
     return dac_cast<TADDR>(this) + offset;
@@ -1434,7 +1341,7 @@ FORCEINLINE DWORD MethodTable::GetOffsetOfOptionalMember(OptionalMemberId id)
 
     DWORD offset = c_OptionalMembersStartOffsets[GetFlag(enum_flag_MultipurposeSlotsMask)];
 
-    offset += GetNumVtableIndirections() * sizeof(PTR_PCODE);
+    offset += GetNumVtableIndirections() * sizeof(VTableIndir_t);
 
 #undef METHODTABLE_OPTIONAL_MEMBER
 #define METHODTABLE_OPTIONAL_MEMBER(NAME, TYPE, GETTER) \
@@ -1453,27 +1360,17 @@ FORCEINLINE DWORD MethodTable::GetOffsetOfOptionalMember(OptionalMemberId id)
 }
 
 //==========================================================================================
-// this is not the pretties function however I got bitten pretty hard by the computation 
-// of the allocation size of a MethodTable done "by hand" in few places.
-// Essentially the idea is that this is going to centralize computation of size for optional
-// members so the next morons that need to add an optional member will look at this function
-// and hopefully be less exposed to code doing size computation behind their back
 inline DWORD MethodTable::GetOptionalMembersAllocationSize(DWORD dwMultipurposeSlotsMask,
-                                                           BOOL needsRemotableMethodInfo,
                                                            BOOL needsGenericsStaticsInfo,
                                                            BOOL needsGuidInfo,
                                                            BOOL needsCCWTemplate,
                                                            BOOL needsRCWPerTypeData,
-                                                           BOOL needsRemotingVtsInfo,
-                                                           BOOL needsContextStatic,
                                                            BOOL needsTokenOverflow)
 {
     LIMITED_METHOD_CONTRACT;
 
     DWORD size = c_OptionalMembersStartOffsets[dwMultipurposeSlotsMask] - sizeof(MethodTable);
 
-    if (needsRemotableMethodInfo)
-        size += sizeof(UINT_PTR);
     if (needsGenericsStaticsInfo)
         size += sizeof(GenericsStaticsInfo);
     if (needsGuidInfo)
@@ -1481,10 +1378,6 @@ inline DWORD MethodTable::GetOptionalMembersAllocationSize(DWORD dwMultipurposeS
     if (needsCCWTemplate)
         size += sizeof(UINT_PTR);
     if (needsRCWPerTypeData)
-        size += sizeof(UINT_PTR);
-    if (needsRemotingVtsInfo)
-        size += sizeof(UINT_PTR);
-    if (needsContextStatic)
         size += sizeof(UINT_PTR);
     if (dwMultipurposeSlotsMask & enum_flag_HasInterfaceMap)
         size += sizeof(UINT_PTR);
@@ -1534,9 +1427,7 @@ inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer()
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, NULL);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1562,9 +1453,7 @@ inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer()
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, NULL);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1576,16 +1465,14 @@ inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer()
 #endif //!DACCESS_COMPILE
 
 //==========================================================================================
-inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer(PTR_Thread pThread, PTR_AppDomain pDomain)
+inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer(PTR_Thread pThread)
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, pDomain);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1595,16 +1482,14 @@ inline PTR_BYTE MethodTable::GetNonGCThreadStaticsBasePointer(PTR_Thread pThread
 }
 
 //==========================================================================================
-inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer(PTR_Thread pThread, PTR_AppDomain pDomain)
+inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer(PTR_Thread pThread)
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
     // Get the current module's ModuleIndex
     ModuleIndex index = GetModuleForStatics()->GetModuleIndex();
     
-    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLBIfExists(pThread, pDomain);
-    if (pTLB == NULL)
-        return NULL;
+    PTR_ThreadLocalBlock pTLB = ThreadStatics::GetCurrentTLB(pThread);
 
     PTR_ThreadLocalModule pTLM = pTLB->GetTLMIfExists(index);
     if (pTLM == NULL)
@@ -1614,20 +1499,11 @@ inline PTR_BYTE MethodTable::GetGCThreadStaticsBasePointer(PTR_Thread pThread, P
 }
 
 //==========================================================================================
-inline PTR_DomainLocalModule MethodTable::GetDomainLocalModule(AppDomain * pAppDomain)
-{
-    WRAPPER_NO_CONTRACT;
-    return GetModuleForStatics()->GetDomainLocalModule(pAppDomain);
-}
-
-#ifndef DACCESS_COMPILE
-//==========================================================================================
 inline PTR_DomainLocalModule MethodTable::GetDomainLocalModule()
 {
     WRAPPER_NO_CONTRACT;
     return GetModuleForStatics()->GetDomainLocalModule();
 }
-#endif //!DACCESS_COMPILE
 
 //==========================================================================================
 inline OBJECTREF MethodTable::AllocateNoChecks()
@@ -1650,35 +1526,6 @@ inline OBJECTREF MethodTable::AllocateNoChecks()
     return AllocateObject(this);
 }
 
-#ifdef FEATURE_REMOTING
-//==========================================================================================
-inline BOOL MethodTable::HasContextStatics()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-    return GetFlag(enum_flag_ContextStatic);
-}
-
-//==========================================================================================
-inline void MethodTable::SetHasContextStatics()
-{
-    LIMITED_METHOD_CONTRACT;
-    SetFlag(enum_flag_ContextStatic);
-}
-
-//==========================================================================================
-inline DWORD MethodTable::GetContextStaticsOffset()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-    return GetContextStaticsBucket()->m_dwContextStaticsOffset;
-}
-
-//==========================================================================================
-inline WORD MethodTable::GetContextStaticsSize()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-    return GetContextStaticsBucket()->m_wContextStaticsSize;
-}
-#endif // FEATURE_REMOTING
 
 //==========================================================================================
 inline DWORD MethodTable::GetClassIndex()
@@ -1697,7 +1544,6 @@ inline BOOL MethodTable::UnBoxInto(void *dest, OBJECTREF src)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -1709,7 +1555,7 @@ inline BOOL MethodTable::UnBoxInto(void *dest, OBJECTREF src)
         if (src == NULL || src->GetMethodTable() != this)
             return FALSE;
 
-        CopyValueClass(dest, src->UnBox(), this, src->GetAppDomain());
+        CopyValueClass(dest, src->UnBox(), this);
     }
     return TRUE;
 }
@@ -1723,7 +1569,6 @@ inline BOOL MethodTable::UnBoxIntoArg(ArgDestination *argDest, OBJECTREF src)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -1735,7 +1580,7 @@ inline BOOL MethodTable::UnBoxIntoArg(ArgDestination *argDest, OBJECTREF src)
         if (src == NULL || src->GetMethodTable() != this)
             return FALSE;
 
-        CopyValueClassArg(argDest, src->UnBox(), this, src->GetAppDomain(), 0);
+        CopyValueClassArg(argDest, src->UnBox(), this, 0);
     }
     return TRUE;
 }
@@ -1749,7 +1594,6 @@ inline void MethodTable::UnBoxIntoUnchecked(void *dest, OBJECTREF src)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -1763,7 +1607,7 @@ inline void MethodTable::UnBoxIntoUnchecked(void *dest, OBJECTREF src)
     {
         _ASSERTE(src->GetMethodTable()->GetNumInstanceFieldBytes() == GetNumInstanceFieldBytes());
 
-        CopyValueClass(dest, src->UnBox(), this, src->GetAppDomain());
+        CopyValueClass(dest, src->UnBox(), this);
     }
 }
 #endif
@@ -1776,7 +1620,6 @@ __forceinline TypeHandle::CastResult MethodTable::CanCastToClassOrInterfaceNoGC(
         GC_NOTRIGGER;
         MODE_ANY;
         INSTANCE_CHECK;
-        SO_TOLERANT;
         PRECONDITION(CheckPointer(pTargetMT));
         PRECONDITION(!pTargetMT->IsArray());
     }
@@ -1817,7 +1660,6 @@ FORCEINLINE PTR_Module MethodTable::GetGenericsStaticsModuleAndID(DWORD * pID)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END
@@ -1830,7 +1672,7 @@ FORCEINLINE PTR_Module MethodTable::GetGenericsStaticsModuleAndID(DWORD * pID)
     _ASSERTE(!IsStringOrArray());
     if (m_dwFlags & enum_flag_StaticsMask_IfGenericsThenCrossModule)
     {
-        CrossModuleGenericsStaticsInfo *pInfo = m_pWriteableData->GetCrossModuleGenericsStaticsInfo();
+        CrossModuleGenericsStaticsInfo *pInfo = ReadPointer(this, &MethodTable::m_pWriteableData)->GetCrossModuleGenericsStaticsInfo();
         _ASSERTE(FitsIn<DWORD>(pInfo->m_DynamicTypeID) || pInfo->m_DynamicTypeID == (SIZE_T)-1);
         *pID = static_cast<DWORD>(pInfo->m_DynamicTypeID);
         return pInfo->m_pModuleForStatics;
@@ -1867,10 +1709,6 @@ FORCEINLINE OBJECTREF MethodTable::GetManagedClassObjectIfExists()
         return NULL;
     }
 
-    // Only code:MethodTable::GetManagedClassObject sets m_pExposedClassObject and it insures that 
-    // remoted objects and arrays don't get in.  
-    _ASSERTE(!IsArray() && !IsTransparentProxy());
-
     COMPILER_ASSUME(retVal != NULL);
     return retVal;
 }
@@ -1897,7 +1735,6 @@ FORCEINLINE BOOL MethodTable::ImplementsInterfaceInline(MethodTable *pInterface)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         PRECONDITION(pInterface->IsInterface()); // class we are looking up should be an interface
     }
     CONTRACTL_END;

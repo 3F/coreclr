@@ -12,9 +12,9 @@ Module Name:
 
 Abstract:
 
-    Rotor Platform Adaptation Layer (PAL) header file used by source
+    CoreCLR Platform Adaptation Layer (PAL) header file used by source
     file part of the PAL implementation. This is a wrapper over 
-    unix/inc/pal.h. It allows avoiding name collisions when including 
+    pal/inc/pal.h. It allows avoiding name collisions when including
     system header files, and it allows redirecting calls to 'standard' functions
     to their PAL counterpart
 
@@ -153,6 +153,11 @@ function_name() to call the system's implementation
 #define _ENABLE_DEBUG_MESSAGES_ 0
 #endif
 
+/* Include type_traits before including the pal.h. On newer glibcxx versions,
+   the type_traits fail to compile if we redefine the wchar_t before including 
+   the header */
+#include <type_traits>
+
 #ifdef PAL_PERF
 #include "pal_perf.h"
 #endif
@@ -169,7 +174,6 @@ function_name() to call the system's implementation
 #define memmove DUMMY_memmove 
 #define memchr DUMMY_memchr
 #define strlen DUMMY_strlen
-#define strnlen DUMMY_strnlen
 #define stricmp DUMMY_stricmp 
 #define strstr DUMMY_strstr 
 #define strcmp DUMMY_strcmp 
@@ -184,18 +188,21 @@ function_name() to call the system's implementation
 #define strpbrk DUMMY_strpbrk
 #define strtod DUMMY_strtod
 #define strspn DUMMY_strspn
-#if HAVE__SNPRINTF
-#define _snprintf DUMMY__snprintf
-#endif /* HAVE__SNPRINTF */
-#if HAVE__SNWPRINTF
-#define _snwprintf DUMMY__snwprintf
-#endif  /* HAVE__SNWPRINTF */
 #define tolower DUMMY_tolower
 #define toupper DUMMY_toupper
 #define islower DUMMY_islower
 #define isupper DUMMY_isupper
 #define isprint DUMMY_isprint
 #define isdigit DUMMY_isdigit
+#define iswalpha DUMMY_iswalpha
+#define iswdigit DUMMY_iswdigit
+#define iswupper DUMMY_iswupper
+#define towupper DUMMY_towupper
+#define towlower DUMMY_towlower
+#define iswprint DUMMY_iswprint
+#define iswspace DUMMY_iswspace
+#define iswxdigit DUMMY_iswxdigit
+#define wint_t DUMMY_wint_t
 #define srand DUMMY_srand
 #define atoi DUMMY_atoi
 #define atof DUMMY_atof
@@ -205,22 +212,30 @@ function_name() to call the system's implementation
 #define va_list DUMMY_va_list
 #define abs DUMMY_abs
 #define llabs DUMMY_llabs
-#define atan DUMMY_atan
-#define tan DUMMY_tan
-#define cos DUMMY_cos
-#define sin DUMMY_sin
-#define cosh DUMMY_cosh
-#define sinh DUMMY_sinh
-#define tanh DUMMY_tanh
-#define modf DUMMY_modf
-#define fmod DUMMY_fmod
-#define fmodf DUMMY_fmodf
-#define sqrt DUMMY_sqrt
 #define ceil DUMMY_ceil
+#define cos DUMMY_cos
+#define cosh DUMMY_cosh
 #define fabs DUMMY_fabs
-#define fabsf DUMMY_fabsf
 #define floor DUMMY_floor
+#define fmod DUMMY_fmod
+#define modf DUMMY_modf
+#define sin DUMMY_sin
+#define sinh DUMMY_sinh
+#define sqrt DUMMY_sqrt
+#define tan DUMMY_tan
+#define tanh DUMMY_tanh
+#define ceilf DUMMY_ceilf
+#define cosf DUMMY_cosf
+#define coshf DUMMY_coshf
+#define fabsf DUMMY_fabsf
+#define floorf DUMMY_floorf
+#define fmodf DUMMY_fmodf
 #define modff DUMMY_modff
+#define sinf DUMMY_sinf
+#define sinhf DUMMY_sinhf
+#define sqrtf DUMMY_sqrtf
+#define tanf DUMMY_tanf
+#define tanhf DUMMY_tanhf
 
 /* RAND_MAX needed to be renamed to avoid duplicate definition when including 
    stdlib.h header files. PAL_RAND_MAX should have the same value as RAND_MAX 
@@ -334,8 +349,9 @@ function_name() to call the system's implementation
 #undef va_arg
 #endif
 
-#if !defined(_MSC_VER) && defined(FEATURE_PAL) && defined(_WIN64)
+#if !defined(_MSC_VER) && defined(_WIN64)
 #undef _BitScanForward64
+#undef _BitScanReverse64
 #endif 
 
 /* pal.h defines alloca(3) as a compiler builtin.
@@ -350,15 +366,14 @@ function_name() to call the system's implementation
 #undef atexit
 #undef div
 #undef div_t
-#if !defined(_DEBUG)
 #undef memcpy
-#endif //!defined(_DEBUG)
 #undef memcmp
 #undef memset
 #undef memmove
 #undef memchr
 #undef strlen
 #undef strnlen
+#undef wcsnlen
 #undef stricmp
 #undef strstr
 #undef strcmp
@@ -390,6 +405,12 @@ function_name() to call the system's implementation
 #undef isxdigit
 #undef isalpha
 #undef isalnum
+#undef iswalpha
+#undef iswdigit
+#undef iswupper
+#undef towupper
+#undef towlower
+#undef wint_t
 #undef atoi
 #undef atol
 #undef atof
@@ -442,12 +463,61 @@ function_name() to call the system's implementation
 #undef labs
 #undef llabs
 #undef acos
+#undef acosh
 #undef asin
+#undef asinh
+#undef atan
+#undef atanh
 #undef atan2
+#undef cbrt
+#undef ceil
+#undef cos
+#undef cosh
 #undef exp
+#undef fabs
+#undef floor
+#undef fmod
+#undef fma
+#undef ilogb
 #undef log
+#undef log2
 #undef log10
+#undef modf
 #undef pow
+#undef scalbn
+#undef sin
+#undef sinh
+#undef sqrt
+#undef tan
+#undef tanh
+#undef acosf
+#undef acoshf
+#undef asinf
+#undef asinhf
+#undef atanf
+#undef atanhf
+#undef atan2f
+#undef cbrtf
+#undef ceilf
+#undef cosf
+#undef coshf
+#undef expf
+#undef fabsf
+#undef floorf
+#undef fmodf
+#undef fmaf
+#undef ilogbf
+#undef logf
+#undef log2f
+#undef log10f
+#undef modff
+#undef powf
+#undef scalbnf
+#undef sinf
+#undef sinhf
+#undef sqrtf
+#undef tanf
+#undef tanhf
 #undef rand
 #undef srand
 #undef errno
@@ -455,22 +525,6 @@ function_name() to call the system's implementation
 #undef wcsspn
 #undef open
 #undef glob
-#undef atan
-#undef tan
-#undef cos
-#undef sin
-#undef cosh
-#undef sinh
-#undef tanh
-#undef modf
-#undef fmod
-#undef fmodf
-#undef sqrt
-#undef ceil
-#undef fabs
-#undef fabsf
-#undef floor
-#undef modff
 
 #undef wchar_t
 #undef ptrdiff_t
@@ -486,13 +540,6 @@ function_name() to call the system's implementation
 #undef vfwprintf
 #undef vprintf
 #undef wprintf
-#undef sprintf
-#undef swprintf
-#undef _snprintf
-#if HAVE__SNWPRINTF
-#undef _snwprintf
-#endif  /* HAVE__SNWPRINTF */
-#undef sscanf
 #undef wcstod
 #undef wcstol
 #undef wcstoul
@@ -503,7 +550,6 @@ function_name() to call the system's implementation
 #undef wcsncmp
 #undef wcschr
 #undef wcsrchr
-#undef wsprintf
 #undef swscanf
 #undef wcspbrk
 #undef wcsstr
@@ -516,11 +562,6 @@ function_name() to call the system's implementation
 #undef iswspace
 #undef towlower
 #undef towupper
-#undef vsprintf
-#undef vswprintf
-#undef _vsnprintf
-#undef _vsnwprintf
-#undef vsnprintf
 #undef wvsnprintf
 
 #ifdef _AMD64_ 
@@ -529,6 +570,9 @@ function_name() to call the system's implementation
 #endif // _AMD64_
 
 #undef ctime
+
+#undef min
+#undef max
 
 #undef SCHAR_MIN
 #undef SCHAR_MAX
@@ -567,6 +611,10 @@ function_name() to call the system's implementation
 #endif
 #include <ctype.h>
 
+// Don't use C++ wrappers for stdlib.h
+// https://gcc.gnu.org/ml/libstdc++/2016-01/msg00025.html 
+#define _GLIBCXX_INCLUDE_NEXT_C_HEADERS 1
+
 #define _WITH_GETLINE
 #include <stdio.h>
 #include <stdlib.h>
@@ -590,20 +638,38 @@ function_name() to call the system's implementation
    we'll catch any definition conflicts */
 #include <sys/socket.h>
 
+#include <pal/stackstring.hpp>
+
 #if !HAVE_INFTIM
 #define INFTIM  -1
 #endif // !HAVE_INFTIM
 
-#if (__GNUC__ >= 4)
 #define OffsetOf(TYPE, MEMBER) __builtin_offsetof(TYPE, MEMBER)
-#else
-#define OffsetOf(s, f) (INT)(SIZE_T)&(((s*)0)->f)
-#endif /* __GNUC__ version check*/
 
 #undef assert
 #define assert (Use__ASSERTE_instead_of_assert) assert
 
+#define string_countof(a) (sizeof(a) / sizeof(a[0]) - 1)
+
+#ifndef __ANDROID__
+#define TEMP_DIRECTORY_PATH "/tmp/"
+#else
+// On Android, "/tmp/" doesn't exist; temporary files should go to
+// /data/local/tmp/
+#define TEMP_DIRECTORY_PATH "/data/local/tmp/"
+#endif
+
 #define PROCESS_PIPE_NAME_PREFIX ".dotnet-pal-processpipe"
+
+#ifdef __APPLE__
+#define APPLICATION_CONTAINER_BASE_PATH_SUFFIX "/Library/Group Containers/"
+
+// Not much to go with, but Max semaphore length on Mac is 31 characters. In a sandbox, the semaphore name
+// must be prefixed with an application group ID. This will be 10 characters for developer ID and extra 2 
+// characters for group name. For example ABCDEFGHIJ.MS. We still need some characters left
+// for the actual semaphore names.
+#define MAX_APPLICATION_GROUP_ID_LENGTH 13
+#endif // __APPLE__
 
 #ifdef __cplusplus
 extern "C"
@@ -624,6 +690,14 @@ typedef enum _TimeConversionConstants
 
 #ifdef __cplusplus
 }
+
+bool
+ReadMemoryValueFromFile(const char* filename, size_t* val);
+
+#ifdef __APPLE__
+bool
+GetApplicationContainerFolder(PathCharString& buffer, const char *applicationGroupId, int applicationGroupIdLength);
+#endif // __APPLE__
 
 /* This is duplicated in utilcode.h for CLR, with cooler type-traits */
 template <typename T>
@@ -686,7 +760,7 @@ inline T* InterlockedCompareExchangePointerT(
 
 #include "volatile.h"
 
-const char StackOverflowMessage[] = "Process is terminated due to StackOverflowException.\n";
+const char StackOverflowMessage[] = "Stack overflow.\n";
 
 #endif // __cplusplus
 

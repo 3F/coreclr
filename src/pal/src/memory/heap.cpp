@@ -40,51 +40,6 @@ SET_DEFAULT_DEBUG_CHANNEL(MEM);
 
 /*++
 Function:
-  RtlMoveMemory
-
-See MSDN doc.
---*/
-VOID
-PALAPI
-RtlMoveMemory(
-          IN PVOID Destination,
-          IN CONST VOID *Source,
-          IN SIZE_T Length)
-{
-    PERF_ENTRY(RtlMoveMemory);
-    ENTRY("RtlMoveMemory(Destination:%p, Source:%p, Length:%d)\n", 
-          Destination, Source, Length);
-    
-    memmove(Destination, Source, Length);
-    
-    LOGEXIT("RtlMoveMemory returning\n");
-    PERF_EXIT(RtlMoveMemory);
-}
-
-/*++
-Function:
-  RtlZeroMemory
-
-See MSDN doc.
---*/
-VOID
-PALAPI
-RtlZeroMemory(
-    PVOID Destination,
-    SIZE_T Length
-)
-{
-    PERF_ENTRY(RtlZeroMemory);
-    ENTRY("RtlZeroMemory(Destination:%p, Length:%x)\n", Destination, Length);
-    
-    memset(Destination, 0, Length);
-    
-    LOGEXIT("RtlZeroMemory returning.\n");
-    PERF_EXIT(RtlZeroMemory);
-}
-
-/*++
-Function:
   HeapCreate
 
 See MSDN doc.
@@ -285,7 +240,6 @@ HeapFree(
 
     bRetVal = TRUE;
 #ifdef __APPLE__
-    // This is patterned off of InternalFree in malloc.cpp.
     {
         malloc_zone_free((malloc_zone_t *)hHeap, lpMem);
     }

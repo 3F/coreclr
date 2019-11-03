@@ -535,7 +535,6 @@ UPTR HashMap::LookupValue(UPTR key, UPTR value)
     {
         DISABLED(THROWS);       // This is not a bug, we cannot decide, since the function ptr called may be either.
         DISABLED(GC_NOTRIGGER); // This is not a bug, we cannot decide, since the function ptr called may be either.
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -547,8 +546,8 @@ UPTR HashMap::LookupValue(UPTR key, UPTR value)
 
     // BROKEN: This is called for the RCWCache on the GC thread
     // Also called by AppDomain::FindCachedAssembly to resolve AssemblyRef -- this is used by stack walking on the GC thread.
-    // See comments in GCHeap::RestartEE (above the call to SyncClean::CleanUp) for reason to enter COOP mode.
-    // However, if the current thread is the GC thread, we know we're not going to call GCHeap::RestartEE
+    // See comments in GCHeapUtilities::RestartEE (above the call to SyncClean::CleanUp) for reason to enter COOP mode.
+    // However, if the current thread is the GC thread, we know we're not going to call GCHeapUtilities::RestartEE
     // while accessing the HashMap, so it's safe to proceed.
     // (m_fAsyncMode && !IsGCThread() is the condition for entering COOP mode.  I.e., enable COOP GC only if
     // the HashMap is in async mode and this is not a GC thread.)
@@ -878,9 +877,18 @@ void HashMap::Rehash()
     _ASSERTE (OwnLock());
 #endif
 
-    DWORD cbNewSize = g_rgPrimes[m_iPrimeIndex = NewSize()];
+    UPTR newPrimeIndex = NewSize();
 
-    ASSERT(m_iPrimeIndex < 70);
+    ASSERT(newPrimeIndex < g_rgNumPrimes);
+
+    if ((m_iPrimeIndex == newPrimeIndex) && (m_cbDeletes == 0))
+    {
+        return;
+    }
+
+    m_iPrimeIndex = newPrimeIndex;
+
+    DWORD cbNewSize = g_rgPrimes[m_iPrimeIndex];
 
     Bucket* rgBuckets = Buckets();
     UPTR cbCurrSize =   GetSize(rgBuckets);

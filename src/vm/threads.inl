@@ -22,13 +22,12 @@
 #include "frames.h"
 
 #ifndef DACCESS_COMPILE
-#ifdef FEATURE_IMPLICIT_TLS
 
-#ifndef __llvm__
+#ifndef __GNUC__
 EXTERN_C __declspec(thread) ThreadLocalInfo gCurrentThreadInfo;
-#else // !__llvm__
+#else // !__GNUC__
 EXTERN_C __thread ThreadLocalInfo gCurrentThreadInfo;
-#endif // !__llvm__
+#endif // !__GNUC__
 
 EXTERN_C inline Thread* STDCALL GetThread()
 {
@@ -37,34 +36,24 @@ EXTERN_C inline Thread* STDCALL GetThread()
 
 EXTERN_C inline AppDomain* STDCALL GetAppDomain()
 {
-    return gCurrentThreadInfo.m_pAppDomain;
+    return AppDomain::GetCurrentDomain();
 }
 
-#endif // FEATURE_IMPLICIT_TLS
 #endif // !DACCESS_COMPILE
-
-#ifdef ENABLE_GET_THREAD_GENERIC_FULL_CHECK
-// See code:GetThreadGenericFullCheck
-inline /* static */ BOOL Thread::ShouldEnforceEEThreadNotRequiredContracts()
-{
-    LIMITED_METHOD_CONTRACT;
-    return s_fEnforceEEThreadNotRequiredContracts;
-}
-#endif // ENABLE_GET_THREAD_GENERIC_FULL_CHECK
 
 inline void Thread::IncLockCount()
 {
     LIMITED_METHOD_CONTRACT;
     _ASSERTE(GetThread() == this);
     m_dwLockCount++;
-    _ASSERTE(m_dwLockCount != 0 || HasThreadStateNC(TSNC_UnbalancedLocks) || GetDomain()->OkToIgnoreOrphanedLocks());
+    _ASSERTE(m_dwLockCount != 0 || HasThreadStateNC(TSNC_UnbalancedLocks));
 }
 
 inline void Thread::DecLockCount()
 {
     LIMITED_METHOD_CONTRACT;
     _ASSERTE(GetThread() == this);
-    _ASSERTE(m_dwLockCount > 0 || HasThreadStateNC(TSNC_UnbalancedLocks) || GetDomain()->OkToIgnoreOrphanedLocks());
+    _ASSERTE(m_dwLockCount > 0 || HasThreadStateNC(TSNC_UnbalancedLocks));
     m_dwLockCount--;
 }
 
@@ -88,38 +77,11 @@ inline void Thread::SetThrowable(OBJECTREF pThrowable DEBUG_ARG(ThreadExceptionS
     m_ExceptionState.SetThrowable(pThrowable DEBUG_ARG(stecFlags));
 }
 
-inline void Thread::SetKickOffDomainId(ADID ad)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    m_pKickOffDomainId = ad;
-}
-
-
-inline ADID Thread::GetKickOffDomainId()
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    _ASSERTE(m_pKickOffDomainId.m_dwId != 0);
-    return m_pKickOffDomainId;
-}
-
 // get the current notification (if any) from this thread
 inline OBJECTHANDLE Thread::GetThreadCurrNotification()
 {
     CONTRACTL
     {
-        SO_NOT_MAINLINE;
         NOTHROW;
         GC_NOTRIGGER;
         SUPPORTS_DAC;
@@ -134,7 +96,6 @@ inline void Thread::SetThreadCurrNotification(OBJECTHANDLE handle)
 {
     CONTRACTL
     {
-        SO_NOT_MAINLINE;
         NOTHROW;
         GC_NOTRIGGER;
     }
@@ -148,7 +109,6 @@ inline void Thread::ClearThreadCurrNotification()
 {
     CONTRACTL
     {
-        SO_NOT_MAINLINE;
         NOTHROW;
         GC_NOTRIGGER;
     }
@@ -163,7 +123,6 @@ inline OBJECTREF Thread::GetExposedObjectRaw()
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END;
@@ -174,96 +133,7 @@ inline OBJECTREF Thread::GetExposedObjectRaw()
 inline void Thread::FinishSOWork()
 {
     WRAPPER_NO_CONTRACT;
-#ifdef FEATURE_STACK_PROBE
-    if (HasThreadStateNC(TSNC_SOWorkNeeded))
-    {
-        ResetThreadStateNC(TSNC_SOWorkNeeded);
-        // Wake up AD unload thread to finish SO work that is delayed due to limit stack
-        AppDomain::EnableADUnloadWorkerForThreadAbort();
-    }
-#else
     _ASSERTE(!HasThreadStateNC(TSNC_SOWorkNeeded));
-#endif
-}
-
-inline DWORD Thread::IncrementOverridesCount()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.IncrementOverridesCount();
-}
-
-inline DWORD Thread::DecrementOverridesCount()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.DecrementOverridesCount();
-}
-
-inline DWORD Thread::GetOverridesCount()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.GetOverridesCount();
-}
-
-inline DWORD Thread::IncrementAssertCount()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.IncrementAssertCount();
-}
-
-inline DWORD Thread::DecrementAssertCount()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.DecrementAssertCount();
-}
-
-inline DWORD Thread::GetAssertCount()
-{
-    LIMITED_METHOD_CONTRACT;
-    return m_ADStack.GetAssertCount();
-}
-
-#ifndef DACCESS_COMPILE
-inline void Thread::PushDomain(ADID pDomain)
-{
-    WRAPPER_NO_CONTRACT;
-    m_ADStack.PushDomain(pDomain);
-}
-
-inline ADID Thread::PopDomain()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.PopDomain();
-}
-#endif // DACCESS_COMPILE
-
-inline DWORD Thread::GetNumAppDomainsOnThread()
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.GetNumDomains();
-}
-
-inline BOOL Thread::CheckThreadWideSpecialFlag(DWORD flags)
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.GetThreadWideSpecialFlag() & flags;
-}
-
-inline void Thread::InitDomainIteration(DWORD *pIndex)
-{
-    WRAPPER_NO_CONTRACT;
-    m_ADStack.InitDomainIteration(pIndex);
-}
-
-inline ADID Thread::GetNextDomainOnStack(DWORD *pIndex, DWORD *pOverrides, DWORD *pAsserts)
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.GetNextDomainOnStack(pIndex, pOverrides, pAsserts);
-}
-
-inline void Thread::UpdateDomainOnStack(DWORD pIndex, DWORD asserts, DWORD overrides)
-{
-    WRAPPER_NO_CONTRACT;
-    return m_ADStack.UpdateDomainOnStack(pIndex, asserts, overrides);
 }
 
 #ifdef FEATURE_COMINTEROP
@@ -301,8 +171,6 @@ inline void Thread::SetLastSTACtxCookie(LPVOID pCtxCookie, BOOL fNAContext)
 }
 #endif // FEATURE_COMINTEROP
 
-#include "appdomainstack.inl"
-
 inline bool Thread::IsGCSpecial()
 {
     LIMITED_METHOD_CONTRACT;
@@ -314,5 +182,38 @@ inline void Thread::SetGCSpecial(bool fGCSpecial)
     LIMITED_METHOD_CONTRACT;
     m_fGCSpecial = fGCSpecial;
 }
+
+#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+
+inline Thread::CurrentPrepareCodeConfigHolder::CurrentPrepareCodeConfigHolder(Thread *thread, PrepareCodeConfig *config)
+    : m_thread(thread)
+#ifdef _DEBUG
+    , m_config(config)
+#endif
+{
+    LIMITED_METHOD_CONTRACT;
+    _ASSERTE(thread != nullptr);
+    _ASSERTE(thread == GetThread());
+    _ASSERTE(config != nullptr);
+
+    PrepareCodeConfig *previousConfig = thread->m_currentPrepareCodeConfig;
+    if (previousConfig != nullptr)
+    {
+        config->SetNextInSameThread(previousConfig);
+    }
+    thread->m_currentPrepareCodeConfig = config;
+}
+
+inline Thread::CurrentPrepareCodeConfigHolder::~CurrentPrepareCodeConfigHolder()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    PrepareCodeConfig *config = m_thread->m_currentPrepareCodeConfig;
+    _ASSERTE(config == m_config);
+    m_thread->m_currentPrepareCodeConfig = config->GetNextInSameThread();
+    config->SetNextInSameThread(nullptr);
+}
+
+#endif // !DACCESS_COMPILE && !CROSSGEN_COMPILE
 
 #endif

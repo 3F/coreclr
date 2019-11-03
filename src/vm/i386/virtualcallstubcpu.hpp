@@ -16,9 +16,6 @@
 
 #ifdef DECLARE_DATA
 #include "asmconstants.h"
-#ifdef FEATURE_REMOTING
-#include "remoting.h"
-#endif
 #endif
 
 #include <pshpack1.h>  // Since we are placing code, we want byte packing of the structs
@@ -60,9 +57,9 @@ get quickly changed to point to another kind of stub.
 */
 struct LookupStub
 {
-    inline PCODE entryPoint()           { LIMITED_METHOD_CONTRACT; return (PCODE)&_entryPoint[0]; }
-    inline size_t token() { LIMITED_METHOD_CONTRACT; return _token; }
-    inline size_t       size()          { LIMITED_METHOD_CONTRACT; return sizeof(LookupStub); }
+    inline PCODE entryPoint()       { LIMITED_METHOD_CONTRACT; return (PCODE)&_entryPoint[0]; }
+    inline size_t token()           { LIMITED_METHOD_CONTRACT; return _token; }
+    inline size_t size()            { LIMITED_METHOD_CONTRACT; return sizeof(LookupStub); }
 
 private:
     friend struct LookupHolder;
@@ -139,6 +136,16 @@ struct DispatchStub
 
     inline size_t       expectedMT()  { LIMITED_METHOD_CONTRACT;  return _expectedMT;     }
     inline PCODE        implTarget()  { LIMITED_METHOD_CONTRACT;  return (PCODE) &_implDispl + sizeof(DISPL) + _implDispl; }
+
+    inline TADDR implTargetSlot(EntryPointSlots::SlotType *slotTypeRef) const
+    {
+        LIMITED_METHOD_CONTRACT;
+        _ASSERTE(slotTypeRef != nullptr);
+
+        *slotTypeRef = EntryPointSlots::SlotType_ExecutableRel32;
+        return (TADDR)&_implDispl;
+    }
+
     inline PCODE        failTarget()  { LIMITED_METHOD_CONTRACT;  return (PCODE) &_failDispl + sizeof(DISPL) + _failDispl; }
     inline size_t       size()        { LIMITED_METHOD_CONTRACT;  return sizeof(DispatchStub); }
 
@@ -153,7 +160,7 @@ private:
     size_t  _expectedMT;        // xx xx xx xx              expectedMT        ; If you change it, change also AdjustContextForVirtualStub in excep.cpp!!!
     BYTE    jmpOp1[2];          // 0f 85        jne                 
     DISPL   _failDispl;         // xx xx xx xx              failEntry         ;must be forward jmp for perf reasons
-    BYTE jmpOp2;                // e9           jmp     
+    BYTE jmpOp2;                // e9           jmp
     DISPL   _implDispl;         // xx xx xx xx              implTarget
 #else //STUB_LOGGING
     BYTE    _entryPoint [2];    // ff 05        inc
@@ -199,12 +206,10 @@ struct DispatchHolder
     static DispatchHolder*  FromDispatchEntry(PCODE dispatchEntry);
 
 private:
-    //force expectedMT to be aligned since used as key in hash tables.
-#ifndef STUB_LOGGING
-    BYTE align[(sizeof(void*)-(offsetof(DispatchStub,_expectedMT)%sizeof(void*)))%sizeof(void*)];
-#endif
+    // Force _implDispl to be aligned so that it is backpatchable for tiering
+    BYTE align[(sizeof(void*) - (offsetof(DispatchStub, _implDispl) % sizeof(void*))) % sizeof(void*)];
     DispatchStub _stub;
-    BYTE pad[(sizeof(void*)-(sizeof(DispatchStub)%sizeof(void*))+offsetof(DispatchStub,_expectedMT))%sizeof(void*)];	//complete DWORD
+    BYTE pad[(sizeof(void*) - (sizeof(DispatchStub) % sizeof(void*)) + offsetof(DispatchStub, _implDispl)) % sizeof(void*)];	//complete DWORD
 };
 
 struct ResolveStub;
@@ -360,6 +365,66 @@ private:
     BYTE pad[(sizeof(void*)-((sizeof(ResolveStub))%sizeof(void*))+offsetof(ResolveStub,_token))%sizeof(void*)];	//fill out DWORD
 //#endif
 };
+
+/*VTableCallStub**************************************************************************************
+These are jump stubs that perform a vtable-base virtual call. These stubs assume that an object is placed
+in the first argument register (this pointer). From there, the stub extracts the MethodTable pointer, followed by the
+vtable pointer, and finally jumps to the target method at a given slot in the vtable.
+*/
+struct VTableCallStub
+{
+    friend struct VTableCallHolder;
+
+    inline size_t size()
+    {
+        LIMITED_METHOD_CONTRACT;
+
+        BYTE* pStubCode = (BYTE *)this;
+
+        size_t cbSize = 2;                                      // First mov instruction
+        cbSize += (pStubCode[cbSize + 1] == 0x80 ? 6 : 3);      // Either 8B 80 or 8B 40: mov eax,[eax+offset]
+        cbSize += (pStubCode[cbSize + 1] == 0xa0 ? 6 : 3);      // Either FF A0 or FF 60: jmp dword ptr [eax+slot]
+        cbSize += 4;                                            // Slot value (data storage, not a real instruction)
+
+        return cbSize;
+    }
+
+    inline PCODE        entryPoint()        const { LIMITED_METHOD_CONTRACT;  return (PCODE)&_entryPoint[0]; }
+
+    inline size_t token()
+    {
+        LIMITED_METHOD_CONTRACT;
+        DWORD slot = *(DWORD*)(reinterpret_cast<BYTE*>(this) + size() - 4);
+        return DispatchToken::CreateDispatchToken(slot).To_SIZE_T();
+    }
+
+private:
+    BYTE    _entryPoint[0];         // Dynamically sized stub. See Initialize() for more details.
+};
+
+/* VTableCallHolders are the containers for VTableCallStubs, they provide for any alignment of
+stubs as necessary.  */
+struct VTableCallHolder
+{
+    void  Initialize(unsigned slot);
+
+    VTableCallStub* stub() { LIMITED_METHOD_CONTRACT;  return reinterpret_cast<VTableCallStub *>(this); }
+
+    static size_t GetHolderSize(unsigned slot)
+    {
+        STATIC_CONTRACT_WRAPPER;
+        unsigned offsetOfIndirection = MethodTable::GetVtableOffset() + MethodTable::GetIndexOfVtableIndirection(slot) * TARGET_POINTER_SIZE;
+        unsigned offsetAfterIndirection = MethodTable::GetIndexAfterVtableIndirection(slot) * TARGET_POINTER_SIZE;
+        return 2 + (offsetOfIndirection >= 0x80 ? 6 : 3) + (offsetAfterIndirection >= 0x80 ? 6 : 3) + 4;
+    }
+
+    static VTableCallHolder* VTableCallHolder::FromVTableCallEntry(PCODE entry) { LIMITED_METHOD_CONTRACT; return (VTableCallHolder*)entry; }
+
+private:
+    // VTableCallStub follows here. It is dynamically sized on allocation because it could 
+    // use short/long instruction sizes for the mov/jmp, depending on the slot value.
+};
+
 #include <poppack.h>
 
 
@@ -539,120 +604,6 @@ __declspec (naked) void ResolveWorkerAsmStub()
     }
 }
 
-#ifdef FEATURE_REMOTING
-/*  For an in-context dispatch, we will find the target. This
-    is the slow path, and erects a MachState structure for 
-    creating a HelperMethodFrame
-
-    Entry stack:
-            dispatch token
-            return address of caller to stub
-
-   Call stack:
-            pointer to StubDispatchFrame
-            call site
-            dispatch token
-            StubDispatchFrame
-                GSCookie
-                negspace
-                vptr
-                datum
-                ArgumentRegisters (ecx, edx)
-                CalleeSavedRegisters (ebp, ebx, esi, edi)
-            return address of caller to stub
-*/    
-__declspec (naked) void InContextTPDispatchAsmStub()
-{
-    CANNOT_HAVE_CONTRACT;
-
-    __asm {
-        // Pop dispatch token
-        pop         eax
-
-        // push ebp-frame
-        push        ebp
-        mov         ebp,esp
-
-        // save CalleeSavedRegisters
-        push        ebx
-        push        esi
-        push        edi
-
-        // push ArgumentRegisters
-        push        ecx
-        push        edx
-
-        mov         esi, esp
-
-        push        eax                     // token
-        push        esi                     // pTransitionContext
-
-        // Make the call
-        call    VSD_GetTargetForTPWorker
-
-        // From here on, mustn't trash eax
-        
-        // pop ArgumentRegisters
-        pop     edx
-        pop     ecx
-
-        // pop CalleeSavedRegisters
-        pop edi
-        pop esi
-        pop ebx
-        pop ebp
-
-        // Now jump to the target
-        jmp     eax             // continue on into the method
-    }
-}
-
-/*  For an in-context dispatch, we will try to find the target in
-    the resolve cache. If this fails, we will jump to the full
-    version of InContextTPDispatchAsmStub
-    
-    Entry stack:
-        dispatch slot number of interface MD
-        caller return address
-    ECX: this object
-*/    
-__declspec (naked) void InContextTPQuickDispatchAsmStub()
-{
-    CANNOT_HAVE_CONTRACT;
-
-    __asm {
-        // Spill registers
-        push        ecx
-        push        edx
-
-        // Arg 2 -  token
-        mov         eax, [esp + 8]
-        push        eax
-
-        // Arg 1 - this
-        push        ecx
-
-        // Make the call
-        call        VSD_GetTargetForTPWorkerQuick
-
-        // Restore registers
-        pop         edx
-        pop         ecx
-
-        // Test to see if we found a target
-        test        eax, eax
-        jnz         TargetFound
-
-        // If no target, jump to the slow worker
-        jmp         InContextTPDispatchAsmStub
-
-    TargetFound:
-        // We got a target, so pop off the token and jump to it
-        add         esp,4
-        jmp         eax
-    }
-}
-#endif // FEATURE_REMOTING
 
 /* Call the callsite back patcher.  The fail stub piece of the resolver is being
 call too often, i.e. dispatch stubs are failing the expect MT test too often.
@@ -695,7 +646,7 @@ BOOL isDelegateCall(BYTE *interiorPtr)
 {
     LIMITED_METHOD_CONTRACT;
 
-    if (GCHeap::GetGCHeap()->IsHeapPointer((void*)interiorPtr))
+    if (GCHeapUtilities::GetGCHeap()->IsHeapPointer((void*)interiorPtr))
     {
         Object *delegate = (Object*)(interiorPtr - DelegateObject::GetOffsetOfMethodPtrAux());
         VALIDATEOBJECTREF(ObjectToOBJECTREF(delegate));
@@ -802,8 +753,8 @@ DispatchStub dispatchInit;
 
 void DispatchHolder::InitializeStatic()
 {
-    // Check that _expectedMT is aligned in the DispatchHolder
-    static_assert_no_msg(((offsetof(DispatchHolder, _stub) + offsetof(DispatchStub,_expectedMT)) % sizeof(void*)) == 0);
+    // Check that _implDispl is aligned in the DispatchHolder for backpatching
+    static_assert_no_msg(((offsetof(DispatchHolder, _stub) + offsetof(DispatchStub, _implDispl)) % sizeof(void*)) == 0);
     static_assert_no_msg((sizeof(DispatchHolder) % sizeof(void*)) == 0);
 
 #ifndef STUB_LOGGING
@@ -1012,6 +963,49 @@ ResolveHolder* ResolveHolder::FromResolveEntry(PCODE resolveEntry)
     return resolveHolder;
 }
 
+void VTableCallHolder::Initialize(unsigned slot)
+{
+    unsigned offsetOfIndirection = MethodTable::GetVtableOffset() + MethodTable::GetIndexOfVtableIndirection(slot) * TARGET_POINTER_SIZE;
+    unsigned offsetAfterIndirection = MethodTable::GetIndexAfterVtableIndirection(slot) * TARGET_POINTER_SIZE;
+    _ASSERTE(MethodTable::VTableIndir_t::isRelative == false /* TODO: NYI */);
+
+    VTableCallStub* pStub = stub();
+    BYTE* p = (BYTE*)pStub->entryPoint();
+
+    // mov eax,[ecx] : eax = MethodTable pointer
+    *(UINT16*)p = 0x018b; p += 2;
+
+    // mov eax,[eax+vtable offset] : eax = vtable pointer
+    if (offsetOfIndirection >= 0x80)
+    {
+        *(UINT16*)p = 0x808b; p += 2;
+        *(UINT32*)p = offsetOfIndirection; p += 4;
+    }
+    else
+    {
+        *(UINT16*)p = 0x408b; p += 2;
+        *p++ = (BYTE)offsetOfIndirection;
+    }
+
+    // jmp dword ptr [eax+slot]
+    if (offsetAfterIndirection >= 0x80)
+    {
+        *(UINT16*)p = 0xa0ff; p += 2;
+        *(UINT32*)p = offsetAfterIndirection; p += 4;
+    }
+    else
+    {
+        *(UINT16*)p = 0x60ff; p += 2;
+        *p++ = (BYTE)offsetAfterIndirection;
+    }
+
+    // Store the slot value here for convenience. Not a real instruction (unreachable anyways)
+    *(UINT32*)p = slot; p += 4;
+
+    _ASSERT(p == (BYTE*)stub()->entryPoint() + VTableCallHolder::GetHolderSize(slot));
+    _ASSERT(stub()->size() == VTableCallHolder::GetHolderSize(slot));
+}
+
 #endif // DACCESS_COMPILE
 
 VirtualCallStubManager::StubKind VirtualCallStubManager::predictStubKind(PCODE stubStartAddress)
@@ -1048,6 +1042,10 @@ VirtualCallStubManager::StubKind VirtualCallStubManager::predictStubKind(PCODE s
         else if (firstWord == 0x8b50)
         {
             stubKind = SK_RESOLVE;
+        }
+        else if (firstWord == 0x018b)
+        {
+            stubKind = SK_VTABLECALL;
         }
         else
         {

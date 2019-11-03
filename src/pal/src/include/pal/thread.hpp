@@ -53,7 +53,7 @@ namespace CorUnix
         LPVOID lpParameter,
         DWORD dwCreationFlags,
         PalThreadType eThreadType,
-        LPDWORD lpThreadId,
+        SIZE_T* pThreadId,
         HANDLE *phThread
         );
 
@@ -91,11 +91,6 @@ namespace CorUnix
         LPSECURITY_ATTRIBUTES lpThreadAttributes,
         CPalThread **ppDummyThread,
         HANDLE *phThread
-        );
-
-    PAL_ERROR
-    InitializeGlobalThreadData(
-        void
         );
 
     PAL_ERROR
@@ -212,7 +207,7 @@ namespace CorUnix
     {
         friend
             PAL_ERROR
-            CorUnix::InternalCreateThread(
+            InternalCreateThread(
                 CPalThread *,
                 LPSECURITY_ATTRIBUTES,
                 DWORD,
@@ -220,7 +215,7 @@ namespace CorUnix
                 LPVOID,
                 DWORD,
                 PalThreadType,
-                LPDWORD,
+                SIZE_T*,
                 HANDLE*
                 );
 
@@ -243,12 +238,6 @@ namespace CorUnix
 
         friend
             PAL_ERROR
-            InitializeGlobalThreadData(
-                void
-                );
-
-        friend
-            PAL_ERROR
             CreateThreadData(
                 CPalThread **ppThread
                 );
@@ -261,8 +250,6 @@ namespace CorUnix
                 HANDLE *phThread
                 );
 
-        friend CatchHardwareExceptionHolder;
-        
     private:
 
         CPalThread *m_pNext;
@@ -337,13 +324,8 @@ namespace CorUnix
         void* m_stackBase;
         // Limit address of the stack of this thread
         void* m_stackLimit;
-
-        // The default stack size of a newly created thread (currently 256KB)
-        // when the dwStackSize paramter of PAL_CreateThread()
-        // is zero. This value can be set by setting the
-        // environment variable PAL_THREAD_DEFAULT_STACK_SIZE
-        // (the value should be in bytes and in hex).
-        static DWORD s_dwDefaultThreadStackSize; 
+        // Signal handler's alternate stack to help with stack overflow
+        void* m_alternateStack;
 
         //
         // The thread entry routine (called from InternalCreateThread)
@@ -407,7 +389,8 @@ namespace CorUnix
             m_fStartStatus(FALSE),
             m_fStartStatusSet(FALSE),
             m_stackBase(NULL),
-            m_stackLimit(NULL)
+            m_stackLimit(NULL),
+            m_alternateStack(NULL)
 #ifdef FEATURE_PAL_SXS
           , m_fInPal(TRUE)
 #endif // FEATURE_PAL_SXS
@@ -570,6 +553,18 @@ namespace CorUnix
             return m_hardwareExceptionHolderCount > 0;
         }
 
+        inline void
+        IncrementHardwareExceptionHolderCount()
+        {
+            ++m_hardwareExceptionHolderCount;
+        }
+
+        inline void
+        DecrementHardwareExceptionHolderCount()
+        {
+            --m_hardwareExceptionHolderCount;
+        }
+
         LPTHREAD_START_ROUTINE
         GetStartAddress(
             void
@@ -641,6 +636,18 @@ namespace CorUnix
         {
             m_pNext = pNext;
         };
+
+#if !HAVE_MACH_EXCEPTIONS
+        BOOL
+        EnsureSignalAlternateStack(
+            void
+            );
+
+        void 
+        FreeSignalAlternateStack(
+            void
+            );
+#endif // !HAVE_MACH_EXCEPTIONS
 
         void
         AddThreadReference(
@@ -821,18 +828,32 @@ Abstract:
 
 --*/
 #if defined(__linux__)
-#define THREADSilentGetCurrentThreadId() (SIZE_T)syscall(SYS_gettid)
+#define PlatformGetCurrentThreadId() (SIZE_T)syscall(SYS_gettid)
 #elif defined(__APPLE__)
-inline SIZE_T THREADSilentGetCurrentThreadId() {
+inline SIZE_T PlatformGetCurrentThreadId() {
     uint64_t tid;
     pthread_threadid_np(pthread_self(), &tid);
     return (SIZE_T)tid;
 }
+#elif defined(__FreeBSD__)
+#include <sys/thr.h>
+inline SIZE_T PlatformGetCurrentThreadId() {
+    long tid;
+    thr_self(&tid);
+    return (SIZE_T)tid;
+}
 #elif defined(__NetBSD__)
 #include <lwp.h>
-#define THREADSilentGetCurrentThreadId() (SIZE_T)_lwp_self()
+#define PlatformGetCurrentThreadId() (SIZE_T)_lwp_self()
 #else
-#define THREADSilentGetCurrentThreadId() (SIZE_T)pthread_self()
+#define PlatformGetCurrentThreadId() (SIZE_T)pthread_self()
 #endif
+
+inline SIZE_T THREADSilentGetCurrentThreadId() {
+    static __thread SIZE_T tid;
+    if (!tid)
+        tid = PlatformGetCurrentThreadId();
+    return tid;
+}
 
 #endif // _PAL_THREAD_HPP_

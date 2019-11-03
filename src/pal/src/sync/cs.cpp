@@ -627,7 +627,7 @@ namespace CorUnix
         pPalCriticalSection->LockCount         = 0;
         pPalCriticalSection->RecursionCount    = 0;
         pPalCriticalSection->SpinCount         = dwSpinCount;
-        pPalCriticalSection->OwningThread      = NULL;
+        pPalCriticalSection->OwningThread      = 0;
         pPalCriticalSection->LockSemaphore     = NULL;
         pPalCriticalSection->fInternal         = fInternal;
 
@@ -877,7 +877,7 @@ namespace CorUnix
         }
 
         // Reset CS ownership
-        pPalCriticalSection->OwningThread = NULL;
+        pPalCriticalSection->OwningThread = 0;
 
         // Load the current LockCount value
         lVal = pPalCriticalSection->LockCount;
@@ -1141,7 +1141,7 @@ namespace CorUnix
     Function:
       CorUnix::PALCS_WaitOnCS
 
-    Waits on a CS owned by anothr thread. It returns PalCsReturnWaiterAwakened 
+    Waits on a CS owned by another thread. It returns PalCsReturnWaiterAwakened 
     if the thread actually waited on the CS and it has been awakened on CS 
     release. It returns PalCsWaiterDidntWait if another thread is currently 
     fully-initializing the CS and therefore the current thread couldn't wait

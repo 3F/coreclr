@@ -519,7 +519,6 @@ CMiniMdBase::SchemaPopulate(
     {
         // No it's not. Is this an older version that we support?
         
-#ifndef FEATURE_METADATA_STANDALONE_WINRT
         // Is this v1.0?
         if ((m_Schema.m_major == METAMODEL_MAJOR_VER_V1_0) && 
             (m_Schema.m_minor == METAMODEL_MINOR_VER_V1_0))
@@ -535,7 +534,6 @@ CMiniMdBase::SchemaPopulate(
             m_TableDefs[TBL_GenericParam].m_pColDefs = BYTEARRAY_TO_COLDES(s_GenericParamCol);
         }
         else
-#endif //!FEATURE_METADATA_STANDALONE_WINRT
         {   // We don't support this version of the metadata
             Debug_ReportError("Unsupported version of MetaData.");
             return PostError(CLDB_E_FILE_OLDVER, m_Schema.m_major, m_Schema.m_minor);
@@ -862,86 +860,6 @@ CMiniMdBase::GetCountRecs(
     _ASSERTE(ixTbl < TBL_COUNT);
     return m_Schema.m_cRecs[ixTbl];
 } // CMiniMdBase::GetCountRecs
-
-//*****************************************************************************
-// Search a table for multiple (adjacent) rows containing the given
-//  key value.  EG, InterfaceImpls all point back to the implementing class.
-//*****************************************************************************
-__checkReturn 
-HRESULT 
-CMiniMdBase::SearchTableForMultipleRows(
-    ULONG       ixTbl,      // Table to search.
-    CMiniColDef sColumn,    // Sorted key column, containing search value.
-    ULONG       ulTarget,   // Target for search.
-    RID        *pEnd,       // [OPTIONAL, OUT] 
-    RID        *pFoundRid)  // First RID found, or 0.
-{
-    HRESULT hr;
-    ULONG   ridBegin;   // RID of first entry.
-    ULONG   ridEnd;     // RID of first entry past last entry.
-    
-    // Search for any entry in the table.
-    IfFailRet(vSearchTable(ixTbl, sColumn, ulTarget, &ridBegin));
-
-    // If nothing found, return invalid RID.
-    if (ridBegin == 0)
-    {
-        if (pEnd != NULL)
-        {
-            *pEnd = 0;
-        }
-        *pFoundRid = 0;
-        return S_OK;
-    }
-
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    // If you change the rows touched while searching, please update
-    // CMiniMdRW::GetHotMetadataTokensSearchAware
-    // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-    
-    // End will be at least one larger than found record.
-    ridEnd = ridBegin + 1;
-    
-    // Search back to start of group.
-    for (;;)
-    {
-        void *pRow;
-        if (ridBegin <= 1)
-        {
-            break;
-        }
-        IfFailRet(vGetRow(ixTbl, ridBegin-1, &pRow));
-        if (getIX(pRow, sColumn) != ulTarget)
-        {
-            break;
-        }
-        --ridBegin;
-    }
-    
-    // If desired, search forward to end of group.
-    if (pEnd != NULL)
-    {
-        for (;;)
-        {
-            void *pRow;
-            if (ridEnd > GetCountRecs(ixTbl))
-            {
-                break;
-            }
-            IfFailRet(vGetRow(ixTbl, ridEnd, &pRow));
-            if (getIX(pRow, sColumn) != ulTarget)
-            {
-                break;
-            }
-            ++ridEnd;
-        }
-        *pEnd = ridEnd;
-    }
-    
-    *pFoundRid = ridBegin;
-    return S_OK;
-} // CMiniMdBase::SearchTableForMultipleRows
 
 
 #if BIGENDIAN

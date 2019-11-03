@@ -10,8 +10,6 @@
  ** This will typically be used by compilers to generate their compiled     **
  ** output executable.                                                      **
  **                                                                         **
- ** The implemenation lives in mscorpe.dll                                  **
- **                                                                         **
  *****************************************************************************/
 
 /*
@@ -27,15 +25,8 @@
   ICLRRuntimeInfo * pCLRRuntimeInfo;
   pMetaHost->GetRuntime(wszClrVersion, IID_ICLRRuntimeInfo, &pCLRRuntimeInfo);
   
-  // Step #2 ... Load mscorpe.dll and get its entrypoints
-  HMODULE hModule;
-  pCLRRuntimeInfo->LoadLibrary(L"mscorpe.dll", &hModule);
-  
-  PFN_CreateICeeFileGen pfnCreateICeeFileGen = (PFN_CreateICeeFileGen)::GetProcAddress("CreateICeeFileGen"); // Windows API
-  PFN_DestroyICeeFileGen pfnDestroyICeeFileGen = (PFN_DestroyICeeFileGen)::GetProcAddress("DestroyICeeFileGen"); // Windows API
-  
-  // Step #3 ... Use mscorpe.dll APIs
-  pfnCreateICeeFileGen(...);    // Get a ICeeFileGen
+  // Step #2 ... use mscorpe APIs to create a file generator
+  CreateICeeFileGen(...);       // Get a ICeeFileGen
   
   CreateCeeFile(...);           // Get a HCEEFILE (called for every output file needed)
   SetOutputFileName(...);       // Set the name for the output file
@@ -44,7 +35,7 @@
   EmitMetaDataEx(pEmit);        // Write out the metadata
   GenerateCeeFile(...);         // Write out the file. Implicitly calls LinkCeeFile and FixupCeeFile
   
-  pfnDestroyICeeFileGen(...);   // Release the ICeeFileGen object
+  DestroyICeeFileGen(...);      // Release the ICeeFileGen object
 */
 
 
@@ -58,10 +49,8 @@ class ICeeFileGen;
 
 typedef void *HCEEFILE;
 
-#ifdef FEATURE_CORECLR
 EXTERN_C HRESULT __stdcall CreateICeeFileGen(ICeeFileGen** pCeeFileGen);
 EXTERN_C HRESULT __stdcall DestroyICeeFileGen(ICeeFileGen ** ppCeeFileGen);
-#endif
 
 typedef HRESULT (__stdcall * PFN_CreateICeeFileGen)(ICeeFileGen ** ceeFileGen);  // call this to instantiate an ICeeFileGen interface
 typedef HRESULT (__stdcall * PFN_DestroyICeeFileGen)(ICeeFileGen ** ceeFileGen); // call this to delete an ICeeFileGen
@@ -72,12 +61,13 @@ typedef HRESULT (__stdcall * PFN_DestroyICeeFileGen)(ICeeFileGen ** ceeFileGen);
 #define ICEE_CREATE_FILE_STRIP_RELOCS  0x00000008  // strip the .reloc section
 #define ICEE_CREATE_FILE_EMIT_FIXUPS   0x00000010  // emit fixups for use by Vulcan
 
-#define ICEE_CREATE_MACHINE_MASK       0x0000FF00  // space for up to 256 machine targets
+#define ICEE_CREATE_MACHINE_MASK       0x0000FF00  // space for up to 256 machine targets (note: most users just do a bit check, not an equality compare after applying the mask)
 #define ICEE_CREATE_MACHINE_ILLEGAL    0x00000000  // An illegal machine name
 #define ICEE_CREATE_MACHINE_I386       0x00000100  // Create a IMAGE_FILE_MACHINE_I386 
 #define ICEE_CREATE_MACHINE_IA64       0x00000200  // Create a IMAGE_FILE_MACHINE_IA64
 #define ICEE_CREATE_MACHINE_AMD64      0x00000400  // Create a IMAGE_FILE_MACHINE_AMD64
 #define ICEE_CREATE_MACHINE_ARM        0x00000800  // Create a IMAGE_FILE_MACHINE_ARMNT
+#define ICEE_CREATE_MACHINE_ARM64      0x00001000  // Create a IMAGE_FILE_MACHINE_ARM64
 
     // Pass this to CreateCeeFileEx to create a pure IL Exe or DLL
 #define ICEE_CREATE_FILE_PURE_IL  ICEE_CREATE_FILE_PE32         | \
@@ -86,6 +76,8 @@ typedef HRESULT (__stdcall * PFN_DestroyICeeFileGen)(ICeeFileGen ** ceeFileGen);
 
 class ICeeFileGen {
   public:
+    virtual ~ICeeFileGen() = default;
+
     virtual HRESULT CreateCeeFile(HCEEFILE *ceeFile); // call this to instantiate a file handle
 
     // <TODO>@FUTURE: remove this function. We no longer support mdScope.</TODO>

@@ -31,6 +31,7 @@ Abstract:
 #include "pal/file.hpp"
 #include "pal/malloc.hpp"
 
+#include <stddef.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -43,6 +44,8 @@ Abstract:
 using namespace CorUnix;
 
 SET_DEFAULT_DEBUG_CHANNEL(VIRTUAL);
+
+#include "pal/utils.h"
 
 //
 // The mapping critical section guards access to the list
@@ -124,12 +127,26 @@ FileMappingInitializationRoutine(
     void *pProcessLocalData
     );
 
+void
+CFileMappingImmutableDataCopyRoutine(
+    void *pImmData,
+    void *pImmDataTarget
+    );
+
+void
+CFileMappingImmutableDataCleanupRoutine(
+    void *pImmData
+    );
+
 CObjectType CorUnix::otFileMapping(
                 otiFileMapping,
                 FileMappingCleanupRoutine,
                 FileMappingInitializationRoutine,
                 sizeof(CFileMappingImmutableData),
+                CFileMappingImmutableDataCopyRoutine,
+                CFileMappingImmutableDataCleanupRoutine,
                 sizeof(CFileMappingProcessLocalData),
+                NULL,   // No process local data cleanup routine
                 0,
                 PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY,
                 CObjectType::SecuritySupported,
@@ -143,6 +160,33 @@ CObjectType CorUnix::otFileMapping(
                 );
 
 CAllowedObjectTypes aotFileMapping(otiFileMapping);
+
+void
+CFileMappingImmutableDataCopyRoutine(
+    void *pImmData,
+    void *pImmDataTarget
+    )
+{
+    PAL_ERROR palError = NO_ERROR;
+    CFileMappingImmutableData *pImmutableData = (CFileMappingImmutableData *) pImmData;
+    CFileMappingImmutableData *pImmutableDataTarget = (CFileMappingImmutableData *) pImmDataTarget;
+
+    if (NULL != pImmutableData->lpFileName)
+    {
+        pImmutableDataTarget->lpFileName = strdup(pImmutableData->lpFileName);
+    }
+}
+
+void
+CFileMappingImmutableDataCleanupRoutine(
+    void *pImmData
+    )
+{
+    PAL_ERROR palError = NO_ERROR;
+    CFileMappingImmutableData *pImmutableData = (CFileMappingImmutableData *) pImmData;
+
+    free(pImmutableData->lpFileName);
+}
 
 void
 FileMappingCleanupRoutine(
@@ -177,7 +221,7 @@ FileMappingCleanupRoutine(
 
         if (pImmutableData->bPALCreatedTempFile)
         {
-            unlink(pImmutableData->szFileName);
+            unlink(pImmutableData->lpFileName);
         }
     }
 
@@ -238,8 +282,8 @@ FileMappingInitializationRoutine(
         reinterpret_cast<CFileMappingProcessLocalData *>(pvProcessLocalData);
 
     pProcessLocalData->UnixFd = InternalOpen(
-        pImmutableData->szFileName,
-        MAPProtectionToFileOpenFlags(pImmutableData->flProtect)
+        pImmutableData->lpFileName,
+        MAPProtectionToFileOpenFlags(pImmutableData->flProtect) | O_CLOEXEC
         );
 
     if (-1 == pProcessLocalData->UnixFd)
@@ -494,16 +538,18 @@ CorUnix::InternalCreateFileMapping(
         //
         
         /* Anonymous mapped files. */
-        if (strcpy_s(pImmutableData->szFileName, sizeof(pImmutableData->szFileName), "/dev/zero") != SAFECRT_SUCCESS)
+        _ASSERTE(pImmutableData->lpFileName == NULL);
+        pImmutableData->lpFileName = strdup("/dev/zero");
+        if (pImmutableData->lpFileName == NULL)
         {
-            ERROR( "strcpy_s failed!\n" );
+            ASSERT("Unable to copy string\n");
             palError = ERROR_INTERNAL_ERROR;
             goto ExitInternalCreateFileMapping;
         }
 
 #if HAVE_MMAP_DEV_ZERO
 
-        UnixFd = InternalOpen(pImmutableData->szFileName, O_RDWR);
+        UnixFd = InternalOpen(pImmutableData->lpFileName, O_RDWR | O_CLOEXEC);
         if ( -1 == UnixFd )
         {
             ERROR( "Unable to open the file.\n");
@@ -580,7 +626,7 @@ CorUnix::InternalCreateFileMapping(
             // information, though...
             //
             
-            UnixFd = dup(pFileLocalData->unix_fd);
+            UnixFd = fcntl(pFileLocalData->unix_fd, F_DUPFD_CLOEXEC, 0); // dup, but with CLOEXEC
             if (-1 == UnixFd)
             {
                 ERROR( "Unable to duplicate the Unix file descriptor!\n" );
@@ -591,10 +637,12 @@ CorUnix::InternalCreateFileMapping(
                 }
                 goto ExitInternalCreateFileMapping;
             }
-  
-            if (strcpy_s(pImmutableData->szFileName, sizeof(pImmutableData->szFileName), pFileLocalData->unix_filename) != SAFECRT_SUCCESS)
+
+            _ASSERTE(pImmutableData->lpFileName == NULL);
+            pImmutableData->lpFileName = strdup(pFileLocalData->unix_filename);
+            if (pImmutableData->lpFileName == NULL)
             {
-                ERROR( "strcpy_s failed!\n" );
+                ASSERT("Unable to copy string\n");
                 palError = ERROR_INTERNAL_ERROR;
                 if (NULL != pFileLocalDataLock)
                 {
@@ -616,7 +664,7 @@ CorUnix::InternalCreateFileMapping(
 
             /* Create a temporary file on the filesystem in order to be 
                shared across processes. */
-            palError = MAPCreateTempFile(pThread, &UnixFd, pImmutableData->szFileName);
+            palError = MAPCreateTempFile(pThread, &UnixFd, pImmutableData->lpFileName);
             if (NO_ERROR != palError)
             {
                 ERROR("Unable to create the temporary file.\n");
@@ -764,7 +812,7 @@ ExitInternalCreateFileMapping:
 
         if (bPALCreatedTempFile)
         {
-            unlink(pImmutableData->szFileName);
+            unlink(pImmutableData->lpFileName);
         }
 
         if (-1 != UnixFd)
@@ -872,63 +920,6 @@ OpenFileMappingW(
     LOGEXIT("OpenFileMappingW returning %p.\n", hFileMapping);
     PERF_EXIT(OpenFileMappingW);
     return hFileMapping;
-}
-
-PAL_ERROR
-CorUnix::InternalOpenFileMapping(
-    CPalThread *pThread,
-    DWORD dwDesiredAccess,
-    BOOL bInheritHandle,
-    LPCWSTR lpName,
-    HANDLE *phMapping
-    )
-{
-    PAL_ERROR palError = NO_ERROR;
-    IPalObject *pFileMapping = NULL;
-    CPalString sObjectName(lpName);
-
-    if ( MAPContainsInvalidFlags( dwDesiredAccess ) ) 
-    {
-        ASSERT( "dwDesiredAccess can be one or more of FILE_MAP_READ, " 
-               "FILE_MAP_WRITE, FILE_MAP_COPY or FILE_MAP_ALL_ACCESS.\n" );
-        palError = ERROR_INVALID_PARAMETER;
-        goto ExitInternalOpenFileMapping;
-    }
-
-    palError = g_pObjectManager->LocateObject(
-        pThread,
-        &sObjectName,
-        &aotFileMapping, 
-        &pFileMapping
-        );
-
-    if (NO_ERROR != palError)
-    {
-        goto ExitInternalOpenFileMapping;
-    }
-
-    palError = g_pObjectManager->ObtainHandleForObject(
-        pThread,
-        pFileMapping,
-        dwDesiredAccess,
-        bInheritHandle,
-        NULL,
-        phMapping
-        );
-
-    if (NO_ERROR != palError)
-    {
-        goto ExitInternalOpenFileMapping;
-    }
-
-ExitInternalOpenFileMapping:
-
-    if (NULL != pFileMapping)
-    {
-        pFileMapping->ReleaseReference(pThread);
-    }
-    
-    return palError;
 }
 
 /*++
@@ -1049,79 +1040,6 @@ MapViewOfFileEx(
     LOGEXIT( "MapViewOfFileEx returning %p.\n", pvMappedBaseAddress );
     PERF_EXIT(MapViewOfFileEx);
     return pvMappedBaseAddress;
-}
-
-/*++
-Function:
-  FlushViewOfFile
-
-See MSDN doc.
---*/
-BOOL
-PALAPI
-FlushViewOfFile(
-    IN LPVOID lpBaseAddress,
-    IN SIZE_T dwNumberOfBytesToFlush)
-{
-    PAL_ERROR palError = NO_ERROR;
-    CPalThread *pThread = NULL;
-    PMAPPED_VIEW_LIST pView = NULL;
-    BOOL fResult = TRUE;
-
-    PERF_ENTRY(FlushViewOfFile);
-    ENTRY("FlushViewOfFile(lpBaseAddress=%p, dwNumberOfBytesToFlush=%u)\n",
-          lpBaseAddress, dwNumberOfBytesToFlush);
-
-    pThread = InternalGetCurrentThread();
-
-    InternalEnterCriticalSection(pThread, &mapping_critsec);
-
-    pView = MAPGetViewForAddress(lpBaseAddress);
-    if (NULL == pView)
-    {
-        ERROR("lpBaseAddress has to be the address returned by MapViewOfFile[Ex]");
-        palError = ERROR_INVALID_HANDLE;
-        goto Exit;
-    }
-
-    if (dwNumberOfBytesToFlush == 0)
-    {
-        dwNumberOfBytesToFlush = pView->NumberOfBytesToMap;
-    }
-
-    // <ROTORTODO>we should only use MS_SYNC if the file has been opened
-    // with FILE_FLAG_WRITE_THROUGH
-    if (msync(lpBaseAddress, dwNumberOfBytesToFlush, MS_SYNC) == -1)
-    {
-        if (errno == EINVAL)
-        {
-            WARN("msync failed; %s\n", strerror(errno));
-            palError = ERROR_INVALID_PARAMETER;
-        }
-        else if (errno == EIO)
-        {
-            WARN("msync failed; %s\n", strerror(errno));
-            palError = ERROR_WRITE_FAULT;
-        }
-        else
-        {
-            ERROR("msync failed; %s\n", strerror(errno));
-            palError = ERROR_INTERNAL_ERROR;
-        }
-    }
-
-Exit:
-    InternalLeaveCriticalSection(pThread, &mapping_critsec);
-
-    if (NO_ERROR != palError)
-    {
-        fResult = FALSE;
-        pThread->SetLastError(palError);
-    }
-
-    LOGEXIT("FlushViewOfFile returning %d.\n", fResult);
-    PERF_EXIT(FlushViewOfFile);
-    return fResult;
 }
 
 
@@ -1345,7 +1263,7 @@ CorUnix::InternalMapViewOfFile(
                         ERROR( "Failed setting protections on reused mapping\n");
 
                         NativeMapHolderRelease(pThread, pReusedMapping->pNMHolder);
-                        InternalFree(pReusedMapping);
+                        free(pReusedMapping);
                         pReusedMapping = NULL;
                     }
                 }
@@ -1422,7 +1340,7 @@ CorUnix::InternalMapViewOfFile(
             {
                 pNewView->pFileMapping->ReleaseReference(pThread);
                 RemoveEntryList(&pNewView->Link);
-                InternalFree(pNewView);
+                free(pNewView);
                 palError = ERROR_INTERNAL_ERROR;
             }
 #endif // ONE_SHARED_MAPPING_PER_FILEREGION_PER_PROCESS
@@ -1507,7 +1425,7 @@ CorUnix::InternalUnmapViewOfFile(
 
     RemoveEntryList(&pView->Link);
     pMappingObject = pView->pFileMapping;
-    InternalFree(pView);
+    free(pView);
     
 InternalUnmapViewOfFileExit:
 
@@ -1744,7 +1662,7 @@ static INT MAPFileMapToMmapFlags( DWORD flags )
     else if ( FILE_MAP_WRITE == flags )
     {
         TRACE( "FILE_MAP_WRITE\n" );
-        /* The limitation of x86 archetecture
+        /* The limitation of x86 architecture
         means you cant have writable but not readable
         page. In Windows maps of FILE_MAP_WRITE can still be
         read from. */
@@ -2012,14 +1930,14 @@ BOOL MAPGetRegionInfo(LPVOID lpAddress,
         real_map_sz = pView->NumberOfBytesToMap;
 #endif
 
-        MappedSize = ((real_map_sz-1) & ~VIRTUAL_PAGE_MASK) + VIRTUAL_PAGE_SIZE; 
+        MappedSize = ALIGN_UP(real_map_sz, GetVirtualPageSize());
         if ( real_map_addr <= lpAddress && 
              (VOID *)((UINT_PTR)real_map_addr+MappedSize) > lpAddress )
         {
             if (lpBuffer)
             {
-                SIZE_T regionSize = MappedSize + (UINT_PTR) real_map_addr - 
-                       ((UINT_PTR) lpAddress & ~VIRTUAL_PAGE_MASK);
+                SIZE_T regionSize = MappedSize + (UINT_PTR) real_map_addr -
+                       ALIGN_DOWN((UINT_PTR)lpAddress, GetVirtualPageSize());
 
                 lpBuffer->BaseAddress = lpAddress;
                 lpBuffer->AllocationProtect = 0;
@@ -2168,7 +2086,7 @@ static LONG NativeMapHolderRelease(CPalThread *pThread, NativeMapHolder * thisNM
             TRACE( "Successfully unmapped %p (size=%lu)\n", 
                    thisNMH->address, (unsigned long)thisNMH->size);
         }
-        InternalFree (thisNMH);
+        free (thisNMH);
     }
     else if (ret < 0)
     {
@@ -2241,7 +2159,9 @@ MAPmmapAndRecord(
     PAL_ERROR palError = NO_ERROR;
     LPVOID pvBaseAddress = NULL;
 
-    pvBaseAddress = mmap(addr, len, prot, flags, fd, offset);
+    off_t adjust = offset & (GetVirtualPageSize() - 1);
+
+    pvBaseAddress = mmap(static_cast<char *>(addr) - adjust, len + adjust, prot, flags, fd, offset - adjust);
     if (MAP_FAILED == pvBaseAddress)
     {
         ERROR_(LOADER)( "mmap failed with code %d: %s.\n", errno, strerror( errno ) );
@@ -2335,25 +2255,13 @@ void * MAPMapPEFile(HANDLE hFile)
     //Step 1: Read the PE headers and reserve enough space for the whole image somewhere.
     IMAGE_DOS_HEADER dosHeader;
     IMAGE_NT_HEADERS ntHeader;
-    errno = 0;
-    if (0 != lseek(fd, 0, SEEK_SET))
-    {
-        palError = FILEGetLastErrorFromErrno();
-        ERROR_(LOADER)( "lseek failed\n" );
-        goto done;
-    }
-    if (sizeof(dosHeader) != read(fd, &dosHeader, sizeof(dosHeader)))
+    if (sizeof(dosHeader) != pread(fd, &dosHeader, sizeof(dosHeader), 0))
     {
         palError = FILEGetLastErrorFromErrno();
         ERROR_(LOADER)( "reading dos header failed\n" );
         goto done;
     }
-    if (dosHeader.e_lfanew != lseek(fd, dosHeader.e_lfanew, SEEK_SET))
-    {
-        palError = FILEGetLastErrorFromErrno();
-        goto done;
-    }
-    if (sizeof(ntHeader) != read(fd, &ntHeader, sizeof(ntHeader)))
+    if (sizeof(ntHeader) != pread(fd, &ntHeader, sizeof(ntHeader), dosHeader.e_lfanew))
     {
         palError = FILEGetLastErrorFromErrno();
         goto done;
@@ -2364,14 +2272,6 @@ void * MAPMapPEFile(HANDLE hFile)
         || (VAL16(IMAGE_NT_OPTIONAL_HDR_MAGIC) != VAL16(ntHeader.OptionalHeader.Magic) ) )
     {
         ERROR_(LOADER)( "Magic number mismatch\n" );
-        palError = ERROR_INVALID_PARAMETER;
-        goto done;
-    }
-
-    //this code requires that the file alignment be the same as the page alignment
-    if (ntHeader.OptionalHeader.FileAlignment < VIRTUAL_PAGE_SIZE)
-    {
-        ERROR_(LOADER)( "Optional header file alignment is bad\n" );
         palError = ERROR_INVALID_PARAMETER;
         goto done;
     }
@@ -2407,7 +2307,7 @@ void * MAPMapPEFile(HANDLE hFile)
             TRACE_(LOADER)("Forcing rebase of image\n");
         }
 
-        InternalFree(envVar);
+        free(envVar);
     }
 
     void * pForceRelocBase;
@@ -2416,7 +2316,7 @@ void * MAPMapPEFile(HANDLE hFile)
     {
         //if we're forcing relocs, create an anonymous mapping at the preferred base.  Only create the
         //mapping if we can create it at the specified address.
-        pForceRelocBase = mmap( (void*)preferredBase, VIRTUAL_PAGE_SIZE, PROT_NONE, MAP_ANON|MAP_FIXED, -1, 0 );
+        pForceRelocBase = mmap( (void*)preferredBase, GetVirtualPageSize(), PROT_NONE, MAP_ANON|MAP_FIXED|MAP_PRIVATE, -1, 0 );
         if (pForceRelocBase == MAP_FAILED)
         {
             TRACE_(LOADER)("Attempt to take preferred base of %p to force relocation failed\n", (void*)preferredBase);
@@ -2439,20 +2339,28 @@ void * MAPMapPEFile(HANDLE hFile)
     // We're going to start adding mappings to the mapping list, so take the critical section
     InternalEnterCriticalSection(pThread, &mapping_critsec);
 
-#if !defined(_AMD64_)
-    loadedBase = mmap((void*)preferredBase, virtualSize, PROT_NONE, MAP_ANON, -1, 0);
-#else // defined(_AMD64_)    
-    // First try to reserve virtual memory using ExecutableAllcator. This allows all PE images to be
+#ifdef BIT64
+    // First try to reserve virtual memory using ExecutableAllocator. This allows all PE images to be
     // near each other and close to the coreclr library which also allows the runtime to generate
-    // more efficient code (by avoiding usage of jump stubs).
-    loadedBase = ReserveMemoryFromExecutableAllocator(pThread, virtualSize);
+    // more efficient code (by avoiding usage of jump stubs). Alignment to a 64 KB granularity should
+    // not be necessary (alignment to page size should be sufficient), but see
+    // ExecutableMemoryAllocator::AllocateMemory() for the reason why it is done.
+    loadedBase = ReserveMemoryFromExecutableAllocator(pThread, ALIGN_UP(virtualSize, VIRTUAL_64KB));
+#endif // BIT64
+
     if (loadedBase == NULL)
     {
+        void *usedBaseAddr = NULL;
+#ifdef FEATURE_ENABLE_NO_ADDRESS_SPACE_RANDOMIZATION
+        if (g_useDefaultBaseAddr)
+        {
+            usedBaseAddr = (void*) preferredBase;
+        }
+#endif // FEATURE_ENABLE_NO_ADDRESS_SPACE_RANDOMIZATION
         // MAC64 requires we pass MAP_SHARED (or MAP_PRIVATE) flags - otherwise, the call is failed.
         // Refer to mmap documentation at http://www.manpagez.com/man/2/mmap/ for details.
-        loadedBase = mmap((void*)preferredBase, virtualSize, PROT_NONE, MAP_ANON|MAP_PRIVATE, -1, 0);
+        loadedBase = mmap(usedBaseAddr, virtualSize, PROT_NONE, MAP_ANON|MAP_PRIVATE, -1, 0);
     }
-#endif // !defined(_AMD64_)
 
     if (MAP_FAILED == loadedBase)
     {
@@ -2468,7 +2376,7 @@ void * MAPMapPEFile(HANDLE hFile)
     if (forceRelocs)
     {
         _ASSERTE(((SIZE_T)loadedBase) != preferredBase);
-        munmap(pForceRelocBase, VIRTUAL_PAGE_SIZE); // now that we've forced relocation, let the original address mapping go
+        munmap(pForceRelocBase, GetVirtualPageSize()); // now that we've forced relocation, let the original address mapping go
     }
     if (((SIZE_T)loadedBase) != preferredBase)
     {
@@ -2484,7 +2392,7 @@ void * MAPMapPEFile(HANDLE hFile)
     //separately.
 
     size_t headerSize;
-    headerSize = VIRTUAL_PAGE_SIZE; // if there are lots of sections, this could be wrong
+    headerSize = GetVirtualPageSize(); // if there are lots of sections, this could be wrong
 
     //first, map the PE header to the first page in the image.  Get pointers to the section headers
     palError = MAPmmapAndRecord(pFileObject, loadedBase,
@@ -2519,10 +2427,8 @@ void * MAPMapPEFile(HANDLE hFile)
         goto doneReleaseMappingCriticalSection;
     }
 
-    void* prevSectionBase;
-    prevSectionBase = loadedBase; // the first "section" for our purposes is the header
-    size_t prevSectionSizeInMemory;
-    prevSectionSizeInMemory = headerSize;
+    void* prevSectionEnd;
+    prevSectionEnd = (char*)loadedBase + headerSize; // the first "section" for our purposes is the header
     for (unsigned i = 0; i < numSections; ++i)
     {
         //for each section, map the section of the file to the correct virtual offset.  Gather the
@@ -2532,12 +2438,13 @@ void * MAPMapPEFile(HANDLE hFile)
         IMAGE_SECTION_HEADER &currentHeader = firstSection[i];
 
         void* sectionBase = (char*)loadedBase + currentHeader.VirtualAddress;
+        void* sectionBaseAligned = ALIGN_DOWN(sectionBase, GetVirtualPageSize());
 
         // Validate the section header
         if (   (sectionBase < loadedBase)                                                           // Did computing the section base overflow?
             || ((char*)sectionBase + currentHeader.SizeOfRawData < (char*)sectionBase)              // Does the section overflow?
             || ((char*)sectionBase + currentHeader.SizeOfRawData > (char*)loadedBase + virtualSize) // Does the section extend past the end of the image as the header stated?
-            || ((char*)prevSectionBase + prevSectionSizeInMemory > sectionBase)                     // Does this section overlap the previous one?
+            || (prevSectionEnd > sectionBase)                                                       // Does this section overlap the previous one?
             )
         {
             ERROR_(LOADER)( "section %d is corrupt\n", i );
@@ -2552,13 +2459,12 @@ void * MAPMapPEFile(HANDLE hFile)
         }
 
         // Is there space between the previous section and this one? If so, add a PROT_NONE mapping to cover it.
-        if ((char*)prevSectionBase + prevSectionSizeInMemory < sectionBase)
+        if (prevSectionEnd < sectionBaseAligned)
         {
-            char* gapBase = (char*)prevSectionBase + prevSectionSizeInMemory;
             palError = MAPRecordMapping(pFileObject,
                             loadedBase,
-                            (void*)gapBase,
-                            (char*)sectionBase - gapBase,
+                            prevSectionEnd,
+                            (char*)sectionBaseAligned - (char*)prevSectionEnd,
                             PROT_NONE);
             if (NO_ERROR != palError)
             {
@@ -2602,20 +2508,18 @@ void * MAPMapPEFile(HANDLE hFile)
         }
 #endif // _DEBUG
 
-        prevSectionBase = sectionBase;
-        prevSectionSizeInMemory = (currentHeader.SizeOfRawData + VIRTUAL_PAGE_MASK) & ~VIRTUAL_PAGE_MASK; // round up to page boundary
+        prevSectionEnd = ALIGN_UP((char*)sectionBase + currentHeader.SizeOfRawData, GetVirtualPageSize()); // round up to page boundary
     }
 
     // Is there space after the last section and before the end of the mapped image? If so, add a PROT_NONE mapping to cover it.
     char* imageEnd;
     imageEnd = (char*)loadedBase + virtualSize; // actually, points just after the mapped end
-    if ((char*)prevSectionBase + prevSectionSizeInMemory < imageEnd)
+    if (prevSectionEnd < imageEnd)
     {
-        char* gapBase = (char*)prevSectionBase + prevSectionSizeInMemory;
         palError = MAPRecordMapping(pFileObject,
                         loadedBase,
-                        (void*)gapBase,
-                        imageEnd - gapBase,
+                        prevSectionEnd,
+                        (char*)imageEnd - (char*)prevSectionEnd,
                         PROT_NONE);
         if (NO_ERROR != palError)
         {
@@ -2741,7 +2645,7 @@ BOOL MAPUnmapPEFile(LPCVOID lpAddress)
         {
             pFileObject->ReleaseReference(pThread);
         }
-        InternalFree(pView); // this leaves pLink dangling
+        free(pView); // this leaves pLink dangling
     }
 
     TRACE_(LOADER)("MAPUnmapPEFile returning %d\n", retval);

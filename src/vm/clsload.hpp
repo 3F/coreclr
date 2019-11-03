@@ -36,7 +36,6 @@ class PendingTypeLoadTable;
 class EEClass;
 class Thread;
 class EETypeHashTable;
-class IAssemblySecurityDescriptor;
 class DynamicResolver;
 class SigPointer;
 
@@ -82,8 +81,8 @@ public:
         m_pClassHashEntry = PTR_NULL;
     }
 
-    EntryType GetEntryType() { return m_EntryType; }
-    bool IsNull() { return m_EntryType == EntryType::IsNullEntry; }
+    EntryType GetEntryType() const { return m_EntryType; }
+    bool IsNull() const { return m_EntryType == EntryType::IsNullEntry; }
 
     const HashedTypeEntry& SetClassHashBasedEntryValue(EEClassHashEntry_t * pClassHashEntry)
     {
@@ -93,7 +92,7 @@ public:
         m_pClassHashEntry = dac_cast<PTR_EEClassHashEntry>(pClassHashEntry);
         return *this;
     }
-    EEClassHashEntry_t * GetClassHashBasedEntryValue()
+    EEClassHashEntry_t * GetClassHashBasedEntryValue() const
     {
         LIMITED_METHOD_CONTRACT;
 
@@ -110,7 +109,7 @@ public:
         m_TokenAndModulePair.m_pModule = pModule;
         return *this;
     }
-    const TokenTypeEntry& GetTokenBasedEntryValue()
+    const TokenTypeEntry& GetTokenBasedEntryValue() const
     {
         LIMITED_METHOD_CONTRACT;
         
@@ -276,7 +275,7 @@ public:
     }
 
 
-    HashedTypeEntry& GetBucket()
+    const HashedTypeEntry& GetBucket() const
     {
         LIMITED_METHOD_CONTRACT;
         SUPPORTS_DAC;
@@ -291,7 +290,7 @@ public:
         return (token == 0 || token != tokenNotToLoad) && tokenNotToLoad != tdAllTypes;
     }
 
-    BOOL OKToLoad()
+    BOOL OKToLoad() const
     {
         WRAPPER_NO_CONTRACT;
         SUPPORTS_DAC;
@@ -318,7 +317,6 @@ public:
     virtual MethodTable*    GetCallerMT() = 0;          // The class that wants access; NULL if interop caller.
     virtual Assembly*       GetCallerAssembly() = 0;    // Assembly containing that class.
     virtual bool            IsCalledFromInterop() = 0;
-    virtual bool            IsCallerCritical() = 0; // Can we do a quick check for caller's transparency status?    
 };
 
 class StaticAccessCheckContext : public AccessCheckContext
@@ -368,8 +366,6 @@ public:
         return false;
     }
 
-    virtual bool IsCallerCritical();
-
 private:
     MethodDesc*     m_pCallerMethod;
     MethodTable*    m_pCallerMT;
@@ -408,19 +404,6 @@ public:
         // CoreCLR: Do RestrictedMemberAcess visibility checks but bypass transparency checks.
         kRestrictedMemberAccessNoTransparency,
 
-#ifndef FEATURE_CORECLR
-        // Used by DynamicMethod with kRestrictedMemberAccess in Win8 immersive mode.
-        // Desktop: Equals kNormalAccessibilityChecks for non-framework code calling framework code,
-        //          kRestrictedMemberAccess otherwise.
-        kUserCodeOnlyRestrictedMemberAccess,
-
-        // A variation of kUserCodeOnlyRestrictedMemberAccess, but without transparency checks.
-        // This is used for reflection invocation in Win8 immersive when all domains on the call stack is full trust.
-        // This is an optimization to avoid stackwalks for transparency checks in full trust.
-        // Note that both kUserCodeOnlyRestrictedMemberAccess and kUserCodeOnlyRestrictedMemberAccessNoTransparency
-        // are needed because we restrict user code from accessing framework internals in Win8 immersive even in full trust.
-        kUserCodeOnlyRestrictedMemberAccessNoTransparency
-#endif
     };
 
     AccessCheckOptions(
@@ -443,8 +426,7 @@ public:
 
     AccessCheckOptions(
         const AccessCheckOptions & templateAccessCheckOptions,
-        BOOL                       throwIfTargetIsInaccessible,
-        BOOL                       skipCheckForCriticalCode = FALSE);
+        BOOL                       throwIfTargetIsInaccessible);
 
     // Follow standard rules for doing accessability
     BOOL DoNormalAccessibilityChecks() const 
@@ -472,11 +454,7 @@ public:
     BOOL TransparencyCheckNeeded() const
     {
         LIMITED_METHOD_CONTRACT;
-#ifdef FEATURE_CORECLR
         return (m_accessCheckType != kNormalAccessNoTransparency && m_accessCheckType != kRestrictedMemberAccessNoTransparency);
-#else //FEATURE_CORECLR
-        return (m_accessCheckType != kUserCodeOnlyRestrictedMemberAccessNoTransparency);
-#endif //FEATURE_CORECLR
     }
 
     static AccessCheckOptions* s_pNormalAccessChecks;
@@ -489,16 +467,14 @@ private:
         BOOL                throwIfTargetIsInaccessible,
         MethodTable *       pTargetMT,
         MethodDesc *        pTargetMD, 
-        FieldDesc *         pTargetFD,
-        BOOL                skipCheckForCriticalCode = FALSE);
+        FieldDesc *         pTargetFD);
 
     BOOL DemandMemberAccess(AccessCheckContext *pContext, MethodTable * pTargetMT, BOOL visibilityCheck) const;
 
     void ThrowAccessException(
         AccessCheckContext* pContext,
         MethodTable*        pFailureMT = NULL, 
-        Exception*          pInnerException = NULL,
-        BOOL                fAccessingFrameworkCode = FALSE) const;
+        Exception*          pInnerException = NULL) const;
 
     MethodTable *           m_pTargetMT;
     MethodDesc *            m_pTargetMethod;
@@ -511,48 +487,37 @@ private:
     DynamicResolver *       m_pAccessContext;
     // If the target is not accessible, should the API return FALSE, or should it throw an exception?
     BOOL                    m_fThrowIfTargetIsInaccessible;
-    // flag to enable legacy behavior in ClassLoader::CanAccessMemberForExtraChecks.
-    BOOL                    m_fSkipCheckForCriticalCode;
 };
 
 void DECLSPEC_NORETURN ThrowFieldAccessException(MethodDesc *pCallerMD,
                                                  FieldDesc *pFD,
-                                                 BOOL isTransparencyError,
                                                  UINT messageID = 0,
-                                                 Exception *pInnerException = NULL,
-                                                 BOOL fAccessingFrameworkCode = FALSE);
+                                                 Exception *pInnerException = NULL);
 
 void DECLSPEC_NORETURN ThrowMethodAccessException(MethodDesc *pCallerMD,
                                                   MethodDesc *pCalleeMD,
-                                                  BOOL isTransparencyError,
                                                   UINT messageID = 0,
-                                                  Exception *pInnerException = NULL,
-                                                  BOOL fAccessingFrameworkCode = FALSE);
+                                                  Exception *pInnerException = NULL);
 
 void DECLSPEC_NORETURN ThrowTypeAccessException(MethodDesc *pCallerMD,
                                                 MethodTable *pMT,
-                                                BOOL isTransparencyError,
                                                 UINT messageID = 0,
-                                                Exception *pInnerException = NULL,
-                                                BOOL fAccessingFrameworkCode = FALSE);
+                                                Exception *pInnerException = NULL);
 
 void DECLSPEC_NORETURN ThrowFieldAccessException(AccessCheckContext* pContext,
                                                  FieldDesc *pFD,
                                                  UINT messageID = 0,
-                                                 Exception *pInnerException = NULL,
-                                                 BOOL fAccessingFrameworkCode = FALSE);
+                                                 Exception *pInnerException = NULL);
 
 void DECLSPEC_NORETURN ThrowMethodAccessException(AccessCheckContext* pContext,
                                                   MethodDesc *pCalleeMD,
                                                   UINT messageID = 0,
-                                                  Exception *pInnerException = NULL,
-                                                  BOOL fAccessingFrameworkCode = FALSE);
+                                                  Exception *pInnerException = NULL);
 
 void DECLSPEC_NORETURN ThrowTypeAccessException(AccessCheckContext* pContext,
                                                 MethodTable *pMT,
                                                 UINT messageID = 0,
-                                                Exception *pInnerException = NULL,
-                                                BOOL fAccessingFrameworkCode = FALSE);
+                                                Exception *pInnerException = NULL);
 
 
 //---------------------------------------------------------------------------------------
@@ -616,12 +581,13 @@ private:
     VOID PopulateAvailableClassHashTable(Module *pModule,
                                          AllocMemTracker *pamTracker);
 
+    void LazyPopulateCaseSensitiveHashTablesDontHaveLock();
     void LazyPopulateCaseSensitiveHashTables();
     void LazyPopulateCaseInsensitiveHashTables();
 
     // Lookup the hash table entry from the hash table
     void GetClassValue(NameHandleTable nhTable,
-                                      NameHandle *pName,
+                                      const NameHandle *pName,
                                       HashDatum *pData,
                                       EEClassHashTable **ppTable,
                                       Module* pLookInThisModuleOnly,
@@ -671,7 +637,7 @@ public:
     void Init(AllocMemTracker *pamTracker);
 
     PTR_Assembly GetAssembly();
-    DomainAssembly* GetDomainAssembly(AppDomain *pDomain = NULL);
+    DomainAssembly* GetDomainAssembly();
 
     void    FreeModules();
 
@@ -697,7 +663,7 @@ public:
     //       fLoadTypes=DontLoadTypes:  if type isn't already in the loader's table, return NULL
     //       fLoadTypes=LoadTypes: if type isn't already in the loader's table, then create it
     // Each comes in two variants, LoadXThrowing and LoadXNoThrow, the latter being just
-    // a exception-handling wrapper around the former.
+    // an exception-handling wrapper around the former.
     //
     // Each also allows types to be loaded only up to a particular level (see classloadlevel.h).
     // The class loader itself makes use of these levels to "break" recursion across
@@ -800,7 +766,7 @@ public:
     // Return FALSE if operation failed (e.g. type does not exist)
     // *pfUsesTypeForwarder is set to TRUE if a type forwarder is found. It is never set to FALSE.
     static BOOL ResolveNameToTypeDefThrowing(Module *         pTypeRefModule,
-                                             NameHandle *     pName,
+                                             const NameHandle * pName,
                                              Module **        ppTypeDefModule,
                                              mdTypeDef *      pTypeDefToken,
                                              Loader::LoadFlag loadFlag = Loader::Load,
@@ -907,8 +873,7 @@ public:
         AccessCheckContext*     pContext,
         MethodTable*            pTargetClass,
         Assembly*               pTargetAssembly,
-        const AccessCheckOptions &  accessCheckOptions = *AccessCheckOptions::s_pNormalAccessChecks,
-        BOOL                    checkTargetTypeTransparency = TRUE);
+        const AccessCheckOptions &  accessCheckOptions = *AccessCheckOptions::s_pNormalAccessChecks);
 
     static BOOL CanAccess(
         AccessCheckContext*     pContext,
@@ -917,16 +882,7 @@ public:
         DWORD                   dwMemberAttrs, 
         MethodDesc*             pOptionalTargetMethod, 
         FieldDesc*              pOptionalTargetField,
-        const AccessCheckOptions &  accessCheckOptions = *AccessCheckOptions::s_pNormalAccessChecks,
-        BOOL                    checkTargetMethodTransparency = TRUE,
-        BOOL                    checkTargetTypeTransparency = TRUE);
-
-    static BOOL CanAccessClassForExtraChecks(
-        AccessCheckContext*     pContext,
-        MethodTable*            pTargetClass,
-        Assembly*               pTargetAssembly,
-        const AccessCheckOptions & accessCheckOptions,
-        BOOL                    checkTargetTypeTransparency);
+        const AccessCheckOptions &  accessCheckOptions = *AccessCheckOptions::s_pNormalAccessChecks);
 
     static BOOL CanAccessFamilyVerification(
         TypeHandle              thCurrentClass,
@@ -939,21 +895,6 @@ private:
         MethodDesc*             pOptionalTargetMethod,
         const AccessCheckOptions & accessCheckOptions);
 
-    static BOOL CanAccessMemberForExtraChecks(
-        AccessCheckContext*     pContext,
-        MethodTable*            pTargetExactMT,
-        MethodDesc*             pOptionalTargetMethod,
-        FieldDesc*              pOptionalTargetField,
-        const AccessCheckOptions & accessCheckOptions,
-        BOOL                    checkTargetMethodTransparency);
-
-    static BOOL CanAccessSigForExtraChecks(
-        AccessCheckContext*     pContext,
-        MethodDesc*             pTargetMethodSig,
-        MethodTable*            pTargetExactMT,
-        const AccessCheckOptions & accessCheckOptions,
-        BOOL                    checkTargetTransparency);
-
     static BOOL CanAccessFamily(
         MethodTable*            pCurrentClass,
         MethodTable*            pTargetClass);
@@ -965,9 +906,7 @@ private:
         DWORD                   dwMemberAttrs,
         MethodDesc*             pOptionalTargetMethod, 
         FieldDesc*              pOptionalTargetField,
-        const AccessCheckOptions &  accessCheckOptions = *AccessCheckOptions::s_pNormalAccessChecks,
-        BOOL                    checkTargetMethodTransparency = TRUE,
-        BOOL                    checkTargetTypeTransparency = TRUE);
+        const AccessCheckOptions &  accessCheckOptions = *AccessCheckOptions::s_pNormalAccessChecks);
 
 
 public:
@@ -1021,7 +960,7 @@ private:
     static void DECLSPEC_NORETURN  ThrowTypeLoadException(TypeKey *pKey, UINT resIDWhy);
 
 
-    BOOL IsNested(NameHandle* pName, mdToken *mdEncloser);
+    BOOL IsNested(const NameHandle* pName, mdToken *mdEncloser);
     static BOOL IsNested(Module *pModude, mdToken typeDefOrRef, mdToken *mdEncloser);
 
 public:
@@ -1069,9 +1008,6 @@ private:
     static void LoadExactParents(MethodTable *pMT);
 
     static void LoadExactParentAndInterfacesTransitively(MethodTable *pMT);
-
-
-    static TypeHandle TryFindDynLinkZapType(TypeKey* pKey);
 
     // Create a non-canonical instantiation of a generic type based off the canonical instantiation
     // (For example, MethodTable for List<string> is based on the MethodTable for List<__Canon>)

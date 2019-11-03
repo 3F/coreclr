@@ -583,58 +583,6 @@ endif
         nop
 LEAF_END_MARKED JIT_WriteBarrier, _TEXT
 
-ifndef FEATURE_IMPLICIT_TLS
-LEAF_ENTRY GetThread, _TEXT
-        ; the default implementation will just jump to one that returns null until 
-        ; MakeOptimizedTlsGetter is run which will overwrite this with the actual 
-        ; implementation.
-        jmp short GetTLSDummy
-
-        ;
-        ; insert enough NOPS to be able to insert the largest optimized TLS getter 
-        ; that we might need, it is important that the TLS getter doesn't overwrite
-        ; into the dummy getter.
-        ;
-        db (TLS_GETTER_MAX_SIZE_ASM - 2) DUP (0CCh)
-
-LEAF_END GetThread, _TEXT
-
-LEAF_ENTRY GetAppDomain, _TEXT
-        ; the default implementation will just jump to one that returns null until 
-        ; MakeOptimizedTlsGetter is run which will overwrite this with the actual 
-        ; implementation.
-        jmp short GetTLSDummy
-
-        ;
-        ; insert enough NOPS to be able to insert the largest optimized TLS getter 
-        ; that we might need, it is important that the TLS getter doesn't overwrite
-        ; into the dummy getter.
-        ;
-        db (TLS_GETTER_MAX_SIZE_ASM - 2) DUP (0CCh)
-
-LEAF_END GetAppDomain, _TEXT
-
-LEAF_ENTRY GetTLSDummy, _TEXT
-        xor    rax, rax
-        ret
-LEAF_END GetTLSDummy, _TEXT
-
-LEAF_ENTRY ClrFlsGetBlock, _TEXT
-        ; the default implementation will just jump to one that returns null until 
-        ; MakeOptimizedTlsGetter is run which will overwrite this with the actual 
-        ; implementation.
-        jmp short GetTLSDummy
-
-        ;
-        ; insert enough NOPS to be able to insert the largest optimized TLS getter 
-        ; that we might need, it is important that the TLS getter doesn't overwrite
-        ; into the dummy getter.
-        ;
-        db (TLS_GETTER_MAX_SIZE_ASM - 2) DUP (0CCh)
-
-LEAF_END ClrFlsGetBlock, _TEXT
-endif
-
 ; Mark start of the code region that we patch at runtime
 LEAF_ENTRY JIT_PatchedCodeLast, _TEXT
         ret
@@ -774,7 +722,7 @@ endif
         add     rdi, 8h
         add     rsi, 8h
         ret
-LEAF_END JIT_ByRefWriteBarrier, _TEXT
+LEAF_END_MARKED JIT_ByRefWriteBarrier, _TEXT
 
 
 g_pObjectClass      equ     ?g_pObjectClass@@3PEAVMethodTable@@EA
@@ -805,22 +753,6 @@ LEAF_ENTRY JIT_Stelem_Ref, _TEXT
         ; if we're assigning a null object* then we don't need a write barrier
         test    r8, r8
         jz      AssigningNull
-
-ifdef CHECK_APP_DOMAIN_LEAKS
-        ; get Array TypeHandle
-        mov     r9, [r10 + OFFSETOF__MethodTable__m_ElementType]   ; 10h -> typehandle offset
-        ; check for non-MT
-        test    r9, 2
-        jnz     NoCheck
-
-        ; Check VMflags of element type
-        mov     r9, [r9 + OFFSETOF__MethodTable__m_pEEClass]
-        mov     r9d, dword ptr [r9 + OFFSETOF__EEClass__m_wAuxFlags]
-        test    r9d, EEClassFlags
-        jnz     ArrayStoreCheck_Helper
-
-    NoCheck:
-endif
 
         mov     r9, [r10 + OFFSETOF__MethodTable__m_ElementType]   ; 10h -> typehandle offset
 
@@ -916,40 +848,6 @@ NESTED_ENTRY JIT_Stelem_Ref__ArrayStoreCheck_Helper, _TEXT
 NESTED_END JIT_Stelem_Ref__ArrayStoreCheck_Helper, _TEXT
 
 
-; Equivalent of x86's c++ /fp:fast sin/cos/tan helpers, on x64 
-
-; public: static double __fastcall COMDouble::Sin(double)
-LEAF_ENTRY ?Sin@COMDouble@@SANN@Z, _TEXT
-        movsd   qword ptr [rsp + 8h], xmm0
-        fld     qword ptr [rsp + 8h]
-        fsin
-        fstp    qword ptr [rsp + 8h]    
-        movsd   xmm0, qword ptr [rsp + 8h]
-        ret
-LEAF_END ?Sin@COMDouble@@SANN@Z, _TEXT
-
-; public: static double __fastcall COMDouble::Cos(double)
-LEAF_ENTRY ?Cos@COMDouble@@SANN@Z, _TEXT
-        movsd   qword ptr [rsp + 8h], xmm0
-        fld     qword ptr [rsp + 8h]
-        fcos
-        fstp    qword ptr [rsp + 8h]
-        movsd   xmm0, qword ptr [rsp + 8h]
-        ret
-LEAF_END ?Cos@COMDouble@@SANN@Z, _TEXT
-
-; public: static double __fastcall COMDouble::Tan(double)
-LEAF_ENTRY ?Tan@COMDouble@@SANN@Z, _TEXT
-        movsd   qword ptr [rsp + 8h], xmm0
-        fld     qword ptr [rsp + 8h]
-        fptan
-        fstp    st(0)
-        fstp    qword ptr [rsp + 8h]
-        movsd   xmm0, qword ptr [rsp + 8h]
-        ret
-LEAF_END ?Tan@COMDouble@@SANN@Z, _TEXT
-
-
 extern JIT_FailFast:proc
 extern s_gsCookie:qword
 
@@ -1020,12 +918,11 @@ if 0 ne 0
         ;
         ; link the TailCallFrame
         ;
-        CALL_GETTHREAD
-        mov     r14, rax
-        mov     r15, [rax + OFFSETOF__Thread__m_pFrame]        
+        INLINE_GETTHREAD r14
+        mov     r15, [r14 + OFFSETOF__Thread__m_pFrame]        
         mov     [r13 + OFFSETOF_FRAME + OFFSETOF__Frame__m_Next], r15
         lea     r10, [r13 + OFFSETOF_FRAME]
-        mov     [rax + OFFSETOF__Thread__m_pFrame], r10
+        mov     [r14 + OFFSETOF__Thread__m_pFrame], r10
 endif
 
         ; the pretend call would be here

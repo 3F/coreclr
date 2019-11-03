@@ -44,25 +44,21 @@ public:
     //====================================================================
     // These methods convert between an HR and and a managed exception.
     //====================================================================
-    static FCDECL2(void, ThrowExceptionForHR, INT32 errorCode, LPVOID errorInfo);
     static FCDECL2(Object *, GetExceptionForHR, INT32 errorCode, LPVOID errorInfo);
     static FCDECL1(int, GetHRForException, Object* eUNSAFE);
     static FCDECL1(int, GetHRForException_WinRT, Object* eUNSAFE);
 
-    static FCDECL4(void, CopyToNative, Object* psrcUNSAFE, INT32 startindex, LPVOID pdst, INT32 length);
-    static FCDECL4(void, CopyToManaged, LPVOID psrc, Object* pdstUNSAFE, INT32 startindex, INT32 length);
     static FCDECL2(UINT32, SizeOfClass, ReflectClassBaseObject* refClass, CLR_BOOL throwIfNotMarshalable);
-
-    static FCDECL2(LPVOID, FCUnsafeAddrOfPinnedArrayElement, ArrayBase *arr, INT32 index);
 
     static FCDECL1(UINT32, OffsetOfHelper, ReflectFieldObject* pFieldUNSAFE);
     static FCDECL0(int, GetLastWin32Error);
     static FCDECL1(void, SetLastWin32Error, int error);
-    static FCDECL1(INT32, CalculateCount, ArrayWithOffsetData* pRef);
     
     static FCDECL3(VOID, StructureToPtr, Object* pObjUNSAFE, LPVOID ptr, CLR_BOOL fDeleteOld);
     static FCDECL3(VOID, PtrToStructureHelper, LPVOID ptr, Object* pObjIn, CLR_BOOL allowValueClasses);
     static FCDECL2(VOID, DestroyStructure, LPVOID ptr, ReflectClassBaseObject* refClassUNSAFE);
+
+    static FCDECL1(FC_BOOL_RET, IsPinnable, Object* obj);
 
     //====================================================================
     // map a fiber cookie from the hosting APIs into a managed Thread object
@@ -72,16 +68,11 @@ public:
     static FCDECL3(LPVOID, GetUnmanagedThunkForManagedMethodPtr, LPVOID pfnMethodToWrap, PCCOR_SIGNATURE pbSignature, ULONG cbSignature);
     static FCDECL3(LPVOID, GetManagedThunkForUnmanagedMethodPtr, LPVOID pfnMethodToWrap, PCCOR_SIGNATURE pbSignature, ULONG cbSignature);
 
-    static FCDECL0(UINT32, GetSystemMaxDBCSCharSize);
-
     static FCDECL2(LPVOID, GCHandleInternalAlloc, Object *obj, int type);
     static FCDECL1(VOID, GCHandleInternalFree, OBJECTHANDLE handle);
     static FCDECL1(LPVOID, GCHandleInternalGet, OBJECTHANDLE handle);
-    static FCDECL3(VOID, GCHandleInternalSet, OBJECTHANDLE handle, Object *obj, CLR_BOOL isPinned);
-    static FCDECL4(Object*, GCHandleInternalCompareExchange, OBJECTHANDLE handle, Object *obj, Object* oldObj, CLR_BOOL isPinned);
-    static FCDECL1(LPVOID, GCHandleInternalAddrOfPinnedObject, OBJECTHANDLE handle);
-    static FCDECL1(VOID, GCHandleInternalCheckDomain, OBJECTHANDLE handle);
-    static FCDECL1(INT32, GCHandleInternalGetHandleType, OBJECTHANDLE handle);
+    static FCDECL2(VOID, GCHandleInternalSet, OBJECTHANDLE handle, Object *obj);
+    static FCDECL3(Object*, GCHandleInternalCompareExchange, OBJECTHANDLE handle, Object *obj, Object* oldObj);
 
     static FCDECL2(Object*, GetDelegateForFunctionPointerInternal, LPVOID FPtr, ReflectClassBaseObject* refTypeUNSAFE);
     static FCDECL1(LPVOID, GetFunctionPointerForDelegateInternal, Object* refDelegateUNSAFE);
@@ -129,6 +120,11 @@ public:
     // return a unique cacheless Object for IUnknown
     //====================================================================
     static FCDECL1(Object*, GetUniqueObjectForIUnknown, IUnknown* pUnk);
+
+    //====================================================================
+    // return a unique cacheless Object for IUnknown
+    //====================================================================
+    static FCDECL1(Object*, GetUniqueObjectForIUnknownWithoutUnboxing, IUnknown* pUnk);
 
     //====================================================================
     // return an Object for IUnknown, using the Type T, 
@@ -209,12 +205,6 @@ public:
     static FCDECL2(void, DoGetTypeLibGuidForAssembly, GUID * result, AssemblyBaseObject* refAsmUNSAFE);
 
     //====================================================================
-    // Given a assembly, return the version number of the type library
-    // that would be exported from the assembly.
-    //====================================================================
-    static FCDECL3(void, GetTypeLibVersionForAssembly, AssemblyBaseObject* refAsmUNSAFE, INT32 *pMajorVersion, INT32 *pMinorVersion);
-
-    //====================================================================
     // These methods are used to map COM slots to method info's.
     //====================================================================
     static FCDECL1(int, GetStartComSlot, ReflectClassBaseObject* tUNSAFE);
@@ -223,21 +213,22 @@ public:
 
     static FCDECL1(int, GetComSlotForMethodInfo, ReflectMethodObject* pMethodUNSAFE);
 
-    static FCDECL2(FC_BOOL_RET, SwitchCCW, Object* oldtpUNSAFE, Object* newtpUNSAFE);
     static FCDECL1(Object*, WrapIUnknownWithComObject, IUnknown* pUnk);
 
     static FCDECL2(void, ChangeWrapperHandleStrength, Object* orefUNSAFE, CLR_BOOL fIsWeak);
     static FCDECL2(void, InitializeWrapperForWinRT, Object *unsafe_pThis, IUnknown **ppUnk);
     static FCDECL2(void, InitializeManagedWinRTFactoryObject, Object *unsafe_pThis, ReflectClassBaseObject *unsafe_pType);
-    static FCDECL1(Object *, MarshalNative::GetNativeActivationFactory, ReflectClassBaseObject *unsafe_pType);
+    static FCDECL1(Object *, GetNativeActivationFactory, ReflectClassBaseObject *unsafe_pType);
     static void QCALLTYPE GetInspectableIIDs(QCall::ObjectHandleOnStack hobj, QCall::ObjectHandleOnStack retArrayGuids);
-    static void QCALLTYPE GetCachedWinRTTypes(QCall::ObjectHandleOnStack hadObj, int * epoch, QCall::ObjectHandleOnStack retArrayMT);
-    static void QCALLTYPE GetCachedWinRTTypeByIID(QCall::ObjectHandleOnStack hadObj, GUID iid, void * * ppMT);
 
 private:
     static int GetComSlotInfo(MethodTable *pMT, MethodTable **ppDefItfMT);
     static BOOL IsObjectInContext(OBJECTREF *pObj);
 #endif // FEATURE_COMINTEROP
 };
+
+// Check that the supplied object is valid to put in a pinned handle,
+// throwing an exception if not.
+void ValidatePinnedObject(OBJECTREF obj);
 
 #endif

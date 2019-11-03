@@ -1,19 +1,19 @@
+cmake_minimum_required(VERSION 3.8) # This project is only included on Win32 platforms so we can have a higher CMake version requirement since we already require a newer CMake version on Windows for various reasons.
+# Quick note: The CMake C# support is using the CSC bundled with the MSBuild that the native build runs on, not the one supplied by the local .NET SDK.
+
+project(DacTableGen LANGUAGES CSharp)
+
 set(DACTABLEGEN_SOURCES
     cvconst.cs
     diautil.cs
     main.cs
     MapSymbolProvider.cs
 )
+# DacTableGen doesn't use the defines from the rest of the build tree, so clear all of the compile definitions
+set_directory_properties(PROPERTIES COMPILE_DEFINITIONS "")
 
-# Cmake does not support csharp sources so add custom command
-add_custom_target(dactablegen ALL 
-    COMMAND csc.exe /t:exe /platform:anycpu /r:System.dll /r:$<TARGET_FILE:dialib_dll> /out:${CMAKE_CURRENT_BINARY_DIR}/dactablegen.exe ${DACTABLEGEN_SOURCES}
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:dialib_dll> $<TARGET_FILE_DIR:dactablegen_exe>
-    DEPENDS ${DACTABLEGEN_SOURCES}  dialib
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-)
+set(CMAKE_CSharp_FLAGS "/platform:anycpu32bitpreferred")
+add_executable(dactablegen ${DACTABLEGEN_SOURCES})
 
-# In order to use dactablegen as an executable target it needs to be imported. 
-# Target is used in dll/mscoree/coreclr/cmakelists.txt
-add_executable(dactablegen_exe IMPORTED GLOBAL)
-set_property(TARGET dactablegen_exe PROPERTY IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/dactablegen.exe)
+set_target_properties(dactablegen PROPERTIES VS_DOTNET_REFERENCES "System")
+set_target_properties(dactablegen PROPERTIES VS_DOTNET_REFERENCE_DIALib ${CMAKE_CURRENT_SOURCE_DIR}/DIALib.dll)

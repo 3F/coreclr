@@ -4,6 +4,11 @@
 //
 // This file defines namespaces used by the runtime.
 //
+// Note: This file gets parsed by the Mono IL Linker (https://github.com/mono/linker/) which may throw an exception during parsing.
+// Specifically, this (https://github.com/mono/linker/blob/master/corebuild/integration/ILLink.Tasks/CreateRuntimeRootDescriptorFile.cs) will try to 
+// parse this header, and it may throw an exception while doing that. If you edit this file and get a build failure on msbuild.exe D:\repos\coreclr\build.proj
+// you might want to check out the parser linked above.
+//
 
 
 
@@ -23,6 +28,7 @@
 #define g_CollectionsGenericNS g_SystemNS ".Collections.Generic"
 
 #define g_InteropServicesNS g_SystemNS ".Runtime.InteropServices"
+#define g_InternalInteropServicesNS  "Internal.Runtime.InteropServices"
 #define g_ReflectionNS      g_SystemNS ".Reflection"
 #define g_ReflectionEmitNS  g_ReflectionNS ".Emit"
 
@@ -33,6 +39,9 @@
 #define g_WinRTNS           g_InteropNS ".WindowsRuntime"
 #endif // FEATURE_COMINTEROP
 
+#define g_IntrinsicsNS g_RuntimeNS ".Intrinsics"
+
+#define g_InternalCompilerServicesNS "Internal.Runtime.CompilerServices"
 #define g_CompilerServicesNS g_RuntimeNS ".CompilerServices"
 
 #define g_ConstrainedExecutionNS g_RuntimeNS ".ConstrainedExecution"
@@ -43,10 +52,8 @@
 #define g_PermissionsNS     g_SecurityNS ".Permissions"
 #define g_PrincipalNS       g_SecurityNS ".Principal"
 #define g_PolicyNS          g_SecurityNS ".Policy"
-#ifdef FEATURE_X509
 #define g_CryptographyNS    g_SecurityNS ".Cryptography"
 #define g_X509NS            g_CryptographyNS ".X509Certificates"
-#endif // FEATURE_X509
 
 #define g_SerializationNS   g_RuntimeNS ".Serialization"
 #define g_RemotingNS        g_RuntimeNS ".Remoting"
@@ -74,10 +81,6 @@
 
 #define g_WindowsFoundationDiagNS    "Windows.Foundation.Diagnostics"
 
-#if defined(FEATURE_CORRUPTING_EXCEPTIONS) || defined(FEATURE_EXCEPTION_NOTIFICATIONS)
 #define g_ExceptionServicesNS         g_RuntimeNS ".ExceptionServices"
-#endif // defined(FEATURE_CORRUPTING_EXCEPTION) || defined(FEATURE_EXCEPTION_NOTIFICATIONS)
 
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
 #define g_LoaderNS         g_RuntimeNS ".Loader" 
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER)

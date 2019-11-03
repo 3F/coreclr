@@ -7,9 +7,6 @@
 #include "common.h"
 #include "fptrstubs.h"
 
-#ifdef FEATURE_REMOTING
-#include "remoting.h"
-#endif
 
 // -------------------------------------------------------
 // FuncPtr stubs
@@ -20,7 +17,7 @@ Precode* FuncPtrStubs::Lookup(MethodDesc * pMD, PrecodeType type)
     CONTRACTL
     {
         NOTHROW;
-        GC_TRIGGERS;
+        GC_NOTRIGGER;
     }
     CONTRACTL_END;
 
@@ -55,13 +52,6 @@ PrecodeType FuncPtrStubs::GetDefaultType(MethodDesc* pMD)
     type = PRECODE_FIXUP;
 #endif // HAS_FIXUP_PRECODE
 
-#ifdef HAS_REMOTING_PRECODE
-    if (pMD->IsRemotingInterceptedViaVirtualDispatch())
-    {
-        type = PRECODE_REMOTING;
-    }
-#endif // HAS_REMOTING_PRECODE
-
     return type;
 }
 
@@ -75,7 +65,6 @@ PCODE FuncPtrStubs::GetFuncPtrStub(MethodDesc * pMD, PrecodeType type)
     {
         THROWS;
         GC_TRIGGERS;
-        SO_INTOLERANT;
         INJECT_FAULT(ThrowOutOfMemory(););
     }
     CONTRACTL_END
@@ -92,19 +81,8 @@ PCODE FuncPtrStubs::GetFuncPtrStub(MethodDesc * pMD, PrecodeType type)
     }
 
     PCODE target = NULL;
+    bool setTargetAfterAddingToHashTable = false;
 
-#ifdef FEATURE_REMOTING
-    if (pMD->IsInterface() && !pMD->IsStatic())
-    {
-        // FuncPtrStubs on interface virtuals are used to transition
-        // into the remoting system with the exact interface method.
-
-        _ASSERTE(type == PRECODE_STUB);
-
-        target = CRemotingServices::GetDispatchInterfaceHelper(pMD);
-    }
-    else
-#endif // FEATURE_REMOTING
     if (type != GetDefaultType(pMD) &&
         // Always use stable entrypoint for LCG. If the cached precode pointed directly to JITed code,
         // we would not be able to reuse it when the DynamicMethodDesc got reused for a new DynamicMethod.
@@ -113,11 +91,17 @@ PCODE FuncPtrStubs::GetFuncPtrStub(MethodDesc * pMD, PrecodeType type)
         // Set the target if precode is not of the default type. We are patching the precodes of the default type only.
         target = pMD->GetMultiCallableAddrOfCode();
     }
-    else
-    if (pMD->HasStableEntryPoint())
+    else if (pMD->HasStableEntryPoint())
     {
         // Set target
         target = pMD->GetStableEntryPoint();
+    }
+    else if (pMD->IsVersionableWithVtableSlotBackpatch())
+    {
+        // The funcptr stub must point to the current entry point after it is created and exposed. Keep the target as null for
+        // now. The precode will initially point to the prestub and its target will be updated after the precode is exposed.
+        _ASSERTE(target == NULL);
+        setTargetAfterAddingToHashTable = true;
     }
     else
     {
@@ -138,7 +122,7 @@ PCODE FuncPtrStubs::GetFuncPtrStub(MethodDesc * pMD, PrecodeType type)
     // 
     {
         AllocMemTracker amt;
-        Precode* pNewPrecode = Precode::Allocate(type, pMD, pMD->GetLoaderAllocatorForCode(), &amt);
+        Precode* pNewPrecode = Precode::Allocate(type, pMD, pMD->GetLoaderAllocator(), &amt);
    
         if (target != NULL)
         {
@@ -159,6 +143,28 @@ PCODE FuncPtrStubs::GetFuncPtrStub(MethodDesc * pMD, PrecodeType type)
                 m_hashTable.Add(pPrecode);
                 amt.SuppressRelease();
             }
+            else
+            {
+                setTargetAfterAddingToHashTable = false;
+            }
+        }
+    }
+
+    if (setTargetAfterAddingToHashTable)
+    {
+        _ASSERTE(pMD->IsVersionableWithVtableSlotBackpatch());
+
+        PCODE temporaryEntryPoint = pMD->GetTemporaryEntryPoint();
+        MethodDescBackpatchInfoTracker::ConditionalLockHolder lockHolder;
+
+        // Set the funcptr stub's entry point to the current entry point inside the lock and after the funcptr stub is exposed,
+        // to synchronize with backpatching in MethodDesc::BackpatchEntryPointSlots()
+        PCODE entryPoint = pMD->GetMethodEntryPoint();
+        if (entryPoint != temporaryEntryPoint)
+        {
+            // Need only patch the precode from the prestub, since if someone else managed to patch the precode already then its
+            // target would already be up-to-date
+            pPrecode->SetTargetInterlocked(entryPoint, TRUE /* fOnlyRedirectFromPrestub */);
         }
     }
 

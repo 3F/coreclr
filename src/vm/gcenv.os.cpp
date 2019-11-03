@@ -18,7 +18,85 @@
 #include <Psapi.h>
 #endif
 
+#ifdef Sleep
+#undef Sleep
+#endif // Sleep
+
+#include "../gc/env/gcenv.os.h"
+
 #define MAX_PTR ((uint8_t*)(~(ptrdiff_t)0))
+
+#ifdef FEATURE_PAL
+uint32_t g_pageSizeUnixInl = 0;
+#endif
+
+static AffinitySet g_processAffinitySet;
+
+class GroupProcNo
+{
+    uint16_t m_groupProc;
+
+public:
+
+    static const uint16_t NoGroup = 0;
+
+    GroupProcNo(uint16_t groupProc) : m_groupProc(groupProc)
+    {
+    }
+
+    GroupProcNo(uint16_t group, uint16_t procIndex) : m_groupProc((group << 6) | procIndex)
+    {
+        // Making this the same as the # of NUMA node we support.
+        assert(group < 0x40);
+        assert(procIndex <= 0x3f);
+    }
+
+    uint16_t GetGroup() { return m_groupProc >> 6; }
+    uint16_t GetProcIndex() { return m_groupProc & 0x3f; }
+    uint16_t GetCombinedValue() { return m_groupProc; }
+};
+
+#if !defined(FEATURE_PAL)
+
+static bool g_SeLockMemoryPrivilegeAcquired = false;
+
+bool InitLargePagesPrivilege()
+{
+    TOKEN_PRIVILEGES tp;
+    LUID luid;
+    if (!LookupPrivilegeValueW(nullptr, SE_LOCK_MEMORY_NAME, &luid))
+    {
+        return false;
+    }
+
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    HANDLE token;
+    if (!OpenProcessToken(::GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token))
+    {
+        return false;
+    }
+
+    BOOL retVal = AdjustTokenPrivileges(token, FALSE, &tp, 0, nullptr, 0);
+    DWORD gls = GetLastError();
+    CloseHandle(token);
+
+    if (!retVal)
+    {
+        return false;
+    }
+
+    if (gls != 0)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+#endif // FEATURE_PAL
 
 // Initialize the interface implementation
 // Return:
@@ -26,6 +104,53 @@
 bool GCToOSInterface::Initialize()
 {
     LIMITED_METHOD_CONTRACT;
+
+#ifdef FEATURE_PAL
+    g_pageSizeUnixInl = GetOsPageSize();
+
+    uint32_t currentProcessCpuCount = PAL_GetLogicalCpuCountFromOS();
+    if (PAL_GetCurrentThreadAffinitySet(AffinitySet::BitsetDataSize, g_processAffinitySet.GetBitsetData()))
+    {
+        assert(currentProcessCpuCount == g_processAffinitySet.Count());
+    }
+    else
+    {
+        // There is no way to get affinity on the current OS, set the affinity set to reflect all processors
+        for (size_t i = 0; i < currentProcessCpuCount; i++)
+        {
+            g_processAffinitySet.Add(i);
+        }
+    }
+#else // FEATURE_PAL
+    if (CPUGroupInfo::CanEnableGCCPUGroups())
+    {
+        // When CPU groups are enabled, then the process is not bound by the process affinity set at process launch.
+        // Set the initial affinity mask so that all processors are enabled.
+        for (size_t i = 0; i < CPUGroupInfo::GetNumActiveProcessors(); i++)
+        {
+            g_processAffinitySet.Add(i);
+        }
+    }
+    else
+    {
+        // When CPU groups are disabled, the process affinity mask specified at the process launch cannot be
+        // escaped.
+        uintptr_t pmask, smask;
+        if (!!::GetProcessAffinityMask(::GetCurrentProcess(), (PDWORD_PTR)&pmask, (PDWORD_PTR)&smask))
+        {
+            pmask &= smask;
+
+            for (size_t i = 0; i < 8 * sizeof(uintptr_t); i++)
+            {
+                if ((pmask & ((uintptr_t)1 << i)) != 0)
+                {
+                    g_processAffinitySet.Add(i);
+                }
+            }
+        }
+    }
+#endif // FEATURE_PAL
+
     return true;
 }
 
@@ -54,40 +179,76 @@ uint32_t GCToOSInterface::GetCurrentProcessId()
     return ::GetCurrentProcessId();
 }
 
-// Set ideal affinity for the current thread
+// Set ideal processor for the current thread
 // Parameters:
-//  affinity - ideal processor affinity for the thread
+//  srcProcNo - processor number the thread currently runs on
+//  dstProcNo - processor number the thread should be migrated to
 // Return:
 //  true if it has succeeded, false if it has failed
-bool GCToOSInterface::SetCurrentThreadIdealAffinity(GCThreadAffinity* affinity)
+bool GCToOSInterface::SetCurrentThreadIdealAffinity(uint16_t srcProcNo, uint16_t dstProcNo)
 {
     LIMITED_METHOD_CONTRACT;
 
     bool success = true;
+#ifndef FEATURE_PAL
+    GroupProcNo srcGroupProcNo(srcProcNo);
+    GroupProcNo dstGroupProcNo(dstProcNo);
+
+    if (CPUGroupInfo::CanEnableGCCPUGroups())
+    {
+        if (srcGroupProcNo.GetGroup() != dstGroupProcNo.GetGroup())
+        {
+            //only set ideal processor when srcProcNo and dstProcNo are in the same cpu
+            //group. DO NOT MOVE THREADS ACROSS CPU GROUPS
+            return true;
+        }
+    }
 
 #if !defined(FEATURE_CORESYSTEM)
-    SetThreadIdealProcessor(GetCurrentThread(), (DWORD)affinity->Processor);
-#elif !defined(FEATURE_PAL)
+    SetThreadIdealProcessor(GetCurrentThread(), (DWORD)dstGroupProcNo.GetProcIndex());
+#else
     PROCESSOR_NUMBER proc;
 
-    if (affinity->Group != -1)
+    if (CPUGroupInfo::CanEnableGCCPUGroups())
     {
-        proc.Group = (WORD)affinity->Group;
-        proc.Number = (BYTE)affinity->Processor;
+        proc.Group = (WORD)dstGroupProcNo.GetGroup();
+        proc.Number = (BYTE)dstGroupProcNo.GetProcIndex();
         proc.Reserved = 0;
-        
-        success = !!SetThreadIdealProcessorEx(GetCurrentThread(), &proc, NULL);
+
+        success = !!SetThreadIdealProcessorEx(GetCurrentThread (), &proc, NULL);
     }
     else
     {
         if (GetThreadIdealProcessorEx(GetCurrentThread(), &proc))
         {
-            proc.Number = (BYTE)affinity->Processor;
+            proc.Number = (BYTE)dstGroupProcNo.GetProcIndex();
             success = !!SetThreadIdealProcessorEx(GetCurrentThread(), &proc, &proc);
-        }        
+        }
     }
-#endif
+#endif // !FEATURE_CORESYSTEM
+    return success;
 
+#else // !FEATURE_PAL
+
+    // There is no way to set a thread ideal processor on Unix, so do nothing.
+    return true;
+
+#endif // !FEATURE_PAL
+}
+
+bool GCToOSInterface::GetCurrentThreadIdealProc(uint16_t* procNo)
+{
+    LIMITED_METHOD_CONTRACT;
+    bool success = false;
+#ifndef FEATURE_PAL
+    PROCESSOR_NUMBER proc;
+    success = !!GetThreadIdealProcessorEx(GetCurrentThread(), &proc);
+    if (success)
+    {
+        GroupProcNo groupProcNo(proc.Group, proc.Number);
+        *procNo = groupProcNo.GetCombinedValue();
+    }
+#endif //FEATURE_PAL
     return success;
 }
 
@@ -97,7 +258,16 @@ uint32_t GCToOSInterface::GetCurrentProcessorNumber()
     LIMITED_METHOD_CONTRACT;
 
     _ASSERTE(CanGetCurrentProcessorNumber());
+
+#ifndef FEATURE_PAL
+    PROCESSOR_NUMBER proc_no_cpu_group;
+    GetCurrentProcessorNumberEx(&proc_no_cpu_group);
+
+    GroupProcNo groupProcNo(proc_no_cpu_group.Group, proc_no_cpu_group.Number);
+    return groupProcNo.GetCombinedValue();
+#else
     return ::GetCurrentProcessorNumber();
+#endif //!FEATURE_PAL
 }
 
 // Check if the OS supports getting current processor number
@@ -127,13 +297,6 @@ void GCToOSInterface::DebugBreak()
     ::DebugBreak();
 }
 
-// Get number of logical processors
-uint32_t GCToOSInterface::GetLogicalCpuCount()
-{
-    LIMITED_METHOD_CONTRACT;
-    return ::GetLogicalCpuCount();
-}
-
 // Causes the calling thread to sleep for the specified number of milliseconds
 // Parameters:
 //  sleepMSec   - time to sleep before switching to another thread
@@ -158,20 +321,33 @@ void GCToOSInterface::YieldThread(uint32_t switchCount)
 //  size      - size of the virtual memory range
 //  alignment - requested memory alignment
 //  flags     - flags to control special settings like write watching
+//  node      - the NUMA node to reserve memory on
 // Return:
 //  Starting virtual address of the reserved range
-void* GCToOSInterface::VirtualReserve(void* address, size_t size, size_t alignment, uint32_t flags)
+void* GCToOSInterface::VirtualReserve(size_t size, size_t alignment, uint32_t flags, uint16_t node)
 {
     LIMITED_METHOD_CONTRACT;
 
-    DWORD memFlags = (flags & VirtualReserveFlags::WriteWatch) ? (MEM_RESERVE | MEM_WRITE_WATCH) : MEM_RESERVE;
-    if (alignment == 0)
+    if (node == NUMA_NODE_UNDEFINED)
     {
-        return ::ClrVirtualAlloc(0, size, memFlags, PAGE_READWRITE);
+        DWORD memFlags = (flags & VirtualReserveFlags::WriteWatch) ? (MEM_RESERVE | MEM_WRITE_WATCH) : MEM_RESERVE;
+
+        // This is not strictly necessary for a correctness standpoint. Windows already guarantees
+        // allocation granularity alignment when using MEM_RESERVE, so aligning the size here has no effect.
+        // However, ClrVirtualAlloc does expect the size to be aligned to the allocation granularity.
+        size_t aligned_size = (size + g_SystemInfo.dwAllocationGranularity - 1) & ~static_cast<size_t>(g_SystemInfo.dwAllocationGranularity - 1);
+        if (alignment == 0)
+        {
+            return ::ClrVirtualAlloc (0, aligned_size, memFlags, PAGE_READWRITE);
+        }
+        else
+        {
+            return ::ClrVirtualAllocAligned (0, aligned_size, memFlags, PAGE_READWRITE, alignment);
+        }
     }
     else
     {
-        return ::ClrVirtualAllocAligned(0, size, memFlags, PAGE_READWRITE, alignment);
+        return NumaNodeInfo::VirtualAllocExNuma (::GetCurrentProcess (), NULL, size, MEM_RESERVE, PAGE_READWRITE, node);
     }
 }
 
@@ -189,17 +365,51 @@ bool GCToOSInterface::VirtualRelease(void* address, size_t size)
     return !!::ClrVirtualFree(address, 0, MEM_RELEASE);
 }
 
+// Commit virtual memory range.
+// Parameters:
+//  size      - size of the virtual memory range
+// Return:
+//  Starting virtual address of the committed range
+void* GCToOSInterface::VirtualReserveAndCommitLargePages(size_t size)
+{
+    LIMITED_METHOD_CONTRACT;
+
+#if !defined(FEATURE_PAL)
+    if (!g_SeLockMemoryPrivilegeAcquired)
+    {
+        if (!InitLargePagesPrivilege())
+        {
+            return nullptr;
+        }
+
+        g_SeLockMemoryPrivilegeAcquired = true;
+    }
+
+    SIZE_T largePageMinimum = GetLargePageMinimum();
+    size = (size + (largePageMinimum - 1)) & ~(largePageMinimum - 1);
+#endif
+
+    return ::ClrVirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
+}
+
 // Commit virtual memory range. It must be part of a range reserved using VirtualReserve.
 // Parameters:
 //  address - starting virtual address
 //  size    - size of the virtual memory range
 // Return:
 //  true if it has succeeded, false if it has failed
-bool GCToOSInterface::VirtualCommit(void* address, size_t size)
+bool GCToOSInterface::VirtualCommit(void* address, size_t size, uint16_t node)
 {
     LIMITED_METHOD_CONTRACT;
 
-    return ::ClrVirtualAlloc(address, size, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    if (node == NUMA_NODE_UNDEFINED)
+    {
+        return ::ClrVirtualAlloc(address, size, MEM_COMMIT, PAGE_READWRITE) != NULL;
+    }
+    else
+    {
+        return NumaNodeInfo::VirtualAllocExNuma(::GetCurrentProcess(), address, size, MEM_COMMIT, PAGE_READWRITE, node) != NULL;
+    }
 }
 
 // Decomit virtual memory range.
@@ -249,7 +459,7 @@ bool GCToOSInterface::SupportsWriteWatch()
     // check if the OS supports write-watch. 
     // Drawbridge does not support write-watch so we still need to do the runtime detection for them.
     // Otherwise, all currently supported OSes do support write-watch.
-    void* mem = VirtualReserve (0, g_SystemInfo.dwAllocationGranularity, 0, VirtualReserveFlags::WriteWatch);
+    void* mem = VirtualReserve(g_SystemInfo.dwAllocationGranularity, 0, VirtualReserveFlags::WriteWatch);
     if (mem != NULL)
     {
         VirtualRelease (mem, g_SystemInfo.dwAllocationGranularity);
@@ -288,7 +498,7 @@ bool GCToOSInterface::GetWriteWatch(bool resetState, void* address, size_t size,
     ULONG granularity;
 
     bool success = ::GetWriteWatch(flags, address, size, pageAddresses, (ULONG_PTR*)pageAddressesCount, &granularity) == 0;
-    _ASSERTE (granularity == OS_PAGE_SIZE);
+    _ASSERTE (granularity == GetOsPageSize());
 
     return success;
 }
@@ -299,35 +509,96 @@ bool GCToOSInterface::GetWriteWatch(bool resetState, void* address, size_t size,
 //             the processor architecture
 // Return:
 //  Size of the cache
-size_t GCToOSInterface::GetLargestOnDieCacheSize(bool trueSize)
+size_t GCToOSInterface::GetCacheSizePerLogicalCpu(bool trueSize)
 {
     LIMITED_METHOD_CONTRACT;
 
-    return ::GetLargestOnDieCacheSize(trueSize);
+    return ::GetCacheSizePerLogicalCpu(trueSize);
 }
 
-// Get affinity mask of the current process
+// Sets the calling thread's affinity to only run on the processor specified
 // Parameters:
-//  processMask - affinity mask for the specified process
-//  systemMask  - affinity mask for the system
+//  procNo - The requested processor for the calling thread.
 // Return:
-//  true if it has succeeded, false if it has failed
-// Remarks:
-//  A process affinity mask is a bit vector in which each bit represents the processors that
-//  a process is allowed to run on. A system affinity mask is a bit vector in which each bit
-//  represents the processors that are configured into a system.
-//  A process affinity mask is a subset of the system affinity mask. A process is only allowed
-//  to run on the processors configured into a system. Therefore, the process affinity mask cannot
-//  specify a 1 bit for a processor when the system affinity mask specifies a 0 bit for that processor.
-bool GCToOSInterface::GetCurrentProcessAffinityMask(uintptr_t* processMask, uintptr_t* systemMask)
+//  true if setting the affinity was successful, false otherwise.
+bool GCToOSInterface::SetThreadAffinity(uint16_t procNo)
 {
     LIMITED_METHOD_CONTRACT;
-
 #ifndef FEATURE_PAL
-    return !!::GetProcessAffinityMask(GetCurrentProcess(), (PDWORD_PTR)processMask, (PDWORD_PTR)systemMask);
-#else
-    return false;
-#endif
+    GroupProcNo groupProcNo(procNo);
+
+    if (CPUGroupInfo::CanEnableGCCPUGroups())
+    {
+        GROUP_AFFINITY ga;
+        ga.Group = (WORD)groupProcNo.GetGroup();
+        ga.Reserved[0] = 0; // reserve must be filled with zero
+        ga.Reserved[1] = 0; // otherwise call may fail
+        ga.Reserved[2] = 0;
+        ga.Mask = (size_t)1 << groupProcNo.GetProcIndex();
+        return !!SetThreadGroupAffinity(GetCurrentThread(), &ga, nullptr);
+    }
+    else
+    {
+        return !!SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << groupProcNo.GetProcIndex());
+    }
+#else //  FEATURE_PAL
+    return PAL_SetCurrentThreadAffinity(procNo);
+#endif //  FEATURE_PAL
+}
+
+// Boosts the calling thread's thread priority to a level higher than the default
+// for new threads.
+// Parameters:
+//  None.
+// Return:
+//  true if the priority boost was successful, false otherwise.
+bool GCToOSInterface::BoostThreadPriority()
+{
+    return !!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+}
+
+// Set the set of processors enabled for GC threads for the current process based on config specified affinity mask and set
+// Parameters:
+//  configAffinityMask - mask specified by the GCHeapAffinitizeMask config
+//  configAffinitySet  - affinity set specified by the GCHeapAffinitizeRanges config
+// Return:
+//  set of enabled processors
+const AffinitySet* GCToOSInterface::SetGCThreadsAffinitySet(uintptr_t configAffinityMask, const AffinitySet* configAffinitySet)
+{
+#ifndef FEATURE_PAL
+    if (CPUGroupInfo::CanEnableGCCPUGroups())
+#endif // !FEATURE_PAL
+    {
+        if (!configAffinitySet->IsEmpty())
+        {
+            // Update the process affinity set using the configured set
+            for (size_t i = 0; i < MAX_SUPPORTED_CPUS; i++)
+            {
+                if (g_processAffinitySet.Contains(i) && !configAffinitySet->Contains(i))
+                {
+                    g_processAffinitySet.Remove(i);
+                }
+            }
+        }
+    }
+#ifndef FEATURE_PAL
+    else
+    {
+        if (configAffinityMask != 0)
+        {
+            // Update the process affinity set using the configured mask
+            for (size_t i = 0; i < 8 * sizeof(uintptr_t); i++)
+            {
+                if (g_processAffinitySet.Contains(i) && ((configAffinityMask & ((uintptr_t)1 << i)) == 0))
+                {
+                    g_processAffinitySet.Remove(i);
+                }
+            }
+        }
+    }
+#endif // !FEATURE_PAL
+
+    return &g_processAffinitySet;
 }
 
 // Get number of processors assigned to the current process
@@ -337,7 +608,14 @@ uint32_t GCToOSInterface::GetCurrentProcessCpuCount()
 {
     LIMITED_METHOD_CONTRACT;
 
+#ifndef FEATURE_PAL
+    // GetCurrentProcessCpuCount only returns up to 64 procs.
+    return CPUGroupInfo::CanEnableGCCPUGroups() ?
+                GCToOSInterface::GetTotalProcessorCount():
+                ::GetCurrentProcessCpuCount();
+#else // !FEATURE_PAL
     return ::GetCurrentProcessCpuCount();
+#endif // !FEATURE_PAL
 }
 
 // Return the size of the user-mode portion of the virtual address space of this process.
@@ -353,33 +631,19 @@ size_t GCToOSInterface::GetVirtualMemoryLimit()
     return (size_t)memStatus.ullTotalVirtual;
 }
 
+static size_t g_RestrictedPhysicalMemoryLimit = (size_t)MAX_PTR;
 
 #ifndef FEATURE_PAL
+
+// For 32-bit processes the virtual address range could be smaller than the amount of physical
+// memory on the machine/in the container, we need to restrict by the VM.
+static bool g_UseRestrictedVirtualMemory = false;
 
 typedef BOOL (WINAPI *PGET_PROCESS_MEMORY_INFO)(HANDLE handle, PROCESS_MEMORY_COUNTERS* memCounters, uint32_t cb);
 static PGET_PROCESS_MEMORY_INFO GCGetProcessMemoryInfo = 0;
 
-static size_t g_RestrictedPhysicalMemoryLimit = (size_t)MAX_PTR;
-
 typedef BOOL (WINAPI *PIS_PROCESS_IN_JOB)(HANDLE processHandle, HANDLE jobHandle, BOOL* result);
 typedef BOOL (WINAPI *PQUERY_INFORMATION_JOB_OBJECT)(HANDLE jobHandle, JOBOBJECTINFOCLASS jobObjectInfoClass, void* lpJobObjectInfo, DWORD cbJobObjectInfoLength, LPDWORD lpReturnLength);
-
-#ifdef FEATURE_CORECLR
-// For coresys we need to look for an API in some apiset dll on win8 if we can't find it  
-// in the traditional dll.
-HINSTANCE LoadDllForAPI(WCHAR* dllTraditional, WCHAR* dllApiSet)
-{
-    HINSTANCE hinst = WszLoadLibrary(dllTraditional);
-
-    if (!hinst)
-    {
-        if(RunningOnWin8())
-            hinst = WszLoadLibrary(dllApiSet);
-    }
-
-    return hinst;
-}
-#endif
 
 static size_t GetRestrictedPhysicalMemoryLimit()
 {
@@ -390,64 +654,31 @@ static size_t GetRestrictedPhysicalMemoryLimit()
         return g_RestrictedPhysicalMemoryLimit;
 
     size_t job_physical_memory_limit = (size_t)MAX_PTR;
+    uint64_t total_virtual = 0;
+    uint64_t total_physical = 0;
     BOOL in_job_p = FALSE;
-#ifdef FEATURE_CORECLR
-    HINSTANCE hinstApiSetPsapiOrKernel32 = 0;
-    // these 2 modules will need to be freed no matter what as we only use them locally in this method.
-    HINSTANCE hinstApiSetJob1OrKernel32 = 0;
-    HINSTANCE hinstApiSetJob2OrKernel32 = 0;
-#else
-    HINSTANCE hinstPsapi = 0;
-#endif
+    HINSTANCE hinstKernel32 = 0;
 
     PIS_PROCESS_IN_JOB GCIsProcessInJob = 0;
     PQUERY_INFORMATION_JOB_OBJECT GCQueryInformationJobObject = 0;
 
-#ifdef FEATURE_CORECLR
-    hinstApiSetJob1OrKernel32 = LoadDllForAPI(L"kernel32.dll", L"api-ms-win-core-job-l1-1-0.dll");
-    if (!hinstApiSetJob1OrKernel32)
-        goto exit;
-
-    GCIsProcessInJob = (PIS_PROCESS_IN_JOB)GetProcAddress(hinstApiSetJob1OrKernel32, "IsProcessInJob");
-    if (!GCIsProcessInJob)
-        goto exit;
-#else
     GCIsProcessInJob = &(::IsProcessInJob);
-#endif
 
     if (!GCIsProcessInJob(GetCurrentProcess(), NULL, &in_job_p))
         goto exit;
 
     if (in_job_p)
     {
-#ifdef FEATURE_CORECLR
-        hinstApiSetPsapiOrKernel32 = LoadDllForAPI(L"kernel32.dll", L"api-ms-win-core-psapi-l1-1-0");
-        if (!hinstApiSetPsapiOrKernel32)
+        hinstKernel32 = WszLoadLibrary(L"kernel32.dll");
+        if (!hinstKernel32)
             goto exit;
 
-        GCGetProcessMemoryInfo = (PGET_PROCESS_MEMORY_INFO)GetProcAddress(hinstApiSetPsapiOrKernel32, "K32GetProcessMemoryInfo");
-#else
-        // We need a way to get the working set in a job object and GetProcessMemoryInfo 
-        // is the way to get that. According to MSDN, we should use GetProcessMemoryInfo In order to 
-        // compensate for the incompatibility that psapi.dll introduced we are getting this dynamically.
-        hinstPsapi = WszLoadLibrary(L"psapi.dll");
-        if (!hinstPsapi)
-            return 0;
-        GCGetProcessMemoryInfo = (PGET_PROCESS_MEMORY_INFO)GetProcAddress(hinstPsapi, "GetProcessMemoryInfo");
-#endif
+        GCGetProcessMemoryInfo = (PGET_PROCESS_MEMORY_INFO)GetProcAddress(hinstKernel32, "K32GetProcessMemoryInfo");
 
         if (!GCGetProcessMemoryInfo)
             goto exit;
 
-#ifdef FEATURE_CORECLR
-        hinstApiSetJob2OrKernel32 = LoadDllForAPI(L"kernel32.dll", L"api-ms-win-core-job-l2-1-0");
-        if (!hinstApiSetJob2OrKernel32)
-            goto exit;
-
-        GCQueryInformationJobObject = (PQUERY_INFORMATION_JOB_OBJECT)GetProcAddress(hinstApiSetJob2OrKernel32, "QueryInformationJobObject");
-#else
         GCQueryInformationJobObject = &(::QueryInformationJobObject);
-#endif 
 
         if (!GCQueryInformationJobObject)
             goto exit;
@@ -478,55 +709,112 @@ static size_t GetRestrictedPhysicalMemoryLimit()
             if ((limit_info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_WORKINGSET) != 0)
                 job_workingset_limit = limit_info.BasicLimitInformation.MaximumWorkingSetSize;
 
-            job_physical_memory_limit = min (job_memory_limit, job_process_memory_limit);
-            job_physical_memory_limit = min (job_physical_memory_limit, job_workingset_limit);
+            if ((job_memory_limit != (size_t)MAX_PTR) ||
+                (job_process_memory_limit != (size_t)MAX_PTR) ||
+                (job_workingset_limit != (size_t)MAX_PTR))
+            {
+                job_physical_memory_limit = min (job_memory_limit, job_process_memory_limit);
+                job_physical_memory_limit = min (job_physical_memory_limit, job_workingset_limit);
 
-            MEMORYSTATUSEX ms;
-            ::GetProcessMemoryLoad(&ms);
+                MEMORYSTATUSEX ms;
+                ::GetProcessMemoryLoad(&ms);
+                total_virtual = ms.ullTotalVirtual;
+                total_physical = ms.ullAvailPhys;
 
-            // A sanity check in case someone set a larger limit than there is actual physical memory.
-            job_physical_memory_limit = (size_t) min (job_physical_memory_limit, ms.ullTotalPhys);
+                // A sanity check in case someone set a larger limit than there is actual physical memory.
+                job_physical_memory_limit = (size_t) min (job_physical_memory_limit, ms.ullTotalPhys);
+            }
         }
     }
 
 exit:
-#ifdef FEATURE_CORECLR
-    if (hinstApiSetJob1OrKernel32)
-        FreeLibrary(hinstApiSetJob1OrKernel32);
-    if (hinstApiSetJob2OrKernel32)
-        FreeLibrary(hinstApiSetJob2OrKernel32);
-#endif
-
     if (job_physical_memory_limit == (size_t)MAX_PTR)
     {
         job_physical_memory_limit = 0;
 
-#ifdef FEATURE_CORECLR
-        FreeLibrary(hinstApiSetPsapiOrKernel32);
-#else
-        FreeLibrary(hinstPsapi);
-#endif
+        if (hinstKernel32 != 0)
+        {
+            FreeLibrary(hinstKernel32);
+            hinstKernel32 = 0;
+            GCGetProcessMemoryInfo = 0;
+        }
+    }
+
+    // Check to see if we are limited by VM.
+    if (total_virtual == 0)
+    {
+        MEMORYSTATUSEX ms;
+        ::GetProcessMemoryLoad(&ms);
+
+        total_virtual = ms.ullTotalVirtual;
+        total_physical = ms.ullTotalPhys;
+    }
+
+    if (job_physical_memory_limit != 0)
+    {
+        total_physical = job_physical_memory_limit;
+    }
+
+    if (total_virtual < total_physical)
+    {
+        if (hinstKernel32 != 0)
+        {
+            // We can also free the lib here - if we are limited by VM we will not be calling
+            // GetProcessMemoryInfo.
+            FreeLibrary(hinstKernel32);
+            GCGetProcessMemoryInfo = 0;
+        }
+        g_UseRestrictedVirtualMemory = true;
+        job_physical_memory_limit = (size_t)total_virtual;
     }
 
     VolatileStore(&g_RestrictedPhysicalMemoryLimit, job_physical_memory_limit);
     return g_RestrictedPhysicalMemoryLimit;
 }
 
+#else
+
+static size_t GetRestrictedPhysicalMemoryLimit()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    // The limit was cached already
+    if (g_RestrictedPhysicalMemoryLimit != (size_t)MAX_PTR)
+        return g_RestrictedPhysicalMemoryLimit;
+
+    size_t memory_limit = PAL_GetRestrictedPhysicalMemoryLimit();
+    
+    VolatileStore(&g_RestrictedPhysicalMemoryLimit, memory_limit);
+    return g_RestrictedPhysicalMemoryLimit;
+}
 #endif // FEATURE_PAL
 
 
 // Get the physical memory that this process can use.
 // Return:
 //  non zero if it has succeeded, 0 if it has failed
-uint64_t GCToOSInterface::GetPhysicalMemoryLimit()
+//
+// PERF TODO: Requires more work to not treat the restricted case to be special. 
+// To be removed before 3.0 ships.
+uint64_t GCToOSInterface::GetPhysicalMemoryLimit(bool* is_restricted)
 {
     LIMITED_METHOD_CONTRACT;
 
-#ifndef FEATURE_PAL
+    if (is_restricted)
+        *is_restricted = false;
+
     size_t restricted_limit = GetRestrictedPhysicalMemoryLimit();
     if (restricted_limit != 0)
-        return restricted_limit;
+    {
+        if (is_restricted 
+#ifndef FEATURE_PAL
+            && !g_UseRestrictedVirtualMemory
 #endif
+            )
+            *is_restricted = true;
+
+        return restricted_limit;
+    }
 
     MEMORYSTATUSEX memStatus;
     ::GetProcessMemoryLoad(&memStatus);
@@ -534,24 +822,44 @@ uint64_t GCToOSInterface::GetPhysicalMemoryLimit()
     return memStatus.ullTotalPhys;
 }
 
-// Get global memory status
+// Get memory status
 // Parameters:
-//  ms - pointer to the structure that will be filled in with the memory status
+//  memory_load - A number between 0 and 100 that specifies the approximate percentage of physical memory
+//      that is in use (0 indicates no memory use and 100 indicates full memory use).
+//  available_physical - The amount of physical memory currently available, in bytes.
+//  available_page_file - The maximum amount of memory the current process can commit, in bytes.
+// Remarks:
+//  Any parameter can be null.
 void GCToOSInterface::GetMemoryStatus(uint32_t* memory_load, uint64_t* available_physical, uint64_t* available_page_file)
 {
     LIMITED_METHOD_CONTRACT;
 
-#ifndef FEATURE_PAL
     uint64_t restricted_limit = GetRestrictedPhysicalMemoryLimit();
     if (restricted_limit != 0)
     {
-        PROCESS_MEMORY_COUNTERS pmc;
-        if (GCGetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+        size_t workingSetSize;
+        BOOL status = FALSE;
+#ifndef FEATURE_PAL
+        if (!g_UseRestrictedVirtualMemory)
+        {
+            PROCESS_MEMORY_COUNTERS pmc;
+            status = GCGetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc));
+            workingSetSize = pmc.WorkingSetSize;
+        }
+#else
+        status = PAL_GetPhysicalMemoryUsed(&workingSetSize);
+#endif
+        if(status)
         {
             if (memory_load)
-                *memory_load = (uint32_t)((float)pmc.WorkingSetSize * 100.0 / (float)restricted_limit);
+                *memory_load = (uint32_t)((float)workingSetSize * 100.0 / (float)restricted_limit);
             if (available_physical)
-                *available_physical = restricted_limit - pmc.WorkingSetSize;
+            {
+                if(workingSetSize > restricted_limit)
+                    *available_physical = 0;
+                else
+                    *available_physical = restricted_limit - workingSetSize;
+            }
             // Available page file doesn't mean much when physical memory is restricted since
             // we don't know how much of it is available to this process so we are not going to 
             // bother to make another OS call for it.
@@ -561,17 +869,35 @@ void GCToOSInterface::GetMemoryStatus(uint32_t* memory_load, uint64_t* available
             return;
         }
     }
-#endif
 
     MEMORYSTATUSEX ms;
     ::GetProcessMemoryLoad(&ms);
+    
+#ifndef FEATURE_PAL
+    if (g_UseRestrictedVirtualMemory)
+    {
+        _ASSERTE (ms.ullTotalVirtual == restricted_limit);
+        if (memory_load != NULL)
+            *memory_load = (uint32_t)((float)(ms.ullTotalVirtual - ms.ullAvailVirtual) * 100.0 / (float)ms.ullTotalVirtual);
+        if (available_physical != NULL)
+            *available_physical = ms.ullTotalVirtual;
 
-    if (memory_load != NULL)
-        *memory_load = ms.dwMemoryLoad;
-    if (available_physical != NULL)
-        *available_physical = ms.ullAvailPhys;
-    if (available_page_file != NULL)
-        *available_page_file = ms.ullAvailPageFile;
+        // Available page file isn't helpful when we are restricted by virtual memory
+        // since the amount of memory we can reserve is less than the amount of
+        // memory we can commit.
+        if (available_page_file != NULL)
+            *available_page_file = 0;
+    }
+    else
+#endif //!FEATURE_PAL
+    {
+        if (memory_load != NULL)
+            *memory_load = ms.dwMemoryLoad;
+        if (available_physical != NULL)
+            *available_physical = ms.ullAvailPhys;
+        if (available_page_file != NULL)
+            *available_page_file = ms.ullAvailPageFile;
+    }
 }
 
 // Get a high precision performance counter
@@ -620,83 +946,193 @@ uint32_t GCToOSInterface::GetLowPrecisionTimeStamp()
     return ::GetTickCount();
 }
 
-// Parameters of the GC thread stub
-struct GCThreadStubParam
-{
-    GCThreadFunction GCThreadFunction;
-    void* GCThreadParam;
-};
-
-// GC thread stub to convert GC thread function to an OS specific thread function
-static DWORD GCThreadStub(void* param)
-{
-    WRAPPER_NO_CONTRACT;
-
-    GCThreadStubParam *stubParam = (GCThreadStubParam*)param;
-    GCThreadFunction function = stubParam->GCThreadFunction;
-    void* threadParam = stubParam->GCThreadParam;
-
-    delete stubParam;
-
-    function(threadParam);
-
-    return 0;
-}
-
-// Create a new thread
-// Parameters:
-//  function - the function to be executed by the thread
-//  param    - parameters of the thread
-//  affinity - processor affinity of the thread
-// Return:
-//  true if it has succeeded, false if it has failed
-bool GCToOSInterface::CreateThread(GCThreadFunction function, void* param, GCThreadAffinity* affinity)
+uint32_t GCToOSInterface::GetTotalProcessorCount()
 {
     LIMITED_METHOD_CONTRACT;
 
-    uint32_t thread_id;
-
-    NewHolder<GCThreadStubParam> stubParam = new (nothrow) GCThreadStubParam();
-    if (stubParam == NULL)
+#ifndef FEATURE_PAL
+    if (CPUGroupInfo::CanEnableGCCPUGroups())
     {
+        return CPUGroupInfo::GetNumActiveProcessors();
+    }
+    else
+    {
+        return g_SystemInfo.dwNumberOfProcessors;
+    }
+#else // !FEATURE_PAL
+    return PAL_GetTotalCpuCount();
+#endif // !FEATURE_PAL
+}
+
+bool GCToOSInterface::CanEnableGCNumaAware()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    return NumaNodeInfo::CanEnableGCNumaAware() != FALSE;
+}
+
+bool GCToOSInterface::GetNumaInfo(uint16_t* total_nodes, uint32_t* max_procs_per_node)
+{
+#ifndef FEATURE_PAL
+    return NumaNodeInfo::GetNumaInfo(total_nodes, (DWORD*)max_procs_per_node);
+#else
+    return false;
+#endif //!FEATURE_PAL
+}
+
+bool GCToOSInterface::GetCPUGroupInfo(uint16_t* total_groups, uint32_t* max_procs_per_group)
+{
+#ifndef FEATURE_PAL
+    return CPUGroupInfo::GetCPUGroupInfo(total_groups, (DWORD*)max_procs_per_group);
+#else
+    return false;
+#endif //!FEATURE_PAL
+}
+
+bool GCToOSInterface::CanEnableGCCPUGroups()
+{
+    LIMITED_METHOD_CONTRACT;
+#ifndef FEATURE_PAL
+    return CPUGroupInfo::CanEnableGCCPUGroups() != FALSE;
+#else
+    return false;
+#endif //!FEATURE_PAL
+}
+
+// Get processor number and optionally its NUMA node number for the specified heap number
+// Parameters:
+//  heap_number - heap number to get the result for
+//  proc_no     - set to the selected processor number
+//  node_no     - set to the NUMA node of the selected processor or to NUMA_NODE_UNDEFINED
+// Return:
+//  true if it succeeded
+bool GCToOSInterface::GetProcessorForHeap(uint16_t heap_number, uint16_t* proc_no, uint16_t* node_no)
+{
+    bool success = false;
+
+    // Locate heap_number-th available processor
+    uint16_t procIndex;
+    size_t cnt = heap_number;
+    for (uint16_t i = 0; i < GCToOSInterface::GetTotalProcessorCount(); i++)
+    {
+        if (g_processAffinitySet.Contains(i))
+        {
+            if (cnt == 0)
+            {
+                procIndex = i;
+                success = true;
+                break;
+            }
+
+            cnt--;
+        }
+    }
+
+    if (success)
+    {
+#ifndef FEATURE_PAL
+        WORD gn, gpn;
+
+        if (CPUGroupInfo::CanEnableGCCPUGroups())
+        {
+            CPUGroupInfo::GetGroupForProcessor(procIndex, &gn, &gpn);
+        }
+        else
+        {
+            gn = GroupProcNo::NoGroup;
+            gpn = procIndex;
+        }
+
+        GroupProcNo groupProcNo(gn, gpn);
+        *proc_no = groupProcNo.GetCombinedValue();
+
+        PROCESSOR_NUMBER procNumber;
+
+        if (CPUGroupInfo::CanEnableGCCPUGroups())
+        {
+            procNumber.Group = gn;
+        }
+        else
+        {
+            // Get the current processor group
+            GetCurrentProcessorNumberEx(&procNumber);
+        }
+
+        if (GCToOSInterface::CanEnableGCNumaAware())
+        {
+            procNumber.Number   = (BYTE)gpn;
+            procNumber.Reserved = 0;
+
+            if (!NumaNodeInfo::GetNumaProcessorNodeEx(&procNumber, node_no))
+            {
+                *node_no = NUMA_NODE_UNDEFINED;
+            }
+        }
+        else
+        {   // no numa setting, each cpu group is treated as a node
+            *node_no = procNumber.Group;
+        }
+#else // !FEATURE_PAL
+        *proc_no = procIndex;
+        if (!GCToOSInterface::CanEnableGCNumaAware() || !NumaNodeInfo::GetNumaProcessorNodeEx(procIndex, (WORD*)node_no))
+        {
+            *node_no = NUMA_NODE_UNDEFINED;
+        }
+#endif // !FEATURE_PAL
+    }
+
+    return success;
+}
+
+// Parse the confing string describing affinitization ranges and update the passed in affinitySet accordingly
+// Parameters:
+//  config_string - string describing the affinitization range, platform specific
+//  start_index  - the range start index extracted from the config_string
+//  end_index    - the range end index extracted from the config_string, equal to the start_index if only an index and not a range was passed in
+// Return:
+//  true if the configString was successfully parsed, false if it was not correct
+bool GCToOSInterface::ParseGCHeapAffinitizeRangesEntry(const char** config_string, size_t* start_index, size_t* end_index)
+{
+    size_t index_offset = 0;
+
+    char* number_end;
+#ifndef FEATURE_PAL
+    size_t group_number = strtoul(*config_string, &number_end, 10);
+
+    if ((number_end == *config_string) || (*number_end != ':'))
+    {
+        // No number or no colon after the number found, invalid format
         return false;
     }
 
-    stubParam->GCThreadFunction = function;
-    stubParam->GCThreadParam = param;
-
-    HANDLE gc_thread = Thread::CreateUtilityThread(Thread::StackSize_Medium, GCThreadStub, stubParam, CREATE_SUSPENDED, (DWORD*)&thread_id);
-
-    if (!gc_thread)
+    WORD group_begin;
+    WORD group_size;
+    if (!CPUGroupInfo::GetCPUGroupRange((WORD)group_number, &group_begin, &group_size))
     {
+        // group number out of range
         return false;
     }
 
-    stubParam.SuppressRelease();
+    index_offset = group_begin;
+    *config_string = number_end + 1;
+#endif // !FEATURE_PAL
 
-    SetThreadPriority(gc_thread, /* THREAD_PRIORITY_ABOVE_NORMAL );*/ THREAD_PRIORITY_HIGHEST );
+    size_t start, end;
+    if (!ParseIndexOrRange(config_string, &start, &end))
+    {
+        return false;
+    }
 
 #ifndef FEATURE_PAL
-    if (affinity->Group != GCThreadAffinity::None)
+    if ((start >= group_size) || (end >= group_size))
     {
-        _ASSERTE(affinity->Processor != GCThreadAffinity::None);
-        GROUP_AFFINITY ga;
-        ga.Group = (WORD)affinity->Group;
-        ga.Reserved[0] = 0; // reserve must be filled with zero
-        ga.Reserved[1] = 0; // otherwise call may fail
-        ga.Reserved[2] = 0;
-        ga.Mask = (size_t)1 << affinity->Processor;
-
-        CPUGroupInfo::SetThreadGroupAffinity(gc_thread, &ga, NULL);
-    }
-    else if (affinity->Processor != GCThreadAffinity::None)
-    {
-        SetThreadAffinityMask(gc_thread, (DWORD_PTR)1 << affinity->Processor);
+        // Invalid CPU index values or range
+        return false;
     }
 #endif // !FEATURE_PAL
 
-    ResumeThread(gc_thread);
-    CloseHandle(gc_thread);
+    *start_index = index_offset + start;
+    *end_index = index_offset + end;
 
     return true;
 }
@@ -705,26 +1141,231 @@ bool GCToOSInterface::CreateThread(GCThreadFunction function, void* param, GCThr
 void CLRCriticalSection::Initialize()
 {
     WRAPPER_NO_CONTRACT;
-    UnsafeInitializeCriticalSection(&m_cs);
+    InitializeCriticalSection(&m_cs);
 }
 
 // Destroy the critical section
 void CLRCriticalSection::Destroy()
 {
     WRAPPER_NO_CONTRACT;
-    UnsafeDeleteCriticalSection(&m_cs);
+    DeleteCriticalSection(&m_cs);
 }
 
 // Enter the critical section. Blocks until the section can be entered.
 void CLRCriticalSection::Enter()
 {
     WRAPPER_NO_CONTRACT;
-    UnsafeEnterCriticalSection(&m_cs);
+    EnterCriticalSection(&m_cs);
 }
 
 // Leave the critical section
 void CLRCriticalSection::Leave()
 {
     WRAPPER_NO_CONTRACT;
-    UnsafeLeaveCriticalSection(&m_cs);
+    LeaveCriticalSection(&m_cs);
 }
+
+// An implementatino of GCEvent that delegates to
+// a CLREvent, which in turn delegates to the PAL. This event
+// is also host-aware.
+class GCEvent::Impl
+{
+private:
+    CLREvent m_event;
+
+public:
+    Impl() = default;
+
+    bool IsValid()
+    {
+        WRAPPER_NO_CONTRACT;
+
+        return !!m_event.IsValid();
+    }
+
+    void CloseEvent()
+    {
+        WRAPPER_NO_CONTRACT;
+
+        assert(m_event.IsValid());
+        m_event.CloseEvent();
+    }
+
+    void Set()
+    {
+        WRAPPER_NO_CONTRACT;
+
+        assert(m_event.IsValid());
+        m_event.Set();
+    }
+
+    void Reset()
+    {
+        WRAPPER_NO_CONTRACT;
+
+        assert(m_event.IsValid());
+        m_event.Reset();
+    }
+
+    uint32_t Wait(uint32_t timeout, bool alertable)
+    {
+        WRAPPER_NO_CONTRACT;
+
+        assert(m_event.IsValid());
+        return m_event.Wait(timeout, alertable);
+    }
+
+    bool CreateAutoEvent(bool initialState)
+    {
+        CONTRACTL {
+            NOTHROW;
+            GC_NOTRIGGER;
+        } CONTRACTL_END;
+
+        return !!m_event.CreateAutoEventNoThrow(initialState);
+    }
+
+    bool CreateManualEvent(bool initialState)
+    {
+        CONTRACTL {
+            NOTHROW;
+            GC_NOTRIGGER;
+        } CONTRACTL_END;
+
+        return !!m_event.CreateManualEventNoThrow(initialState);
+    }
+
+    bool CreateOSAutoEvent(bool initialState)
+    {
+        CONTRACTL {
+            NOTHROW;
+            GC_NOTRIGGER;
+        } CONTRACTL_END;
+
+        return !!m_event.CreateOSAutoEventNoThrow(initialState);
+    }
+
+    bool CreateOSManualEvent(bool initialState)
+    {
+        CONTRACTL {
+            NOTHROW;
+            GC_NOTRIGGER;
+        } CONTRACTL_END;
+
+        return !!m_event.CreateOSManualEventNoThrow(initialState);
+    }
+};
+
+GCEvent::GCEvent()
+  : m_impl(nullptr)
+{
+}
+
+void GCEvent::CloseEvent()
+{
+    WRAPPER_NO_CONTRACT;
+
+    assert(m_impl != nullptr);
+    m_impl->CloseEvent();
+}
+
+void GCEvent::Set()
+{
+    WRAPPER_NO_CONTRACT;
+
+    assert(m_impl != nullptr);
+    m_impl->Set();
+}
+
+void GCEvent::Reset()
+{
+    WRAPPER_NO_CONTRACT;
+
+    assert(m_impl != nullptr);
+    m_impl->Reset();
+}
+
+uint32_t GCEvent::Wait(uint32_t timeout, bool alertable)
+{
+    WRAPPER_NO_CONTRACT;
+
+    assert(m_impl != nullptr);
+    return m_impl->Wait(timeout, alertable);
+}
+
+bool GCEvent::CreateManualEventNoThrow(bool initialState)
+{
+    CONTRACTL {
+      NOTHROW;
+      GC_NOTRIGGER;
+    } CONTRACTL_END;
+
+    assert(m_impl == nullptr);
+    NewHolder<GCEvent::Impl> event = new (nothrow) GCEvent::Impl();
+    if (!event)
+    {
+        return false;
+    }
+
+    event->CreateManualEvent(initialState);
+    m_impl = event.Extract();
+    return true;
+}
+
+bool GCEvent::CreateAutoEventNoThrow(bool initialState)
+{
+    CONTRACTL {
+      NOTHROW;
+      GC_NOTRIGGER;
+    } CONTRACTL_END;
+
+    assert(m_impl == nullptr);
+    NewHolder<GCEvent::Impl> event = new (nothrow) GCEvent::Impl();
+    if (!event)
+    {
+        return false;
+    }
+
+    event->CreateAutoEvent(initialState);
+    m_impl = event.Extract();
+    return IsValid();
+}
+
+bool GCEvent::CreateOSAutoEventNoThrow(bool initialState)
+{
+    CONTRACTL {
+      NOTHROW;
+      GC_NOTRIGGER;
+    } CONTRACTL_END;
+
+    assert(m_impl == nullptr);
+    NewHolder<GCEvent::Impl> event = new (nothrow) GCEvent::Impl();
+    if (!event)
+    {
+        return false;
+    }
+
+    event->CreateOSAutoEvent(initialState);
+    m_impl = event.Extract();
+    return IsValid();
+}
+
+bool GCEvent::CreateOSManualEventNoThrow(bool initialState)
+{
+    CONTRACTL {
+      NOTHROW;
+      GC_NOTRIGGER;
+    } CONTRACTL_END;
+
+    assert(m_impl == nullptr);
+    NewHolder<GCEvent::Impl> event = new (nothrow) GCEvent::Impl();
+    if (!event)
+    {
+        return false;
+    }
+
+    event->CreateOSManualEvent(initialState);
+    m_impl = event.Extract();
+    return IsValid();
+}
+

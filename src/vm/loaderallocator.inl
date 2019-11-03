@@ -22,19 +22,6 @@ inline void GlobalLoaderAllocator::Init(BaseDomain *pDomain)
     LoaderAllocator::Init(pDomain, m_ExecutableHeapInstance);
 }
 
-inline void AppDomainLoaderAllocator::Init(AppDomain *pAppDomain) 
-{
-    WRAPPER_NO_CONTRACT;
-    m_Id.Init(pAppDomain);
-    LoaderAllocator::Init((BaseDomain *)pAppDomain);
-}
-
-inline void LoaderAllocatorID::Init(AppDomain *pAppDomain)
-{
-    m_type = LAT_AppDomain;
-    m_pAppDomain = pAppDomain;
-}
-
 inline void AssemblyLoaderAllocator::Init(AppDomain* pAppDomain)
 {
     m_Id.Init();
@@ -56,49 +43,42 @@ inline void LoaderAllocatorID::Init()
     m_type = LAT_Assembly;
 };
 
-inline void LoaderAllocatorID::SetDomainAssembly(DomainAssembly* pAssembly)
+inline void LoaderAllocatorID::AddDomainAssembly(DomainAssembly* pAssembly)
 {
     LIMITED_METHOD_CONTRACT;
     _ASSERTE(m_type == LAT_Assembly);
+
+    // Link domain assembly together
+    if (m_pDomainAssembly != NULL)
+    {
+        pAssembly->SetNextDomainAssemblyInSameALC(m_pDomainAssembly);
+    }
     m_pDomainAssembly = pAssembly;
 }
 
 inline VOID* LoaderAllocatorID::GetValue()
 {
-	LIMITED_METHOD_DAC_CONTRACT;
+    LIMITED_METHOD_DAC_CONTRACT;
     return m_pValue;
 }
 
 inline COUNT_T LoaderAllocatorID::Hash()
 {
-	LIMITED_METHOD_DAC_CONTRACT;
+    LIMITED_METHOD_DAC_CONTRACT;
     return (COUNT_T)(SIZE_T)GetValue();
 }
 
 inline LoaderAllocatorType LoaderAllocatorID::GetType()
 {
-	LIMITED_METHOD_DAC_CONTRACT;
+    LIMITED_METHOD_DAC_CONTRACT;
     return m_type;
 }
 
-inline DomainAssembly* LoaderAllocatorID::GetDomainAssembly()
+inline DomainAssemblyIterator LoaderAllocatorID::GetDomainAssemblyIterator()
 {
-	LIMITED_METHOD_DAC_CONTRACT;
+    LIMITED_METHOD_DAC_CONTRACT;
     _ASSERTE(m_type == LAT_Assembly);
-    return m_pDomainAssembly;
-}
-
-inline AppDomain *LoaderAllocatorID::GetAppDomain()
-{
-	LIMITED_METHOD_DAC_CONTRACT;
-    _ASSERTE(m_type == LAT_AppDomain);
-    return m_pAppDomain;
-}
-
-inline BOOL LoaderAllocatorID::IsCollectible()
-{
-    LIMITED_METHOD_DAC_CONTRACT; 
-    return m_type == LAT_Assembly;
+    return DomainAssemblyIterator(m_pDomainAssembly);
 }
 
 inline LoaderAllocatorID* AssemblyLoaderAllocator::Id()
@@ -110,12 +90,6 @@ inline LoaderAllocatorID* AssemblyLoaderAllocator::Id()
 inline LoaderAllocatorID* GlobalLoaderAllocator::Id()
 {
     LIMITED_METHOD_DAC_CONTRACT; 
-    return &m_Id;
-}
-
-inline LoaderAllocatorID* AppDomainLoaderAllocator::Id()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
     return &m_Id;
 }
 
@@ -179,5 +153,66 @@ FORCEINLINE OBJECTREF LoaderAllocator::GetHandleValueFastCannotFailType2(LOADERH
 
     return handleTable->GetAt(index);
 }
+
+inline bool SegmentedHandleIndexStack::Push(DWORD value)
+{
+    LIMITED_METHOD_CONTRACT;
+
+    if (m_TOSIndex == Segment::Size)
+    {
+        Segment* segment;
+
+        if (m_freeSegment == NULL)
+        {
+            segment = new (nothrow) Segment();
+            if (segment == NULL)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            segment = m_freeSegment;
+            m_freeSegment = NULL;
+        }
+
+        segment->m_prev = m_TOSSegment;
+        m_TOSSegment = segment;
+
+        m_TOSIndex = 0;
+    }
+
+    m_TOSSegment->m_data[m_TOSIndex++] = value;
+    return true;
+}
+
+inline DWORD SegmentedHandleIndexStack::Pop()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    _ASSERTE(!IsEmpty());
+
+    if (m_TOSIndex == 0)
+    {
+        Segment* prevSegment = m_TOSSegment->m_prev;
+        _ASSERTE(prevSegment != NULL);
+
+        delete m_freeSegment;
+        m_freeSegment = m_TOSSegment;
+
+        m_TOSSegment = prevSegment;
+        m_TOSIndex = Segment::Size;
+    }
+
+    return m_TOSSegment->m_data[--m_TOSIndex];
+}
+
+inline bool SegmentedHandleIndexStack::IsEmpty()
+{
+    LIMITED_METHOD_CONTRACT;
+
+    return (m_TOSSegment == NULL) || ((m_TOSIndex == 0) && (m_TOSSegment->m_prev == NULL));
+}
+
 #endif //  _LOADER_ALLOCATOR_I
 

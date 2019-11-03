@@ -5,12 +5,9 @@ set(PALRT_SOURCES
     bstr.cpp
     coguid.cpp
     comem.cpp
-    decarith.cpp
-    decconv.cpp
     guid.cpp
     memorystream.cpp
     path.cpp
-    urlpars.cpp
     unicode.cpp
     variant.cpp
 )
@@ -23,4 +20,4 @@ add_library_clr(palrt
 )
 
 # Install the static PAL library for VS
-install (TARGETS palrt DESTINATION lib)
+_install (TARGETS palrt DESTINATION lib)

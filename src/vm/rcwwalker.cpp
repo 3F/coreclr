@@ -129,10 +129,10 @@ STDMETHODIMP CLRServicesImpl::GarbageCollect(DWORD dwFlags)
     {
         GCX_COOP_THREAD_EXISTS(GET_THREAD());
         if (dwFlags & GC_FOR_APPX_SUSPEND) {
-            GCHeap::GetGCHeap()->GarbageCollect(2, TRUE, collection_blocking | collection_optimized);
+            GCHeapUtilities::GetGCHeap()->GarbageCollect(2, true, collection_blocking | collection_optimized);
         }
         else
-            GCHeap::GetGCHeap()->GarbageCollect();
+            GCHeapUtilities::GetGCHeap()->GarbageCollect();
     }
     END_EXTERNAL_ENTRYPOINT;
     return hr;
@@ -266,7 +266,7 @@ STDMETHODIMP CLRServicesImpl::CreateManagedReference(IUnknown *pTarget, ICCW **p
             //
             // Figure out the right IVector<T1>/IVectorView<T2>
             //
-            MethodTable *pMT = gc.TargetObj->GetTrueMethodTable();
+            MethodTable *pMT = gc.TargetObj->GetMethodTable();
 
             TypeHandle thArgs[2];
             
@@ -558,18 +558,11 @@ void RCWWalker::WalkRCWs()
 
     BOOL bWalkFailed = FALSE;
     
-    //
-    // Walk every AppDomain
-    // Use UnsafeAppDomain iterator to avoid taking locks
-    //
     HRESULT hr = S_OK;
     EX_TRY
     {
-        UnsafeAppDomainIterator appDomainIterator(TRUE);
-        appDomainIterator.Init();
-        while (appDomainIterator.Next())
         {
-            AppDomain *pDomain = appDomainIterator.GetDomain();
+            AppDomain *pDomain = ::GetAppDomain(); // There is only actually 1 AppDomain in CoreCLR, so no iterator
             
             RCWRefCache *pRCWRefCache = pDomain->GetRCWRefCache();
             _ASSERTE(pRCWRefCache != NULL);
@@ -590,11 +583,6 @@ void RCWWalker::WalkRCWs()
             // Shrink the dependent handle cache if necessary and clear unused handles.
             //
             pRCWRefCache->ShrinkDependentHandles();
-
-            if (FAILED(hr))
-            {
-                break;
-            }
         }
     }
     EX_CATCH

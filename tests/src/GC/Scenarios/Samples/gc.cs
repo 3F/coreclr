@@ -273,16 +273,21 @@ class Application {
     static public ResurrectObj ResObjHolder;    // Defaults to null
 
 
-    // This method demonstrates how the GC supports resurrection.
+    // These methods demonstrate how the GC supports resurrection.
     // NOTE: Resurrection is discouraged.
-    private static void ResurrectionDemo() {
-        Display(0, "\n\nDemo start: Object Resurrection.", +1);
-
+    private static void ResurrectionInit() {
         // Create a ResurrectionObj
         ResurrectObj obj = new ResurrectObj("Resurrection");
 
         // Destroy all strong references to the new ResurrectionObj
         obj = null;
+    }
+
+    private static void ResurrectionDemo() {
+        Display(0, "\n\nDemo start: Object Resurrection.", +1);
+
+        // Create a ResurrectionObj and drop it on the floor.
+        ResurrectionInit();
 
         // Force the GC to determine that the object is unreachable.
         Collect();
@@ -512,11 +517,6 @@ class Application {
         
         // Demos Finalize on Shutdown symantics (this demo is inline) 
         Display(0, "\n\nDemo start: Finalize on shutdown.", +1);
-
-        // Normally, when an application terminates, the GC does NOT collect and run finalizers.
-        // The line below forces the GC to do complete object cleanup
-        // GC.RequestFinalizeOnShutdown(); // For default behavior, comment out this line
-        // NOTE: Once you request FinalizeOnShutdown, you cannot change your mind.
 
         // When Main returns, obj will have its Finalize method called.
         BaseObj obj = new BaseObj("Shutdown");

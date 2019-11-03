@@ -8,7 +8,7 @@
 #include "clrprivbinderassemblyloadcontext.h"
 #include "clrprivbinderutil.h"
 
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER) && !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 
 using namespace BINDER_SPACE;
 
@@ -45,7 +45,7 @@ HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByNameWorker(BINDER_SPACE:
 }
 
 HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByName(IAssemblyName     *pIAssemblyName,
-                                                 ICLRPrivAssembly **ppAssembly)
+                                                             ICLRPrivAssembly **ppAssembly)
 {
     HRESULT hr = S_OK;
     VALIDATE_ARG_RET(pIAssemblyName != nullptr && ppAssembly != nullptr);
@@ -65,9 +65,10 @@ HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByName(IAssemblyName     *
         //
         // 1) Lookup the assembly within the LoadContext itself. If assembly is found, use it.
         // 2) Invoke the LoadContext's Load method implementation. If assembly is found, use it.
-        // 3) Lookup the assembly within TPABinder. If assembly is found, use it.
-        // 4) Invoke the LoadContext's Resolving event. If assembly is found, use it.
-        // 5) Raise exception.
+        // 3) Lookup the assembly within TPABinder (except for satellite requests). If assembly is found, use it.
+        // 4) Invoke the LoadContext's ResolveSatelliteAssembly method (for satellite requests). If assembly is found, use it.
+        // 5) Invoke the LoadContext's Resolving event. If assembly is found, use it.
+        // 6) Raise exception.
         //
         // This approach enables a LoadContext to override assemblies that have been loaded in TPA context by loading
         // a different (or even the same!) version.
@@ -169,21 +170,6 @@ Exit:;
     return hr;
 }
                               
-HRESULT CLRPrivBinderAssemblyLoadContext::VerifyBind(IAssemblyName        *AssemblyName,
-                                         ICLRPrivAssembly     *pAssembly,
-                                         ICLRPrivAssemblyInfo *pAssemblyInfo)
-{
-    return E_FAIL;
-}
-         
-HRESULT CLRPrivBinderAssemblyLoadContext::GetBinderFlags(DWORD *pBinderFlags)
-{
-    if (pBinderFlags == NULL)
-        return E_INVALIDARG;
-    *pBinderFlags = BINDER_NONE;
-    return S_OK;
-}
-         
 HRESULT CLRPrivBinderAssemblyLoadContext::GetBinderID( 
         UINT_PTR *pBinderId)
 {
@@ -191,16 +177,16 @@ HRESULT CLRPrivBinderAssemblyLoadContext::GetBinderID(
     return S_OK;
 }
          
-HRESULT CLRPrivBinderAssemblyLoadContext::FindAssemblyBySpec( 
-            LPVOID pvAppDomain,
-            LPVOID pvAssemblySpec,
-            HRESULT *pResult,
-            ICLRPrivAssembly **ppAssembly)
+HRESULT CLRPrivBinderAssemblyLoadContext::GetLoaderAllocator(LPVOID* pLoaderAllocator)
 {
-    // We are not using a cache at this level
-    // However, assemblies bound by the CoreCLR binder is already cached in the
-    // AppDomain and will be resolved from there if required
-    return E_FAIL;
+    _ASSERTE(pLoaderAllocator != NULL);
+    if (m_pAssemblyLoaderAllocator == NULL)
+    {
+        return E_FAIL;
+    }
+
+    *pLoaderAllocator = m_pAssemblyLoaderAllocator;
+    return S_OK;
 }
 
 //=============================================================================
@@ -212,7 +198,9 @@ HRESULT CLRPrivBinderAssemblyLoadContext::FindAssemblyBySpec(
 /* static */
 HRESULT CLRPrivBinderAssemblyLoadContext::SetupContext(DWORD      dwAppDomainId,
                                             CLRPrivBinderCoreCLR *pTPABinder,
-                                            UINT_PTR ptrAssemblyLoadContext,                                            
+                                            LoaderAllocator* pLoaderAllocator,
+                                            void* loaderAllocatorHandle,
+                                            UINT_PTR ptrAssemblyLoadContext,
                                             CLRPrivBinderAssemblyLoadContext **ppBindContext)
 {
     HRESULT hr = E_FAIL;
@@ -228,10 +216,7 @@ HRESULT CLRPrivBinderAssemblyLoadContext::SetupContext(DWORD      dwAppDomainId,
             {
                 // Save the reference to the AppDomain in which the binder lives
                 pBinder->m_appContext.SetAppDomainId(dwAppDomainId);
-                
-                // Mark that this binder can explicitly bind to native images
-                pBinder->m_appContext.SetExplicitBindToNativeImages(true);
-                
+
                 // Save reference to the TPABinder that is required to be present.
                 _ASSERTE(pTPABinder != NULL);
                 pBinder->m_pTPABinder = pTPABinder;
@@ -240,6 +225,20 @@ HRESULT CLRPrivBinderAssemblyLoadContext::SetupContext(DWORD      dwAppDomainId,
                 // AssemblyLoadContext instance
                 pBinder->m_ptrManagedAssemblyLoadContext = ptrAssemblyLoadContext;
 
+                if (pLoaderAllocator != NULL)
+                {
+                    // Link to LoaderAllocator, keep a reference to it
+                    VERIFY(pLoaderAllocator->AddReferenceIfAlive());
+                }
+                pBinder->m_pAssemblyLoaderAllocator = pLoaderAllocator;
+                pBinder->m_loaderAllocatorHandle = loaderAllocatorHandle;
+
+#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+                if (pLoaderAllocator != NULL)
+                {
+                    ((AssemblyLoaderAllocator*)pLoaderAllocator)->RegisterBinder(pBinder);
+                }
+#endif
                 // Return reference to the allocated Binder instance
                 *ppBindContext = clr::SafeAddRef(pBinder.Extract());
             }
@@ -251,9 +250,52 @@ Exit:
     return hr;
 }
 
+void CLRPrivBinderAssemblyLoadContext::PrepareForLoadContextRelease(INT_PTR ptrManagedStrongAssemblyLoadContext)
+{
+    CONTRACTL
+    {
+        GC_NOTRIGGER;
+        THROWS;
+        MODE_COOPERATIVE;
+    }
+    CONTRACTL_END;
+
+    // Replace the weak handle with a strong handle so that the managed assembly load context stays alive until the
+    // CLRPrivBinderAssemblyLoadContext::ReleaseLoadContext is called.
+    OBJECTHANDLE handle = reinterpret_cast<OBJECTHANDLE>(m_ptrManagedAssemblyLoadContext);
+    OBJECTHANDLE strongHandle = reinterpret_cast<OBJECTHANDLE>(ptrManagedStrongAssemblyLoadContext);
+    DestroyLongWeakHandle(handle);
+    m_ptrManagedAssemblyLoadContext = reinterpret_cast<INT_PTR>(strongHandle);
+
+    _ASSERTE(m_pAssemblyLoaderAllocator != NULL);
+    _ASSERTE(m_loaderAllocatorHandle != NULL);
+
+    // We cannot delete the binder here as it is used indirectly when comparing assemblies with the same binder
+    // It will be deleted when the LoaderAllocator will be deleted
+    // But we can release the LoaderAllocator as we are no longer using it here
+    m_pAssemblyLoaderAllocator->Release();
+    m_pAssemblyLoaderAllocator = NULL;
+
+    // Destroy the strong handle to the LoaderAllocator in order to let it reach its finalizer
+    DestroyHandle(reinterpret_cast<OBJECTHANDLE>(m_loaderAllocatorHandle));
+    m_loaderAllocatorHandle = NULL;
+}
+
 CLRPrivBinderAssemblyLoadContext::CLRPrivBinderAssemblyLoadContext()
 {
     m_pTPABinder = NULL;
 }
 
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER) && !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+void CLRPrivBinderAssemblyLoadContext::ReleaseLoadContext()
+{
+    VERIFY(m_ptrManagedAssemblyLoadContext != NULL);
+
+    // This method is called to release the strong handle on the managed AssemblyLoadContext
+    // once the Unloading event has been fired
+    OBJECTHANDLE handle = reinterpret_cast<OBJECTHANDLE>(m_ptrManagedAssemblyLoadContext);
+    DestroyHandle(handle);
+    m_ptrManagedAssemblyLoadContext = NULL;
+}
+
+#endif // !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+

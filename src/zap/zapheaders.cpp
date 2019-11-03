@@ -19,6 +19,9 @@
 #include "zapmetadata.h"
 #include "zapimport.h"
 
+#include <clr_std/vector>
+#include <clr_std/algorithm>
+
 //
 // IMAGE_COR20_HEADER
 //
@@ -95,7 +98,7 @@ void ZapImage::SaveNativeHeader()
         // Pretend that ready-to-run images are IL-only
         nativeHeader.COR20Flags |= COMIMAGE_FLAGS_ILONLY;
 
-        // Pretend that ready-to-run images do not have native header
+        // Pretend that ready-to-run images do not have a native header
         nativeHeader.COR20Flags &= ~COMIMAGE_FLAGS_IL_LIBRARY;
 
         // Remember whether the source IL image had ReadyToRun header
@@ -116,7 +119,6 @@ void ZapImage::SaveNativeHeader()
     SetDirectoryData(&nativeHeader.EEInfoTable, m_pEEInfoTable);
     SetDirectoryData(&nativeHeader.HelperTable, m_pHelperTableSection);
     SetDirectoryData(&nativeHeader.ImportSections, m_pImportSectionsTable);
-    SetDirectoryData(&nativeHeader.ImportTable, m_pImportTable);
     SetDirectoryData(&nativeHeader.StubsData, m_pStubsSection);
     SetDirectoryData(&nativeHeader.VersionInfo, m_pVersionInfo);
     SetDirectoryData(&nativeHeader.Dependencies, m_pDependencies);
@@ -171,11 +173,13 @@ void ZapImage::SaveCodeManagerEntry()
 
     if (m_stats)
     {
+#define ACCUM_SIZE(dest, src) if( src != NULL ) dest+= src->GetSize()
         // this is probably supposed to mean Hot+Unprofiled
-        m_stats->m_totalHotCodeSize = m_pHotCodeSection->GetSize(); 
-        m_stats->m_totalUnprofiledCodeSize = m_pCodeSection->GetSize();
-        m_stats->m_totalColdCodeSize = m_pColdCodeSection->GetSize();
-        m_stats->m_totalCodeSizeInProfiledMethods = m_pHotCodeSection->GetSize();
+        ACCUM_SIZE(m_stats->m_totalHotCodeSize, m_pHotCodeSection);
+        ACCUM_SIZE(m_stats->m_totalUnprofiledCodeSize, m_pCodeSection);
+        ACCUM_SIZE(m_stats->m_totalColdCodeSize, m_pColdCodeSection);
+        ACCUM_SIZE(m_stats->m_totalCodeSizeInProfiledMethods, m_pHotCodeSection);
+#undef ACCUM_SIZE
         m_stats->m_totalColdCodeSizeInProfiledMethods = codeManagerEntry.ColdUntrainedMethodOffset;
     }
 
@@ -189,56 +193,252 @@ void ZapImage::SaveCodeManagerEntry()
 // Needed for RT_VERSION.
 #define MAKEINTRESOURCE(v) MAKEINTRESOURCEW(v)
 
-void ZapVersionResource::Save(ZapWriter * pZapWriter)
+void ZapWin32ResourceDirectory::Save(ZapWriter * pZapWriter)
 {
-    // Resources are binary-sorted tree structure. Since we are saving just one resource
-    // the binary structure is degenerated link list. By convention, Windows uses three levels
-    // for resources: Type, Name, Language.
+    //
+    // The IMAGE_RESOURCE_DIRECTORY resource data structure is followed by a number of IMAGE_RESOURCE_DIRECTORY_ENTRY entries, which can either 
+    // point to other resource directories (RVAs to other ZapWin32ResourceDirectory nodes), or point to actual resource data (RVAs to a number 
+    // of IMAGE_RESOURCE_DATA_ENTRY entries that immediately follow the IMAGE_RESOURCE_DIRECTORY_ENTRY entries).
+    //
 
-    // See vctools\link\doc\pecoff.doc for detailed documentation of PE format.
+    //
+    // Sorting for resources is done in the following way accoring to the PE format specifications:
+    //   1) First, all the IMAGE_RESOURCE_DIRECTORY_ENTRY entries where the ID is a name string, sorted by names
+    //   2) Second, all the IMAGE_RESOURCE_DIRECTORY_ENTRY entries with non-string IDs, sorted by IDs.
+    //
+    struct ResourceSorter
+    {
+        bool operator() (DataOrSubDirectoryEntry& a, DataOrSubDirectoryEntry& b)
+        {
+            if (a.m_nameOrIdIsString && !b.m_nameOrIdIsString)
+                return true;
+            if (!a.m_nameOrIdIsString && b.m_nameOrIdIsString)
+                return false;
+            if (a.m_nameOrIdIsString)
+                return wcscmp(((ZapWin32ResourceString*)(a.m_pNameOrId))->GetString(), ((ZapWin32ResourceString*)(b.m_pNameOrId))->GetString()) < 0;
+            else
+                return a.m_pNameOrId < b.m_pNameOrId;
+        }
+    } resourceSorter;
+    std::sort(m_entries.begin(), m_entries.end(), resourceSorter);
 
-    VersionResourceHeader header;
 
-    ZeroMemory(&header, sizeof(header));
+    IMAGE_RESOURCE_DIRECTORY directory;
+    ZeroMemory(&directory, sizeof(IMAGE_RESOURCE_DIRECTORY));
 
-    header.TypeDir.NumberOfIdEntries = 1;
-    header.TypeEntry.Id = (USHORT)((ULONG_PTR)RT_VERSION);
-    header.TypeEntry.OffsetToDirectory = offsetof(VersionResourceHeader, NameDir);
-    header.TypeEntry.DataIsDirectory = 1;
+    for (auto& entry : m_entries)
+    {
+        if (entry.m_nameOrIdIsString)
+            directory.NumberOfNamedEntries++;
+        else
+            directory.NumberOfIdEntries++;
+    }
+    pZapWriter->Write(&directory, sizeof(IMAGE_RESOURCE_DIRECTORY));
 
-    header.NameDir.NumberOfIdEntries = 1;
-    header.NameEntry.Id = 1;
-    header.NameEntry.OffsetToDirectory = offsetof(VersionResourceHeader, LangDir);
-    header.NameEntry.DataIsDirectory = 1;
+    // Offsets are based from the begining of the resources blob (see PE format documentation)
+    DWORD dataEntryRVA = this->GetRVA() - m_pWin32ResourceSection->GetRVA()
+        + sizeof(IMAGE_RESOURCE_DIRECTORY) + 
+        (DWORD)m_entries.size() * sizeof(IMAGE_RESOURCE_DIRECTORY_ENTRY);
 
-    header.LangDir.NumberOfIdEntries = 1;
-    header.LangEntry.OffsetToDirectory = offsetof(VersionResourceHeader, DataEntry);
+    for (auto& entry : m_entries)
+    {
+        IMAGE_RESOURCE_DIRECTORY_ENTRY dirEntry;
+        ZeroMemory(&dirEntry, sizeof(IMAGE_RESOURCE_DIRECTORY_ENTRY));
 
-    header.DataEntry.OffsetToData = m_pVersionData->GetRVA();
-    header.DataEntry.Size = m_pVersionData->GetSize();
+        if (entry.m_nameOrIdIsString)
+        {
+            // Offsets are based from the begining of the resources blob (see PE format documentation)
+            dirEntry.NameOffset = ((ZapWin32ResourceString*)(entry.m_pNameOrId))->GetRVA() - m_pWin32ResourceSection->GetRVA();
+            dirEntry.NameIsString = true;
+        }
+        else
+        {
+            _ASSERT(IS_INTRESOURCE(entry.m_pNameOrId));
+            dirEntry.Id = (WORD)((ULONG_PTR)entry.m_pNameOrId & 0xffff);
+        }
 
-    pZapWriter->Write(&header, sizeof(header));
+        if (entry.m_dataIsSubDirectory)
+        {
+            // Offsets are based from the begining of the resources blob (see PE format documentation)
+            dirEntry.OffsetToDirectory = entry.m_pDataOrSubDirectory->GetRVA() - m_pWin32ResourceSection->GetRVA();
+            dirEntry.DataIsDirectory = true;
+        }
+        else
+        {
+            dirEntry.OffsetToData = dataEntryRVA;
+            dataEntryRVA += sizeof(IMAGE_RESOURCE_DATA_ENTRY);
+        }
+
+        pZapWriter->Write(&dirEntry, sizeof(IMAGE_RESOURCE_DIRECTORY_ENTRY));
+    }
+
+    for (auto& entry : m_entries)
+    {
+        if (entry.m_dataIsSubDirectory)
+            continue;
+
+        IMAGE_RESOURCE_DATA_ENTRY dataEntry;
+        ZeroMemory(&dataEntry, sizeof(IMAGE_RESOURCE_DATA_ENTRY));
+
+        dataEntry.OffsetToData = entry.m_pDataOrSubDirectory->GetRVA();
+        dataEntry.Size = entry.m_pDataOrSubDirectory->GetSize();
+
+        pZapWriter->Write(&dataEntry, sizeof(IMAGE_RESOURCE_DATA_ENTRY));
+    }
 }
 
-void ZapImage::CopyWin32VersionResource()
+void ZapImage::CopyWin32Resources()
 {
-#ifndef FEATURE_PAL
-    // Copy the version resource over so it is easy to see in the dumps where the ngened module came from
-    COUNT_T cbResourceData;
-    PVOID pResourceData = m_ModuleDecoder.GetWin32Resource(MAKEINTRESOURCE(1), RT_VERSION, &cbResourceData);
+#ifdef FEATURE_PREJIT
+    if (!IsReadyToRunCompilation())
+    {
+        // When compiling a fragile NGEN image, in order to avoid the risk of regression, only copy the RT_VERSION resource over so it 
+        // is easy to see in the dumps where the ngened module came from. For R2R, we copy all resources (new behavior).
+        COUNT_T cbResourceData;
+        PVOID pResourceData = m_ModuleDecoder.GetWin32Resource(MAKEINTRESOURCE(1), RT_VERSION, &cbResourceData);
 
-    if (!pResourceData || !cbResourceData)
+        if (!pResourceData || !cbResourceData)
+            return;
+
+        ZapBlob * pVersionData = new (GetHeap()) ZapBlobPtr(pResourceData, cbResourceData);
+
+        ZapWin32ResourceDirectory* pTypeDirectory = new (GetHeap()) ZapWin32ResourceDirectory(m_pWin32ResourceSection);
+        ZapWin32ResourceDirectory* pNameDirectory = new (GetHeap()) ZapWin32ResourceDirectory(m_pWin32ResourceSection);
+        ZapWin32ResourceDirectory* pLanguageDirectory = new (GetHeap()) ZapWin32ResourceDirectory(m_pWin32ResourceSection);
+
+        pTypeDirectory->AddEntry(RT_VERSION, false, pNameDirectory, true);
+        pNameDirectory->AddEntry(MAKEINTRESOURCE(1), false, pLanguageDirectory, true);
+        pLanguageDirectory->AddEntry(MAKEINTRESOURCE(0), false, pVersionData, false);
+
+        pTypeDirectory->PlaceNodeAndDependencies(m_pWin32ResourceSection);
+
+        m_pWin32ResourceSection->Place(pVersionData);
+
+        SetDirectoryEntry(IMAGE_DIRECTORY_ENTRY_RESOURCE, m_pWin32ResourceSection);
+
         return;
-
-    ZapBlob * pVersionData = new (GetHeap()) ZapBlobPtr(pResourceData, cbResourceData);
-
-    ZapVersionResource * pVersionResource = new (GetHeap()) ZapVersionResource(pVersionData);
-
-    m_pWin32ResourceSection->Place(pVersionResource);
-    m_pWin32ResourceSection->Place(pVersionData);
-
-    SetDirectoryEntry(IMAGE_DIRECTORY_ENTRY_RESOURCE, m_pWin32ResourceSection);
+    }
 #endif
+
+    class ResourceEnumerationCallback
+    {
+        ZapImage* m_pZapImage;
+        PEDecoder* m_pModuleDecoder;
+
+        std::vector<ZapNode*> m_dataEntries;
+        std::vector<ZapBlob*> m_stringEntries;
+
+        ZapWin32ResourceDirectory* m_pRootDirectory;
+        ZapWin32ResourceDirectory* m_pCurrentTypesDirectory;
+        ZapWin32ResourceDirectory* m_pCurrentNamesDirectory;
+
+        bool AddResource(LPCWSTR lpszResourceName, LPCWSTR lpszResourceType, DWORD langID, BYTE* pResourceData, COUNT_T cbResourceData)
+        {
+            ZapBlob* pDataBlob = new (m_pZapImage->GetHeap()) ZapBlobPtr(pResourceData, cbResourceData);
+            m_dataEntries.push_back(pDataBlob);
+
+            m_pCurrentNamesDirectory->AddEntry((PVOID)(ULONG_PTR)langID, false, pDataBlob, false);
+
+            return true;
+        }
+
+        ZapWin32ResourceDirectory* CreateResourceSubDirectory(ZapWin32ResourceDirectory* pRootDir, LPCWSTR pNameOrId)
+        {
+            bool nameIsString = !IS_INTRESOURCE(pNameOrId);
+
+            PVOID pIdOrNameZapNode = (PVOID)pNameOrId;
+            if (nameIsString)
+            {
+                pIdOrNameZapNode = new (m_pZapImage->GetHeap()) ZapWin32ResourceString(pNameOrId);
+                m_stringEntries.push_back((ZapBlob*)pIdOrNameZapNode);
+            }
+
+            ZapWin32ResourceDirectory* pResult = new (m_pZapImage->GetHeap()) ZapWin32ResourceDirectory(m_pZapImage->m_pWin32ResourceSection);
+            pRootDir->AddEntry(pIdOrNameZapNode, nameIsString, pResult, true);
+
+            return pResult;
+        }
+
+    public:
+        ResourceEnumerationCallback(PEDecoder* pModuleDecoder, ZapImage* pZapImage)
+            : m_pZapImage(pZapImage), m_pModuleDecoder(pModuleDecoder)
+        {
+            m_pRootDirectory = new (pZapImage->GetHeap()) ZapWin32ResourceDirectory(pZapImage->m_pWin32ResourceSection);
+            m_pCurrentTypesDirectory = m_pCurrentNamesDirectory = NULL;
+        }
+
+        static bool EnumResourcesCallback(LPCWSTR lpszResourceName, LPCWSTR lpszResourceType, DWORD langID, BYTE* data, COUNT_T cbData, void *context)
+        {
+            ResourceEnumerationCallback* pCallback = (ResourceEnumerationCallback*)context;
+            // Third level in the enumeration: resources by langid for each name/type. 
+
+            // Note that this callback is not equivalent to the Windows enumeration apis as this api provides the resource data
+            // itself, and the resources are guaranteed to be present directly in the associated binary. This does not exactly
+            // match the Windows api, but it is exactly what we want when copying all resource data.
+
+            return pCallback->AddResource(lpszResourceName, lpszResourceType, langID, data, cbData);
+        }
+
+        static bool EnumResourceNamesCallback(LPCWSTR lpszResourceName, LPCWSTR lpszResourceType, void *context)
+        {
+            // Second level in the enumeration: resources by names for each resource type
+
+            ResourceEnumerationCallback* pCallback = (ResourceEnumerationCallback*)context;
+            pCallback->m_pCurrentNamesDirectory = pCallback->CreateResourceSubDirectory(pCallback->m_pCurrentTypesDirectory, lpszResourceName);
+            
+            return pCallback->m_pModuleDecoder->EnumerateWin32Resources(lpszResourceName, lpszResourceType, ResourceEnumerationCallback::EnumResourcesCallback, context);
+        }
+
+        static bool EnumResourceTypesCallback(LPCWSTR lpszType, void *context)
+        {
+            // First level in the enumeration: resources by types
+
+            // Skip IBC resources
+            if (!IS_INTRESOURCE(lpszType) && (wcscmp(lpszType, W("IBC")) == 0))
+                return true;
+
+            ResourceEnumerationCallback* pCallback = (ResourceEnumerationCallback*)context;
+            pCallback->m_pCurrentTypesDirectory = pCallback->CreateResourceSubDirectory(pCallback->m_pRootDirectory, lpszType);
+
+            return pCallback->m_pModuleDecoder->EnumerateWin32ResourceNames(lpszType, ResourceEnumerationCallback::EnumResourceNamesCallback, context);
+        }
+
+        void PlaceResourceNodes(ZapVirtualSection* pWin32ResourceSection)
+        {
+            m_pRootDirectory->PlaceNodeAndDependencies(pWin32ResourceSection);
+
+            //
+            // These strings are stored together after the last Resource Directory entry and before the first Resource Data entry. This 
+            // minimizes the impact of these variable-length strings on the alignment of the fixed-size directory entries
+            //
+            for (auto& entry : m_stringEntries)
+                pWin32ResourceSection->Place(entry);
+
+            for (auto& entry : m_dataEntries)
+                pWin32ResourceSection->Place(entry);
+        }
+    };
+
+    ResourceEnumerationCallback callbacks(&m_ModuleDecoder, this);
+
+    HMODULE hModule = (HMODULE)dac_cast<TADDR>(m_ModuleDecoder.GetBase());
+
+    //
+    // Resources are binary-sorted tree structure. By convention, Windows uses three levels
+    // for resources: Type, Name, Language. To reduces the overall complexity, we'll copy and store resources in the
+    // "neutral" language only.
+    //
+
+    if (!m_ModuleDecoder.EnumerateWin32ResourceTypes(ResourceEnumerationCallback::EnumResourceTypesCallback, &callbacks))
+    {
+        ThrowHR(E_FAIL);
+    }
+    else
+    {
+        callbacks.PlaceResourceNodes(m_pWin32ResourceSection);
+
+        SetDirectoryEntry(IMAGE_DIRECTORY_ENTRY_RESOURCE, m_pWin32ResourceSection);
+    }
 }
 #undef MAKEINTRESOURCE
 
@@ -249,31 +449,52 @@ void ZapImage::CopyWin32VersionResource()
 
 void ZapDebugDirectory::SaveOriginalDebugDirectoryEntry(ZapWriter *pZapWriter)
 {
-    if (m_pDebugData != NULL)
+    if (m_ppDebugData != nullptr)
     {
-        m_debugDirectory.SizeOfData = m_pDebugData->GetSize();
-        m_debugDirectory.AddressOfRawData = m_pDebugData->GetRVA();
+        for (DWORD i = 0; i < m_nDebugDirectory; i++)
+        {
+            if (m_ppDebugData[i] != nullptr)
+            {
+                m_pDebugDirectory[i].SizeOfData = m_ppDebugData[i]->GetSize();
+                m_pDebugDirectory[i].AddressOfRawData = m_ppDebugData[i]->GetRVA();
 
-        // Compute the absolute file (seek) pointer. We need to reach to the matching physical section to do that.
-        ZapPhysicalSection * pPhysicalSection = ZapImage::GetImage(pZapWriter)->m_pTextSection;
+                // Compute the absolute file (seek) pointer. We need to reach to the matching physical section to do that.
+                ZapPhysicalSection * pPhysicalSection = ZapImage::GetImage(pZapWriter)->m_pTextSection;
 
-        DWORD dwOffset = m_pDebugData->GetRVA() - pPhysicalSection->GetRVA();
-        _ASSERTE(dwOffset < pPhysicalSection->GetSize());
-        
-        m_debugDirectory.PointerToRawData = pPhysicalSection->GetFilePos() + dwOffset;
-        pZapWriter->Write(&m_debugDirectory, sizeof(m_debugDirectory));
+                DWORD dwOffset = m_ppDebugData[i]->GetRVA() - pPhysicalSection->GetRVA();
+                _ASSERTE(dwOffset < pPhysicalSection->GetSize());
+
+                m_pDebugDirectory[i].PointerToRawData = pPhysicalSection->GetFilePos() + dwOffset;
+            }
+            else
+            {
+                m_pDebugDirectory[i].SizeOfData = 0;
+                m_pDebugDirectory[i].AddressOfRawData = 0;
+                m_pDebugDirectory[i].PointerToRawData = 0;
+            }
+        }
+
+        pZapWriter->Write(m_pDebugDirectory, sizeof(IMAGE_DEBUG_DIRECTORY) * m_nDebugDirectory);
     }
 }
 
 void ZapDebugDirectory::SaveNGenDebugDirectoryEntry(ZapWriter *pZapWriter)
 {
+#if !defined(NO_NGENPDB)
     _ASSERTE(pZapWriter);
 
     IMAGE_DEBUG_DIRECTORY debugDirectory = {0};
-    memcpy(&debugDirectory, &m_debugDirectory, sizeof(IMAGE_DEBUG_DIRECTORY));
+    if (m_nDebugDirectory > 0)
+    {
+        memcpy(&debugDirectory, m_pDebugDirectory, sizeof(IMAGE_DEBUG_DIRECTORY));
+    }
     debugDirectory.Type = IMAGE_DEBUG_TYPE_CODEVIEW;
     debugDirectory.SizeOfData = m_pNGenPdbDebugData->GetSize();
     debugDirectory.AddressOfRawData = m_pNGenPdbDebugData->GetRVA();
+    // Make sure the "is portable pdb" indicator (MinorVersion == 0x504d) is clear
+    // for the NGen debug directory entry since this debug directory is copied
+    // from an existing entry which could be a portable pdb.
+    debugDirectory.MinorVersion = 0;
     {
         ZapPhysicalSection *pPhysicalSection = ZapImage::GetImage(pZapWriter)->m_pTextSection;
         DWORD dwOffset = m_pNGenPdbDebugData->GetRVA() - pPhysicalSection->GetRVA();
@@ -281,6 +502,7 @@ void ZapDebugDirectory::SaveNGenDebugDirectoryEntry(ZapWriter *pZapWriter)
         debugDirectory.PointerToRawData = pPhysicalSection->GetFilePos() + dwOffset;
     }
     pZapWriter->Write(&debugDirectory, sizeof(debugDirectory));
+#endif // NO_NGENPDB
 }
 
 void ZapDebugDirectory::Save(ZapWriter * pZapWriter)
@@ -288,16 +510,47 @@ void ZapDebugDirectory::Save(ZapWriter * pZapWriter)
     _ASSERTE(pZapWriter);
 
     if (CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_NGenEnableCreatePdb)) {
-
         SaveOriginalDebugDirectoryEntry(pZapWriter);
         SaveNGenDebugDirectoryEntry(pZapWriter);
-
     } else {
-
         SaveNGenDebugDirectoryEntry(pZapWriter);
         SaveOriginalDebugDirectoryEntry(pZapWriter);
-
     }
+}
+
+ZapPEExports::ZapPEExports(LPCWSTR dllPath) 
+{
+	m_dllFileName = wcsrchr(dllPath, DIRECTORY_SEPARATOR_CHAR_W);
+	if (m_dllFileName != NULL)
+		m_dllFileName++;
+	else 
+		m_dllFileName = dllPath;
+}
+
+DWORD ZapPEExports::GetSize()
+{
+	return DWORD(sizeof(IMAGE_EXPORT_DIRECTORY) + wcslen(m_dllFileName) * sizeof(BYTE) + 1);
+}
+
+void ZapPEExports::Save(ZapWriter * pZapWriter)
+{
+	_ASSERTE(pZapWriter);
+
+	IMAGE_EXPORT_DIRECTORY exports;
+	ZeroMemory(&exports, sizeof(exports));
+
+	exports.Name = pZapWriter->GetCurrentRVA() + sizeof(exports);
+
+	// Write out exports header 
+	pZapWriter->Write(&exports, sizeof(exports));
+
+	// Write out string that exports.Name points at.  
+	for (LPCWSTR ptr = m_dllFileName; ; ptr++)
+	{
+		pZapWriter->Write((PVOID) ptr, 1);
+		if (*ptr == 0)
+			break;
+	}
 }
 
 // If the IL image has IMAGE_DIRECTORY_ENTRY_DEBUG with information about the PDB,
@@ -321,8 +574,9 @@ void ZapImage::CopyDebugDirEntry()
 
     // IL PDB entry: copy of the (first of possibly many) IMAGE_DEBUG_DIRECTORY entry 
     // in the IL image
+    DWORD nDebugEntry = 0;
     PIMAGE_DEBUG_DIRECTORY pDebugDir = NULL;
-    ZapBlob *pDebugData = NULL;
+    ZapNode **ppDebugData = NULL;
 
     if (m_ModuleDecoder.HasDirectoryEntry(IMAGE_DIRECTORY_ENTRY_DEBUG)) {
         COUNT_T debugEntrySize;
@@ -339,40 +593,48 @@ void ZapImage::CopyDebugDirEntry()
                 // should be a multiple of sizeof(IMAGE_DEBUG_DIRECTORY).
                 _ASSERTE(0 == (debugEntrySize % sizeof(IMAGE_DEBUG_DIRECTORY)));
                 
-                // @TODO: pDebugEntry is an array of IMAGE_DEBUG_DIRECTORYs. Some tools
-                // (like ibcmerge) add an extra dummy IMAGE_DEBUG_DIRECTORY to indicate
-                // that the image was modified post-link.
-                // We need to copy all the IMAGE_DEBUG_DIRECTORYs. For now, we only copy
-                // the first one as it holds the relevant debug information.
+                nDebugEntry = DWORD(debugEntrySize / sizeof(IMAGE_DEBUG_DIRECTORY));
+                pDebugDir = new (GetHeap()) IMAGE_DEBUG_DIRECTORY[nDebugEntry];
+                memcpy(pDebugDir, (const void *)pDebugEntry, sizeof(IMAGE_DEBUG_DIRECTORY) * nDebugEntry);
+                ppDebugData = new (GetHeap()) ZapNode*[nDebugEntry];
+                memset(ppDebugData, 0, nDebugEntry * sizeof(ZapNode*));
                 
-                pDebugDir = PIMAGE_DEBUG_DIRECTORY(pDebugEntry);
-                
-                // Some compilers set PointerToRawData but not AddressOfRawData as they put the
-                // data at the end of the file in an unmapped part of the file
-                
-                RVA rvaOfRawData = (pDebugDir->AddressOfRawData != NULL)
-                    ? pDebugDir->AddressOfRawData : m_ModuleDecoder.OffsetToRva(pDebugDir->PointerToRawData);
-                
-                ULONG cbDebugData = pDebugDir->SizeOfData;
-                
-                if (cbDebugData != 0) {
-                    if (!m_ModuleDecoder.CheckRva(rvaOfRawData, cbDebugData))
-                        m_zapper->Warning(W("IMAGE_DIRECTORY_ENTRY_DEBUG points to bad data\n"));
-                    else
-                        pDebugData = new (GetHeap()) ZapBlobPtr((PVOID)m_ModuleDecoder.GetRvaData(rvaOfRawData), cbDebugData);
+                for (DWORD i = 0; i < nDebugEntry; i++)
+                {
+                    // Some compilers set PointerToRawData but not AddressOfRawData as they put the
+                    // data at the end of the file in an unmapped part of the file
+
+                    RVA rvaOfRawData = (pDebugDir[i].AddressOfRawData != NULL)
+                        ? pDebugDir[i].AddressOfRawData : m_ModuleDecoder.OffsetToRva(pDebugDir[i].PointerToRawData);
+
+                    ULONG cbDebugData = pDebugDir[i].SizeOfData;
+
+                    if (cbDebugData != 0) {
+                        if (!m_ModuleDecoder.CheckRva(rvaOfRawData, cbDebugData))
+                            m_zapper->Warning(W("IMAGE_DIRECTORY_ENTRY_DEBUG points to bad data\n"));
+                        else
+                            ppDebugData[i] = new (GetHeap()) ZapBlobPtr((PVOID)m_ModuleDecoder.GetRvaData(rvaOfRawData), cbDebugData);
+                    }
                 }
             }
         }
     }
 
     ZapDebugDirectory * pDebugDirectory = new (GetHeap()) ZapDebugDirectory(m_pNGenPdbDebugData, 
-                                                                            pDebugData ? pDebugDir : NULL, 
-                                                                            pDebugData);
+                                                                            nDebugEntry,
+                                                                            pDebugDir,
+                                                                            ppDebugData);
 
     m_pDebugSection->Place(pDebugDirectory);
     m_pDebugSection->Place(m_pNGenPdbDebugData);
-    if (pDebugData)
-        m_pDebugSection->Place(pDebugData);
+    if (ppDebugData)
+    {
+        for (DWORD i = 0; i < nDebugEntry; i++)
+        {
+            if (ppDebugData[i] != nullptr)
+                m_pDebugSection->Place(ppDebugData[i]);
+        }
+    }
 
     SetDirectoryEntry(IMAGE_DIRECTORY_ENTRY_DEBUG, pDebugDirectory);
 }

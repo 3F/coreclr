@@ -13,15 +13,14 @@
 #include "eetwain.h"
 #include "codeman.h"
 #include "eeconfig.h"
-#include "stackprobe.h"
 #include "dbginterface.h"
 #include "generics.h"
 #ifdef FEATURE_INTERPRETER
 #include "interpreter.h"
 #endif // FEATURE_INTERPRETER
 
-#ifdef _DEBUG
-void* forceFrame;   // Variable used to force a local variable to the frame
+#ifdef WIN64EXCEPTIONS
+#define PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
 #endif
 
 CrawlFrame::CrawlFrame()
@@ -48,6 +47,7 @@ Assembly* CrawlFrame::GetAssembly()
     return pAssembly;
 }
 
+#ifndef DACCESS_COMPILE
 OBJECTREF* CrawlFrame::GetAddrOfSecurityObject()
 {
     CONTRACTL {
@@ -94,6 +94,7 @@ OBJECTREF* CrawlFrame::GetAddrOfSecurityObject()
     }
     return NULL;
 }
+#endif
 
 BOOL CrawlFrame::IsInCalleesFrames(LPVOID stackPointer)
 {
@@ -126,7 +127,6 @@ BOOL CrawlFrame::IsInCalleesFrames(LPVOID stackPointer)
 MethodDesc* CrawlFrame::GetFunction()
 {
     LIMITED_METHOD_DAC_CONTRACT;
-    STATIC_CONTRACT_SO_TOLERANT;
     if (pFunc != NULL)
     {
         return pFunc;
@@ -351,6 +351,19 @@ bool CrawlFrame::IsGcSafe()
     return GetCodeManager()->IsGcSafe(&codeInfo, GetRelOffset());
 }
 
+#if defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
+bool CrawlFrame::HasTailCalls()
+{
+    CONTRACTL {
+        NOTHROW;
+        GC_NOTRIGGER;
+        SUPPORTS_DAC;
+    } CONTRACTL_END;
+
+    return GetCodeManager()->HasTailCalls(&codeInfo);
+}
+#endif // _TARGET_ARM_ || _TARGET_ARM64_
+
 inline void CrawlFrame::GotoNextFrame()
 {
     CONTRACTL {
@@ -504,7 +517,6 @@ void ExInfoWalker::WalkToManaged()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
         SUPPORTS_DAC;
     }
@@ -543,7 +555,6 @@ UINT_PTR Thread::VirtualUnwindCallFrame(PREGDISPLAY pRD, EECodeInfo* pCodeInfo /
         GC_NOTRIGGER;
 
         PRECONDITION(GetControlPC(pRD) == GetIP(pRD->pCurrentContext));
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -555,17 +566,13 @@ UINT_PTR Thread::VirtualUnwindCallFrame(PREGDISPLAY pRD, EECodeInfo* pCodeInfo /
         pRD->pCurrentContext = pRD->pCallerContext;
         pRD->pCallerContext  = temp;
 
-#if defined(_TARGET_AMD64_) || defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
         PT_KNONVOLATILE_CONTEXT_POINTERS tempPtrs = pRD->pCurrentContextPointers;
         pRD->pCurrentContextPointers            = pRD->pCallerContextPointers;
         pRD->pCallerContextPointers             = tempPtrs;
-#endif // defined(_TARGET_AMD64_) || defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
     }
     else
     {
-        PT_KNONVOLATILE_CONTEXT_POINTERS pCurrentContextPointers = NULL;
-        NOT_X86(pCurrentContextPointers = pRD->pCurrentContextPointers);
-        VirtualUnwindCallFrame(pRD->pCurrentContext, pCurrentContextPointers, pCodeInfo);
+        VirtualUnwindCallFrame(pRD->pCurrentContext, pRD->pCurrentContextPointers, pCodeInfo);
     }
 
     SyncRegDisplayToCurrentContext(pRD);
@@ -587,7 +594,6 @@ PCODE Thread::VirtualUnwindCallFrame(T_CONTEXT* pContext,
         GC_NOTRIGGER;
         PRECONDITION(CheckPointer(pContext, NULL_NOT_OK));
         PRECONDITION(CheckPointer(pContextPointers, NULL_OK));
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END;
@@ -628,7 +634,10 @@ PCODE Thread::VirtualUnwindCallFrame(T_CONTEXT* pContext,
         pFunctionEntryFromOS  = RtlLookupFunctionEntry(uControlPc,
                                                        ARM_ONLY((DWORD*))(&uImageBaseFromOS),
                                                        NULL);
-        _ASSERTE( (uImageBase == uImageBaseFromOS) && (pFunctionEntry == pFunctionEntryFromOS) );
+
+        // Note that he address returned from the OS is different from the one we have computed
+        // when unwind info is registered using RtlAddGrowableFunctionTable. Compare RUNTIME_FUNCTION content.
+        _ASSERTE( (uImageBase == uImageBaseFromOS) && (memcmp(pFunctionEntry, pFunctionEntryFromOS, sizeof(RUNTIME_FUNCTION)) == 0) );
 #endif // _DEBUG && !FEATURE_PAL
     }
 
@@ -656,20 +665,7 @@ PCODE Thread::VirtualUnwindCallFrame(T_CONTEXT* pContext,
     return uControlPc;
 }
 
-#ifdef DACCESS_COMPILE
-
-PCODE Thread::VirtualUnwindLeafCallFrame(T_CONTEXT* pContext)
-{
-    DacNotImpl();
-    return 0;
-}
-UINT_PTR Thread::VirtualUnwindToFirstManagedCallFrame(T_CONTEXT* pContext)
-{
-    DacNotImpl();
-    return 0;
-}
-
-#else  // !DACCESS_COMPILE
+#ifndef DACCESS_COMPILE
 
 // static
 PCODE Thread::VirtualUnwindLeafCallFrame(T_CONTEXT* pContext)
@@ -717,20 +713,16 @@ PCODE Thread::VirtualUnwindNonLeafCallFrame(T_CONTEXT* pContext, KNONVOLATILE_CO
         PRECONDITION(CheckPointer(pContext, NULL_NOT_OK));
         PRECONDITION(CheckPointer(pContextPointers, NULL_OK));
         PRECONDITION(CheckPointer(pFunctionEntry, NULL_OK));
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
     PCODE           uControlPc = GetIP(pContext);
-#if defined(_WIN64)
+#ifdef BIT64
     UINT64              EstablisherFrame;
-    PVOID               HandlerData;
-#elif defined(_TARGET_ARM_)
+#else  // BIT64
     DWORD               EstablisherFrame;
+#endif // BIT64
     PVOID               HandlerData;
-#else
-    _ASSERTE(!"nyi platform stackwalking");
-#endif
 
     if (NULL == pFunctionEntry)
     {
@@ -765,7 +757,6 @@ UINT_PTR Thread::VirtualUnwindToFirstManagedCallFrame(T_CONTEXT* pContext)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -778,6 +769,16 @@ UINT_PTR Thread::VirtualUnwindToFirstManagedCallFrame(T_CONTEXT* pContext)
 #ifndef FEATURE_PAL
         uControlPc = VirtualUnwindCallFrame(pContext);
 #else // !FEATURE_PAL
+
+#ifdef VSD_STUB_CAN_THROW_AV
+        if (IsIPinVirtualStub(uControlPc))
+        {
+            AdjustContextForVirtualStub(NULL, pContext);
+            uControlPc = GetIP(pContext);
+            break;
+        }
+#endif // VSD_STUB_CAN_THROW_AV
+
         BOOL success = PAL_VirtualUnwind(pContext, NULL);
         if (!success)
         {
@@ -797,7 +798,7 @@ UINT_PTR Thread::VirtualUnwindToFirstManagedCallFrame(T_CONTEXT* pContext)
     return uControlPc;
 }
 
-#endif // DACCESS_COMPILE
+#endif // !DACCESS_COMPILE
 #endif // WIN64EXCEPTIONS
 
 #ifdef _DEBUG
@@ -893,7 +894,7 @@ StackWalkAction Thread::MakeStackwalkerCallback(
 }
 
 
-#if !defined(DACCESS_COMPILE) && defined(_TARGET_X86_)
+#if !defined(DACCESS_COMPILE) && defined(_TARGET_X86_) && !defined(WIN64EXCEPTIONS)
 #define STACKWALKER_MAY_POP_FRAMES
 #endif
 
@@ -910,7 +911,6 @@ StackWalkAction Thread::StackWalkFramesEx(
     // that any C++ destructors pushed in this function will never execute, and it means that this function can
     // never have a dynamic contract.
     STATIC_CONTRACT_WRAPPER;
-    STATIC_CONTRACT_SO_INTOLERANT;
     SCAN_IGNORE_THROW;            // see contract above
     SCAN_IGNORE_TRIGGER;          // see contract above
 
@@ -1144,7 +1144,7 @@ void StackFrameIterator::CommonCtor(Thread * pThread, PTR_Frame pFrame, ULONG32 
     m_fDidFuncletReportGCReferences = true;
 #endif // WIN64EXCEPTIONS
 
-#if !defined(_TARGET_X86_)
+#if defined(RECORD_RESUMABLE_FRAME_SP)
     m_pvResumableFrameTargetSP = NULL;
 #endif
 } // StackFrameIterator::CommonCtor()
@@ -1191,10 +1191,10 @@ BOOL StackFrameIterator::Init(Thread *    pThread,
     _ASSERTE(CanThisThreadCallIntoHost() || (flags & LIGHTUNWIND) == 0);
 #endif // DACCESS_COMPILE
 
-#if !defined(_TARGET_X86_)
+#ifdef WIN64EXCEPTIONS
     _ASSERTE(!(flags & POPFRAMES));
     _ASSERTE(pRegDisp->pCurrentContext);
-#endif // !_TARGET_X86_
+#endif // WIN64EXCEPTIONS
 
     BEGIN_FORBID_TYPELOAD();
 
@@ -1233,7 +1233,7 @@ BOOL StackFrameIterator::Init(Thread *    pThread,
     }
     INDEBUG(m_pRealStartFrame = m_crawl.pFrame);
 
-    if (m_crawl.pFrame != FRAME_TOP)
+    if (m_crawl.pFrame != FRAME_TOP && !(m_flags & SKIP_GSCOOKIE_CHECK))
     {
         m_crawl.SetCurGSCookie(Frame::SafeGetGSCookiePtr(m_crawl.pFrame));
     }
@@ -1326,7 +1326,7 @@ BOOL StackFrameIterator::ResetRegDisp(PREGDISPLAY pRegDisp,
         _ASSERTE(m_crawl.pFrame != NULL);
     }
 
-    if (m_crawl.pFrame != FRAME_TOP)
+    if (m_crawl.pFrame != FRAME_TOP && !(m_flags & SKIP_GSCOOKIE_CHECK))
     {
         m_crawl.SetCurGSCookie(Frame::SafeGetGSCookiePtr(m_crawl.pFrame));
     }
@@ -1350,7 +1350,7 @@ BOOL StackFrameIterator::ResetRegDisp(PREGDISPLAY pRegDisp,
     {
         TADDR curSP = GetRegdisplaySP(m_crawl.pRD);
 
-#if !defined(_TARGET_X86_)
+#ifdef PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
         if (m_crawl.IsFrameless())
         {
             // On 64-bit and ARM, we stop at the explicit frames contained in a managed stack frame 
@@ -1358,7 +1358,7 @@ BOOL StackFrameIterator::ResetRegDisp(PREGDISPLAY pRegDisp,
             EECodeManager::EnsureCallerContextIsValid(m_crawl.pRD, NULL);
             curSP = GetSP(m_crawl.pRD->pCallerContext);
         }
-#endif // !_TARGET_X86_
+#endif // PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
 
 #if defined(_TARGET_X86_)
         // special processing on x86; see below for more information
@@ -1555,28 +1555,32 @@ BOOL StackFrameIterator::IsValid(void)
         // Try to ensure that the frame chain did not change underneath us.
         // In particular, is thread's starting frame the same as it was when
         // we started?
-        //DevDiv 168789: In GCStress >= 4 two threads could race on triggering GC;
-        //  if the one that just made p/invoke call is second and hits the trap instruction
-        //  before call to syncronize with GC, it will push a frame [ResumableFrame on Unix 
-        //  and RedirectedThreadFrame on Windows] concurrently with GC stackwalking.
-        //  In normal case (no GCStress), after p/invoke, IL_STUB will check if GC is in progress and syncronize.
-        BOOL bRedirectedPinvoke = FALSE;
+        BOOL bIsRealStartFrameUnchanged = 
+            (m_pStartFrame != NULL) ||
+            (m_flags & POPFRAMES) ||
+            (m_pRealStartFrame == m_pThread->GetFrame());
 
 #ifdef FEATURE_HIJACK
-        bRedirectedPinvoke = ((GCStress<cfg_instr>::IsEnabled()) && 
-                              (m_pRealStartFrame != NULL) &&
-                              (m_pRealStartFrame != FRAME_TOP) &&
-                              (m_pRealStartFrame->GetVTablePtr() == InlinedCallFrame::GetMethodFrameVPtr()) && 
-                              (m_pThread->GetFrame() != NULL) &&
-                              (m_pThread->GetFrame() != FRAME_TOP) &&
-                              ((m_pThread->GetFrame()->GetVTablePtr() == ResumableFrame::GetMethodFrameVPtr()) ||
-                               (m_pThread->GetFrame()->GetVTablePtr() == RedirectedThreadFrame::GetMethodFrameVPtr())));
+        // In GCStress >= 4 two threads could race on triggering GC;
+        // if the one that just made p/invoke call is second and hits the trap instruction
+        // before call to synchronize with GC, it will push a frame [ResumableFrame on Unix
+        // and RedirectedThreadFrame on Windows] concurrently with GC stackwalking.
+        // In normal case (no GCStress), after p/invoke, IL_STUB will check if GC is in progress and synchronize.
+        // NOTE: This condition needs to be evaluated after the previous one to prevent a subtle race condition
+        // (https://github.com/dotnet/coreclr/issues/21581)
+        bIsRealStartFrameUnchanged = bIsRealStartFrameUnchanged ||
+            ((GCStress<cfg_instr>::IsEnabled()) &&
+            (m_pRealStartFrame != NULL) &&
+            (m_pRealStartFrame != FRAME_TOP) &&
+            (m_pRealStartFrame->GetVTablePtr() == InlinedCallFrame::GetMethodFrameVPtr()) &&
+            (m_pThread->GetFrame() != NULL) &&
+            (m_pThread->GetFrame() != FRAME_TOP) &&
+            ((m_pThread->GetFrame()->GetVTablePtr() == ResumableFrame::GetMethodFrameVPtr()) ||
+            (m_pThread->GetFrame()->GetVTablePtr() == RedirectedThreadFrame::GetMethodFrameVPtr())));
 #endif // FEATURE_HIJACK
 
-        _ASSERTE( (m_pStartFrame != NULL) ||
-                  (m_flags & POPFRAMES) ||
-                  (m_pRealStartFrame == m_pThread->GetFrame()) ||
-                  (bRedirectedPinvoke));
+        _ASSERTE(bIsRealStartFrameUnchanged);
+
 #endif //_DEBUG
 
         return FALSE;
@@ -1741,10 +1745,12 @@ ProcessFuncletsForGCReporting:
                         // was a caller of an already executed exception handler based on the previous exception trackers.
                         // The handler funclet frames are already gone from the stack, so the exception trackers are the
                         // only source of evidence about it.
-                        // The filter funclet is different though, its frame is always present on the stack when its parent
-                        // frame is reached by the stack walker, because no exception can escape a filter funclet.
                         // This is different from Windows where the full stack is preserved until an exception is fully handled
                         // and so we can detect it just from walking the stack.
+                        // The filter funclet frames are different, they behave the same way on Windows and Unix. They can be present
+                        // on the stack when we reach their parent frame if the filter hasn't finished running yet or they can be
+                        // gone if the filter completed running, either succesfully or with unhandled exception.
+                        // So the special handling below ignores trackers belonging to filter clauses.
                         bool fProcessingFilterFunclet = !m_sfFuncletParent.IsNull() && !(m_fProcessNonFilterFunclet || m_fProcessIntermediaryNonFilterFunclet);
                         if (!fRecheckCurrentFrame && !fSkippingFunclet && (pTracker != NULL) && !fProcessingFilterFunclet)
                         {
@@ -1753,23 +1759,28 @@ ProcessFuncletsForGCReporting:
                             // frame matching the current frame, it means that the funclet stack frame was reclaimed.
                             StackFrame sfFuncletParent;
                             ExceptionTracker* pCurrTracker = pTracker;
-                            bool hasFuncletStarted = m_crawl.pThread->GetExceptionState()->GetCurrentEHClauseInfo()->IsManagedCodeEntered();
+
+                            bool hasFuncletStarted = pTracker->GetEHClauseInfo()->IsManagedCodeEntered();
 
                             while (pCurrTracker != NULL)
                             {
-                                if (hasFuncletStarted)
+                                // Ignore exception trackers for filter clauses, since their frames are handled the same way as on Windows
+                                if (pCurrTracker->GetEHClauseInfo()->GetClauseType() != COR_PRF_CLAUSE_FILTER)
                                 {
-                                    sfFuncletParent = pCurrTracker->GetCallerOfEnclosingClause();
+                                    if (hasFuncletStarted)
+                                    {
+                                        sfFuncletParent = pCurrTracker->GetCallerOfEnclosingClause();
+                                        if (!sfFuncletParent.IsNull() && ExceptionTracker::IsUnwoundToTargetParentFrame(&m_crawl, sfFuncletParent))
+                                        {
+                                            break;
+                                        }
+                                    }
+
+                                    sfFuncletParent = pCurrTracker->GetCallerOfCollapsedEnclosingClause();
                                     if (!sfFuncletParent.IsNull() && ExceptionTracker::IsUnwoundToTargetParentFrame(&m_crawl, sfFuncletParent))
                                     {
                                         break;
                                     }
-                                }
-
-                                sfFuncletParent = pCurrTracker->GetCallerOfCollapsedEnclosingClause();
-                                if (!sfFuncletParent.IsNull() && ExceptionTracker::IsUnwoundToTargetParentFrame(&m_crawl, sfFuncletParent))
-                                {
-                                    break;
                                 }
 
                                 // Funclets handling exception for trackers older than the current one were always started,
@@ -2375,7 +2386,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
         }
         else
         {
-#if defined(_TARGET_X86_)
+#ifndef PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
             // On x86, we process a managed stack frame before processing any explicit frames contained in it.
             // So when we are done with the skipped explicit frame, we have already processed the managed
             // stack frame, and it is time to move onto the next stack frame.
@@ -2384,7 +2395,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
             {
                 goto Cleanup;
             }
-#else // _TARGET_X86_
+#else // !PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
             // We are done handling the skipped explicit frame at this point.  So move on to the 
             // managed stack frame.
             m_crawl.isFrameless = true;
@@ -2394,7 +2405,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
 
             PreProcessingForManagedFrames();
             goto Cleanup;
-#endif // _TARGET_X86_
+#endif // PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
         }
     }
     else if (m_frameState == SFITER_FRAMELESS_METHOD)
@@ -2416,7 +2427,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
                 OBJECTREF      orUnwind = NULL;
 
                 if (m_crawl.GetCodeManager()->IsInSynchronizedRegion(m_crawl.GetRelOffset(),
-                                                                    m_crawl.GetGCInfo(), 
+                                                                    m_crawl.GetGCInfoToken(), 
                                                                     m_crawl.GetCodeManagerFlags()))
                 {
                     if (pMD->IsStatic())
@@ -2435,8 +2446,6 @@ StackWalkAction StackFrameIterator::NextRaw(void)
 
                     _ASSERTE(orUnwind != NULL);
                     VALIDATEOBJECTREF(orUnwind);
-
-                    _ASSERTE(!orUnwind->IsTransparentProxy());
 
                     if (orUnwind != NULL)
                     {
@@ -2467,7 +2476,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
              DBG_ADDR(GetRegdisplaySP(m_crawl.pRD)), 
              DBG_ADDR(GetControlPC(m_crawl.pRD))));
 
-#if !defined(DACCESS_COMPILE)
+#if !defined(DACCESS_COMPILE) && defined(HAS_QUICKUNWIND)
         StackwalkCacheEntry *pCacheEntry = m_crawl.GetStackwalkCacheEntry();
         if (pCacheEntry != NULL)
         {
@@ -2477,7 +2486,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
             EECodeManager::QuickUnwindStackFrame(m_crawl.pRD, pCacheEntry, EECodeManager::UnwindCurrentStackFrame);
         }
         else
-#endif // !DACCESS_COMPILE
+#endif // !DACCESS_COMPILE && HAS_QUICKUNWIND
         {
 #if !defined(DACCESS_COMPILE)
             // non-optimized stack unwind schema, doesn't use StackwalkCache
@@ -2488,6 +2497,12 @@ StackWalkAction StackFrameIterator::NextRaw(void)
             bool fInsertCacheEntry = m_crawl.stackWalkCache.Enabled() && 
                                      (m_flags & LIGHTUNWIND) &&
                                      (m_pCachedGSCookie == NULL);
+ 
+            // Is this a dynamic method. Dynamic methods can be GC collected and so IP to method mapping
+            // is not persistent. Therefore do not cache information for this frame.
+            BOOL isCollectableMethod = ExecutionManager::IsCollectibleMethod(m_crawl.GetMethodToken());
+            if(isCollectableMethod)
+                fInsertCacheEntry = FALSE;
 
             StackwalkCacheUnwindInfo unwindInfo;
 
@@ -2554,7 +2569,9 @@ StackWalkAction StackFrameIterator::NextRaw(void)
         // to recover from AVs during profiler stackwalk.)
 
         PTR_VOID newSP = PTR_VOID((TADDR)GetRegdisplaySP(m_crawl.pRD));
+#ifndef NO_FIXED_STACK_LIMIT
         FAIL_IF_SPECULATIVE_WALK(newSP >= m_crawl.pThread->GetCachedStackLimit());
+#endif // !NO_FIXED_STACK_LIMIT
         FAIL_IF_SPECULATIVE_WALK(newSP < m_crawl.pThread->GetCachedStackBase());
 
 #undef FAIL_IF_SPECULATIVE_WALK
@@ -2571,14 +2588,14 @@ StackWalkAction StackFrameIterator::NextRaw(void)
         m_crawl.hasFaulted    = FALSE;
         m_crawl.isIPadjusted  = FALSE;
 
-#if defined(_TARGET_X86_)
+#ifndef PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
         // remember, x86 handles the managed stack frame before the explicit frames contained in it
         if (CheckForSkippedFrames())
         {
             _ASSERTE(m_frameState == SFITER_SKIPPED_FRAME_FUNCTION);
             goto Cleanup;
         }
-#endif // _TARGET_X86_
+#endif // !PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
 
         PostProcessingForManagedFrames();
         if (m_frameState == SFITER_NATIVE_MARKER_FRAME)
@@ -2636,7 +2653,7 @@ StackWalkAction StackFrameIterator::NextRaw(void)
             {
                 m_crawl.pFrame->UpdateRegDisplay(m_crawl.pRD);
 
-#if !defined(_TARGET_X86_)
+#if defined(RECORD_RESUMABLE_FRAME_SP)
                 CONSISTENCY_CHECK(NULL == m_pvResumableFrameTargetSP);
 
                 if (m_crawl.isFirst)
@@ -2664,14 +2681,14 @@ StackWalkAction StackFrameIterator::NextRaw(void)
                     EECodeManager::EnsureCallerContextIsValid(m_crawl.pRD, m_crawl.GetStackwalkCacheEntry());
                     m_pvResumableFrameTargetSP = (LPVOID)GetSP(m_crawl.pRD->pCallerContext);
                 }
-#endif // !_TARGET_X86_
+#endif // RECORD_RESUMABLE_FRAME_SP
 
 
+#if defined(_DEBUG) && !defined(DACCESS_COMPILE) && !defined(WIN64EXCEPTIONS)
                 // We are transitioning from unmanaged code to managed code... lets do some validation of our
                 // EH mechanism on platforms that we can.
-#if defined(_DEBUG)  && !defined(DACCESS_COMPILE) && defined(_TARGET_X86_)
                 VerifyValidTransitionFromManagedCode(m_crawl.pThread, &m_crawl);
-#endif // _DEBUG && !DACCESS_COMPILE && _TARGET_X86_
+#endif // _DEBUG && !DACCESS_COMPILE &&  !WIN64EXCEPTIONS
             }
         }
 
@@ -2776,7 +2793,6 @@ void StackFrameIterator::ProcessIp(PCODE Ip)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     } CONTRACTL_END;
 
@@ -2964,7 +2980,7 @@ void StackFrameIterator::ProcessCurrentFrame(void)
             // Cache values which may be updated by CheckForSkippedFrames()
             m_cachedCodeInfo = m_crawl.codeInfo;
 
-#if !defined(_TARGET_X86_)
+#ifdef PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
             // On non-X86, we want to process the skipped explicit frames before the managed stack frame
             // containing them.
             if (CheckForSkippedFrames())
@@ -2972,7 +2988,7 @@ void StackFrameIterator::ProcessCurrentFrame(void)
                 _ASSERTE(m_frameState == SFITER_SKIPPED_FRAME_FUNCTION);
             }
             else
-#endif // !_TARGET_X86_
+#endif // PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
             {
                 PreProcessingForManagedFrames();
                 _ASSERTE(m_frameState == SFITER_FRAMELESS_METHOD);
@@ -3019,9 +3035,9 @@ BOOL StackFrameIterator::CheckForSkippedFrames(void)
     // Can the caller handle skipped frames;
     fHandleSkippedFrames = (m_flags & HANDLESKIPPEDFRAMES);
 
-#if defined(_TARGET_X86_)
+#ifndef PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
     pvReferenceSP = GetRegdisplaySP(m_crawl.pRD);
-#else // _TARGET_X86_
+#else // !PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
     // Order the Frames relative to the caller SP of the methods
     // this makes it so that any Frame that is in a managed call
     // frame will be reported before its containing method.
@@ -3029,7 +3045,7 @@ BOOL StackFrameIterator::CheckForSkippedFrames(void)
     // This should always succeed!  If it doesn't, it's a bug somewhere else!
     EECodeManager::EnsureCallerContextIsValid(m_crawl.pRD, m_crawl.GetStackwalkCacheEntry(), &m_cachedCodeInfo);
     pvReferenceSP = GetSP(m_crawl.pRD->pCallerContext);
-#endif // _TARGET_X86_
+#endif // PROCESS_EXPLICIT_FRAME_BEFORE_MANAGED_FRAME
 
     if ( !( (m_crawl.pFrame != FRAME_TOP) && 
             (dac_cast<TADDR>(m_crawl.pFrame) < pvReferenceSP) )
@@ -3115,7 +3131,7 @@ void StackFrameIterator::PreProcessingForManagedFrames(void)
     WRAPPER_NO_CONTRACT;
     SUPPORTS_DAC;
 
-#if !defined(_TARGET_X86_)
+#if defined(RECORD_RESUMABLE_FRAME_SP)
     if (m_pvResumableFrameTargetSP)
     {
         // We expect that if we saw a resumable frame, the next managed
@@ -3129,7 +3145,7 @@ void StackFrameIterator::PreProcessingForManagedFrames(void)
         m_pvResumableFrameTargetSP = NULL;
         m_crawl.isFirst = true;
     }
-#endif // !_TARGET_X86_
+#endif // RECORD_RESUMABLE_FRAME_SP
 
 #if !defined(DACCESS_COMPILE)
     m_pCachedGSCookie = (GSCookie*)m_crawl.GetCodeManager()->GetGSCookieAddr(
@@ -3138,21 +3154,24 @@ void StackFrameIterator::PreProcessingForManagedFrames(void)
                                                         &m_crawl.codeManState);
 #endif // !DACCESS_COMPILE
 
-    if (m_pCachedGSCookie)
+    if (!(m_flags & SKIP_GSCOOKIE_CHECK) && m_pCachedGSCookie)
     {
         m_crawl.SetCurGSCookie(m_pCachedGSCookie);
     }
 
     INDEBUG(m_crawl.pThread->DebugLogStackWalkInfo(&m_crawl, "CONSIDER", m_uFramesProcessed));
 
-#if defined(_DEBUG) && defined(_TARGET_X86_) && !defined(DACCESS_COMPILE)
+#if defined(_DEBUG) && !defined(WIN64EXCEPTIONS) && !defined(DACCESS_COMPILE)
+    //
+    // VM is responsible for synchronization on non-funclet EH model.
+    //
     // m_crawl.GetThisPointer() requires full unwind
     // In GC's relocate phase, objects is not verifiable
     if ( !(m_flags & (LIGHTUNWIND | QUICKUNWIND | ALLOW_INVALID_OBJECTS)) && 
          m_crawl.pFunc->IsSynchronized() && 
          !m_crawl.pFunc->IsStatic()      &&
          m_crawl.GetCodeManager()->IsInSynchronizedRegion(m_crawl.GetRelOffset(), 
-                                                         m_crawl.GetGCInfo(), 
+                                                         m_crawl.GetGCInfoToken(), 
                                                          m_crawl.GetCodeManagerFlags()))
     {
         BEGIN_GCX_ASSERT_COOP;
@@ -3169,7 +3188,7 @@ void StackFrameIterator::PreProcessingForManagedFrames(void)
 
         END_GCX_ASSERT_COOP;
     }
-#endif // _DEBUG && _TARGET_X86_ && !DACCESS_COMPILE
+#endif // _DEBUG && !WIN64EXCEPTIONS && !DACCESS_COMPILE
 
     m_frameState = SFITER_FRAMELESS_METHOD;
 } // StackFrameIterator::PreProcessingForManagedFrames()
@@ -3186,7 +3205,6 @@ void StackFrameIterator::PostProcessingForManagedFrames(void)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
         SUPPORTS_DAC;
     }
@@ -3224,7 +3242,6 @@ void StackFrameIterator::PostProcessingForNoFrameTransition()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
         SUPPORTS_DAC;
     }

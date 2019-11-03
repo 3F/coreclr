@@ -27,7 +27,7 @@ Written in 2006, by:
     * [2.1.10 How to know if a function can trigger a GC](#2.1.10)
       * [2.1.10.1 GC_NOTRIGGER/TRIGGERSGC on a scope](#2.1.10.1)
   * [2.2 Are you using holders to track your resources?](#2.2)
-    * [2.2.1 What are holders and we are they important?](#2.2.1)
+    * [2.2.1 What are holders and why are they important?](#2.2.1)
     * [2.2.2 An example of holder usage:](#2.2.2)
     * [2.2.3 Common Features of Holders](#2.2.3)
     * [2.2.4 Where do I find a holder?](#2.2.4)
@@ -76,9 +76,8 @@ Written in 2006, by:
       * [2.10.1.5 LOADS_TYPE(loadlevel)](#2.10.1.5)
       * [2.10.1.6 CAN_TAKE_LOCK / CANNOT_TAKE_LOCK](#2.10.1.6)
       * [2.10.1.7 EE_THREAD_REQUIRED / EE_THREAD_NOT_REQUIRED](#2.10.1.7)
-      * [2.10.1.8 SO_TOLERANT/SO_INTOLERANT](#2.10.1.8)
-      * [2.10.1.9 PRECONDITION(expr)](#2.10.1.9)
-      * [2.10.1.10 POSTCONDITION(expr)](#2.10.1.10)
+      * [2.10.1.8 PRECONDITION(expr)](#2.10.1.8)
+      * [2.10.1.9 POSTCONDITION(expr)](#2.10.1.9)
     * [2.10.2 Is order important?](#2.10.2)
     * [2.10.3 Using the right form of contract](#2.10.3)
     * [2.10.4 When is it safe to use a runtime contract?](#2.10.4)
@@ -462,7 +461,7 @@ One difference between the standalone TRIGGERSGC and the contract GC_TRIGGERS: t
 
 ## <a name="2.2"/>2.2 Are you using holders to track your resources?
 
-### <a name="2.2.1"/>2.2.1 What are holders and we are they important?
+### <a name="2.2.1"/>2.2.1 What are holders and why are they important?
 
 The CLR team has coined the name **holder** to refer to the infrastructure that encapsulates the common grunt work of writing robust **backout code**. **Backout code** is code that deallocate resources or restore CLR data structure consistency when we abort an operation due to an error or an asynchronous event. Oftentimes, the same backout code will execute in non-error paths for resources allocated for use of a single scope, but error-time backout is still needed even for longer lived resources.
 
@@ -616,6 +615,7 @@ Holders consistently release on destruction – that's their whole purpose. Sadl
 #### <a name="2.2.8.4"/>2.2.8.4 Critical Section Holder
 
 **Wrong:**
+
 	pCrst->Enter();
 	pCrst->Leave();
 
@@ -1206,19 +1206,11 @@ You should only use BEGIN/END_GETTHREAD_ALLOWED(_IN_NO_THROW_REGION) if:
 
 If the latter is true, it's generally best to push BEGIN/END_GETTHREAD_ALLOWED down the callee chain so all callers benefit.
 
-#### <a name="2.10.1.8"/>2.10.1.8 SO_TOLERANT/SO_INTOLERANT
-
-These are related to stack probes. SO_TOLERANT means the function is written in such a way that it is safe to throw a StackOverflow exception between any two instructions. It doesn't update global state, doesn't modify data structures, and doesn't call out to the operating system.
-
-If you don't specify SO_TOLERANT, the function is treated as SO_INTOLERANT.
-
-The CLR asserts if you invoke an SO_INTOLERANT function outside the scope of a stack probe. The probe's purpose is to check in advance if sufficient stack is available and trigger the SO exception before venturing into SO_INTOLERANT code.
-
-#### <a name="2.10.1.9"/>2.10.1.9 PRECONDITION(_expr_)
+#### <a name="2.10.1.8"/>2.10.1.8 PRECONDITION(_expr_)
 
 This is pretty self-explanatory. It is basically an **_ASSERTE.** Both _ASSERTE's and PRECONDITIONS are used widely in the codebase. The expression can evaluate to either a Boolean or a Check.
 
-#### <a name="2.10.1.10"/>2.10.1.10 POSTCONDITION(_expr_)
+#### <a name="2.10.1.9"/>2.10.1.9 POSTCONDITION(_expr_)
 
 This is an expression that's tested on a _normal_ function exit. It will not be tested if an exception is thrown out of the function. Postconditions can access the function's locals provided that the locals were declared at the top level scope of the function. C++ objects will not have been destructed yet.
 

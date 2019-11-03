@@ -24,6 +24,7 @@ Revision History:
 #define _PAL_PROCESS_H_
 
 #include "pal/palinternal.h"
+#include "pal/stackstring.hpp"
 
 #ifdef __cplusplus
 extern "C"
@@ -42,6 +43,13 @@ extern DWORD gPID;
 extern DWORD gSID;
 
 extern LPWSTR pAppDir;
+
+// The Mac sandbox application group ID (if exists) and container (shared) path
+#ifdef __APPLE__
+extern LPCSTR gApplicationGroupId;
+extern int gApplicationGroupIdLength;
+#endif // __APPLE__
+extern PathCharString *gSharedFilesPath;
 
 /*++
 Function:
@@ -121,6 +129,21 @@ Abstract
 VOID PROCProcessUnlock(VOID);
 
 /*++
+Function
+  PROCAbortInitialize()
+  
+Abstract
+  Initialize the process abort crash dump program file path and
+  name. Doing all of this ahead of time so nothing is allocated
+  or copied in PROCAbort/signal handler.
+  
+Return
+  TRUE - succeeds, FALSE - fails
+  
+--*/
+BOOL PROCAbortInitialize();
+
+/*++
 Function:
   PROCAbort()
 
@@ -130,7 +153,7 @@ Function:
   Does not return
 --*/
 PAL_NORETURN 
-void PROCAbort();
+VOID PROCAbort();
 
 /*++
 Function:
@@ -141,7 +164,18 @@ Function:
 
 (no return value)
 --*/
-void PROCNotifyProcessShutdown();
+VOID PROCNotifyProcessShutdown();
+
+/*++
+Function:
+  PROCCreateCrashDumpIfEnabled
+
+  Creates crash dump of the process (if enabled). Can be
+  called from the unhandled native exception handler.
+
+(no return value)
+--*/
+VOID PROCCreateCrashDumpIfEnabled();
 
 /*++
 Function:

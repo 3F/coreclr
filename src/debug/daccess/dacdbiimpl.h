@@ -12,8 +12,16 @@
 #ifndef _DACDBI_IMPL_H_
 #define _DACDBI_IMPL_H_
 
-// Prototype for creation function
+// Prototype for creation functions
+
 STDAPI
+DLLEXPORT
+CLRDataCreateInstance(REFIID iid,
+    ICLRDataTarget * pLegacyTarget,
+    void ** iface);
+
+STDAPI
+DLLEXPORT
 DacDbiInterfaceInstance(
     ICorDebugDataTarget * pTarget,
     CORDB_ADDRESS baseAddress,
@@ -138,18 +146,25 @@ public:
     HRESULT WalkRefs(RefWalkHandle handle, ULONG count, OUT DacGcReference * objects, OUT ULONG *pFetched);
     
     HRESULT GetTypeID(CORDB_ADDRESS obj, COR_TYPEID *pID);
+
+    HRESULT GetTypeIDForType(VMPTR_TypeHandle vmTypeHandle, COR_TYPEID *pID);
     
-	HRESULT GetObjectFields(COR_TYPEID id, ULONG32 celt, COR_FIELD *layout, ULONG32 *pceltFetched);
-	HRESULT GetTypeLayout(COR_TYPEID id, COR_TYPE_LAYOUT *pLayout);
-	HRESULT GetArrayLayout(COR_TYPEID id, COR_ARRAY_LAYOUT *pLayout);
-	void GetGCHeapInformation(COR_HEAPINFO * pHeapInfo);
+    HRESULT GetObjectFields(COR_TYPEID id, ULONG32 celt, COR_FIELD *layout, ULONG32 *pceltFetched);
+    HRESULT GetTypeLayout(COR_TYPEID id, COR_TYPE_LAYOUT *pLayout);
+    HRESULT GetArrayLayout(COR_TYPEID id, COR_ARRAY_LAYOUT *pLayout);
+    void GetGCHeapInformation(COR_HEAPINFO * pHeapInfo);
     HRESULT GetPEFileMDInternalRW(VMPTR_PEFile vmPEFile, OUT TADDR* pAddrMDInternalRW);
     HRESULT GetReJitInfo(VMPTR_Module vmModule, mdMethodDef methodTk, OUT VMPTR_ReJitInfo* pReJitInfo);
+    HRESULT GetActiveRejitILCodeVersionNode(VMPTR_Module vmModule, mdMethodDef methodTk, OUT VMPTR_ILCodeVersionNode* pVmILCodeVersionNode);
     HRESULT GetReJitInfo(VMPTR_MethodDesc vmMethod, CORDB_ADDRESS codeStartAddress, OUT VMPTR_ReJitInfo* pReJitInfo);
+    HRESULT GetNativeCodeVersionNode(VMPTR_MethodDesc vmMethod, CORDB_ADDRESS codeStartAddress, OUT VMPTR_NativeCodeVersionNode* pVmNativeCodeVersionNode);
     HRESULT GetSharedReJitInfo(VMPTR_ReJitInfo vmReJitInfo, VMPTR_SharedReJitInfo* pSharedReJitInfo);
+    HRESULT GetILCodeVersionNode(VMPTR_NativeCodeVersionNode vmNativeCodeVersionNode, VMPTR_ILCodeVersionNode* pVmILCodeVersionNode);
     HRESULT GetSharedReJitInfoData(VMPTR_SharedReJitInfo sharedReJitInfo, DacSharedReJitInfo* pData);
+    HRESULT GetILCodeVersionNodeData(VMPTR_ILCodeVersionNode vmILCodeVersionNode, DacSharedReJitInfo* pData);
     HRESULT GetDefinesBitField(ULONG32 *pDefines);
     HRESULT GetMDStructuresVersion(ULONG32* pMDStructuresVersion);
+    HRESULT EnableGCNotificationEvents(BOOL fEnable);
 
 private:
     void TypeHandleToExpandedTypeInfoImpl(AreValueTypesBoxed              boxed,
@@ -172,7 +187,7 @@ private:
                            SequencePoints * pNativeMap);
 
     // Helper to compose a IL->IL and IL->Native mapping
-    void ComposeMapping(InstrumentedILOffsetMapping profilerILMap, ICorDebugInfo::OffsetMapping nativeMap[], ULONG32* pEntryCount);
+    void ComposeMapping(const InstrumentedILOffsetMapping * pProfilerILMap, ICorDebugInfo::OffsetMapping nativeMap[], ULONG32* pEntryCount);
 
     // Helper function to convert an instrumented IL offset to the corresponding original IL offset.
     ULONG TranslateInstrumentedILOffsetToOriginal(ULONG                               ilOffset, 
@@ -298,8 +313,8 @@ public:
                              TypeParamsList *    pGenericTypeParams);
 
     // Get the target field address of a context or thread local static. 
-    CORDB_ADDRESS GetThreadOrContextStaticAddress(VMPTR_FieldDesc vmField,
-                                                  VMPTR_Thread    vmRuntimeThread);
+    CORDB_ADDRESS GetThreadStaticAddress(VMPTR_FieldDesc vmField,
+                                         VMPTR_Thread    vmRuntimeThread);
 
     // Get the target field address of a collectible types static. 
     CORDB_ADDRESS GetCollectibleTypeStaticAddress(VMPTR_FieldDesc vmField,
@@ -334,6 +349,22 @@ public:
     // Returns true if the argument is a runtime callable wrapper
     BOOL IsRcw(VMPTR_Object vmObject);
 
+    BOOL IsDelegate(VMPTR_Object vmObject);
+
+    HRESULT GetDelegateType(VMPTR_Object delegateObject, DelegateType *delegateType);
+
+    HRESULT GetDelegateFunctionData(
+        DelegateType delegateType,
+        VMPTR_Object delegateObject,
+        OUT VMPTR_DomainFile *ppFunctionDomainFile,
+        OUT mdMethodDef *pMethodDef);
+
+    HRESULT GetDelegateTargetObject(
+        DelegateType delegateType,
+        VMPTR_Object delegateObject,
+        OUT VMPTR_Object *ppTargetObj,
+        OUT VMPTR_AppDomain *ppTargetAppDomain);
+
     // retrieves the list of COM interfaces implemented by vmObject, as it is known at
     // the time of the call (the list may change as new interface types become available
     // in the runtime)
@@ -367,6 +398,17 @@ public:
                         OUT DacDbiArrayList<DebuggerIPCE_ExpandedTypeData> * pTypes);
 
 private:
+    // Given a pointer to a managed function, obtain the method desc for it.
+    // Equivalent to GetMethodDescPtrFromIp, except if the method isn't jitted
+    // it will look for it in code stubs.
+    // Returns:
+    //   S_OK on success.
+    //   If it's a jitted method, error codes equivalent to GetMethodDescPtrFromIp
+    //   E_INVALIDARG if a non-jitted metod can't be located in the stubs.
+    HRESULT GetMethodDescPtrFromIpEx(
+        TADDR funcIp,
+        OUT VMPTR_MethodDesc *ppMD);
+
     BOOL IsExceptionObject(MethodTable* pMT);
 
     // Get the approximate and exact type handles for a type

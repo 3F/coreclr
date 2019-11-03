@@ -12,7 +12,6 @@
 #include "compile.h"
 
 #include "field.h"
-#include "constrainedexecutionregion.h"
 
 //
 // Include Zapper infrastructure here
@@ -112,7 +111,7 @@ public:
         return (count_t)k.m_dwSize ^ (count_t)k.m_kind ^ HashBytes((BYTE *)k.m_data, k.m_dwSize);
     }
 
-    static const element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
+    static element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
     static bool IsNull(const element_t &e) { LIMITED_METHOD_CONTRACT; return e == NULL; }
 };
 
@@ -127,12 +126,7 @@ DataImage::DataImage(Module *module, CEEPreloader *preloader)
     m_pZapImage->m_pDataImage = this;
 
     m_pInternedStructures = new InternedStructureHashTable();
-
-#ifdef FEATURE_CORECLR
-    m_inlineTrackingMap = NULL;
-#else
     m_inlineTrackingMap = new InlineTrackingMap();
-#endif
 }
 
 DataImage::~DataImage()
@@ -603,7 +597,6 @@ void DataImage::StoreRvaInfo(FieldDesc * pFD,
 int __cdecl DataImage::rvaInfoVectorEntryCmp(const void* a_, const void* b_)
 {
     LIMITED_METHOD_CONTRACT;
-    STATIC_CONTRACT_SO_TOLERANT;   
     DataImage::RvaInfoStructure *a = (DataImage::RvaInfoStructure *)a_;
     DataImage::RvaInfoStructure *b = (DataImage::RvaInfoStructure *)b_;
     int rvaComparisonResult = (int)(a->rva - b->rva);
@@ -635,7 +628,7 @@ void DataImage::SaveRvaStructure()
         // rvaInfo->size are monotonically decreasing if rva are the same.
         _ASSERTE(previousRvaInfo==NULL ||
                  previousRvaInfo->rva < rvaInfo->rva ||
-                 previousRvaInfo->rva == rvaInfo->rva && previousRvaInfo->size >= rvaInfo->size
+                 ((previousRvaInfo->rva == rvaInfo->rva) && (previousRvaInfo->size >= rvaInfo->size))
                 );
 
         if (previousRvaInfo==NULL || previousRvaInfo->rva != rvaInfo->rva) {
@@ -744,9 +737,7 @@ FORCEINLINE static CorCompileSection GetSectionForNodeType(ZapNodeType type)
 
     // SECTION_READONLY_WARM
     case NodeTypeForItemKind(DataImage::ITEM_METHOD_TABLE):
-    case NodeTypeForItemKind(DataImage::ITEM_VTABLE_CHUNK):
     case NodeTypeForItemKind(DataImage::ITEM_INTERFACE_MAP):
-    case NodeTypeForItemKind(DataImage::ITEM_DICTIONARY):
     case NodeTypeForItemKind(DataImage::ITEM_DISPATCH_MAP):
     case NodeTypeForItemKind(DataImage::ITEM_GENERICS_STATIC_FIELDDESCS):
     case NodeTypeForItemKind(DataImage::ITEM_GC_STATIC_HANDLES_COLD):
@@ -755,6 +746,12 @@ FORCEINLINE static CorCompileSection GetSectionForNodeType(ZapNodeType type)
     case NodeTypeForItemKind(DataImage::ITEM_PROPERTY_NAME_SET):
     case NodeTypeForItemKind(DataImage::ITEM_STORED_METHOD_SIG_READONLY_WARM):
         return CORCOMPILE_SECTION_READONLY_WARM;
+
+    case NodeTypeForItemKind(DataImage::ITEM_DICTIONARY):
+        return CORCOMPILE_SECTION_READONLY_DICTIONARY;
+
+    case NodeTypeForItemKind(DataImage::ITEM_VTABLE_CHUNK):
+        return CORCOMPILE_SECTION_READONLY_VCHUNKS;
 
     // SECTION_CLASS_COLD
     case NodeTypeForItemKind(DataImage::ITEM_PARAM_TYPEDESC):
@@ -896,8 +893,6 @@ void DataImage::FixupRVAs()
     FixupModuleRVAs();
     FixupRvaStructure();
 
-    if (m_module->m_pCerNgenRootTable != NULL)
-        m_module->m_pCerNgenRootTable->FixupRVAs(this);
 
     // Dev11 bug 181494 instrumentation
     if (m_Fixups.GetCount() != m_iCurrentFixup) EEPOLICY_HANDLE_FATAL_ERROR(COR_E_EXECUTIONENGINE);
@@ -1297,92 +1292,6 @@ public:
 };
 #endif // HAS_NDIRECT_IMPORT_PRECODE
 
-#ifdef HAS_REMOTING_PRECODE
-class ZapRemotingPrecode : public ZapNode
-{
-    MethodDesc * m_pMD;
-    DataImage::ItemKind m_kind;
-    BOOL m_fIsPrebound;
-
-public:
-    ZapRemotingPrecode(MethodDesc * pMethod, DataImage::ItemKind kind, BOOL fIsPrebound)
-        : m_pMD(pMethod), m_kind(kind), m_fIsPrebound(fIsPrebound)
-    {
-    }
-
-    virtual DWORD GetSize()
-    {
-        return sizeof(RemotingPrecode);
-    }
-
-    virtual UINT GetAlignment()
-    {
-        return PRECODE_ALIGNMENT;
-    }
-
-    virtual ZapNodeType GetType()
-    {
-        return NodeTypeForItemKind(m_kind);
-    }
-
-    virtual DWORD ComputeRVA(ZapWriter * pZapWriter, DWORD dwPos)
-    {
-        dwPos = AlignUp(dwPos, GetAlignment());
-
-        // Alignment for straddlers
-        if (AlignmentTrim(dwPos + offsetof(RemotingPrecode, m_pMethodDesc), RELOCATION_PAGE_SIZE) > RELOCATION_PAGE_SIZE - sizeof(TADDR))
-            dwPos += GetAlignment();
-
-        SetRVA(dwPos);
-
-        dwPos += GetSize();
-
-        return dwPos;
-    }
-
-    virtual void Save(ZapWriter * pZapWriter)
-    {
-        ZapImage * pImage = ZapImage::GetImage(pZapWriter);
-
-        RemotingPrecode precode;
-
-        precode.Init(m_pMD);
-
-        SSIZE_T offset;
-        ZapNode * pNode = pImage->m_pDataImage->GetNodeForStructure(m_pMD, &offset);
-        pImage->WriteReloc(&precode, offsetof(RemotingPrecode, m_pMethodDesc),
-            pNode, offset, IMAGE_REL_BASED_PTR);
-
-        pImage->WriteReloc(&precode, offsetof(RemotingPrecode, m_callRel32),
-            pImage->GetHelperThunk(CORINFO_HELP_EE_REMOTING_THUNK), 0, IMAGE_REL_BASED_REL32);
-
-        if (m_fIsPrebound)
-        {
-            pImage->WriteReloc(&precode, offsetof(RemotingPrecode, m_rel32),
-                pImage->m_pDataImage->GetCodeAddress(m_pMD), 0, IMAGE_REL_BASED_REL32);
-        }
-        else
-        {
-            pImage->WriteReloc(&precode, offsetof(RemotingPrecode, m_rel32),
-                pImage->GetHelperThunk(CORINFO_HELP_EE_PRESTUB), 0, IMAGE_REL_BASED_REL32);
-        }
-
-        pZapWriter->Write(&precode, sizeof(precode));
-    }
-
-    BOOL IsPrebound(ZapImage * pImage)
-    {
-        // This will make sure that when IBC logging is on, the precode goes thru prestub.
-        if (GetAppDomain()->ToCompilationDomain()->m_fForceInstrument)
-            return FALSE;
-
-        // Prebind the remoting precode if possible
-        return pImage->m_pDataImage->CanDirectCall(m_pMD, CORINFO_ACCESS_THIS);
-    }
-
-};
-#endif // HAS_REMOTING_PRECODE
-
 void DataImage::SavePrecode(PVOID ptr, MethodDesc * pMD, PrecodeType t, ItemKind kind, BOOL fIsPrebound)
 {
     ZapNode * pNode = NULL;
@@ -1399,19 +1308,6 @@ void DataImage::SavePrecode(PVOID ptr, MethodDesc * pMD, PrecodeType t, ItemKind
         GetHelperThunk(CORINFO_HELP_EE_PINVOKE_FIXUP);
         break;
 #endif // HAS_NDIRECT_IMPORT_PRECODE
-
-#ifdef HAS_REMOTING_PRECODE
-    case PRECODE_REMOTING:
-        pNode = new (GetHeap()) ZapRemotingPrecode(pMD, kind, fIsPrebound);
-
-        GetHelperThunk(CORINFO_HELP_EE_REMOTING_THUNK);
-
-        if (!fIsPrebound)
-        {
-            GetHelperThunk(CORINFO_HELP_EE_PRESTUB);
-        }
-        break;
-#endif // HAS_REMOTING_PRECODE
 
     default:
         _ASSERTE(!"Unexpected precode type");
@@ -1471,7 +1367,7 @@ void DataImage::FixupTypeHandlePointer(TypeHandle th, PVOID p, SSIZE_T offset, Z
         {
             if (CanEagerBindToTypeHandle(th) && CanHardBindToZapModule(th.GetLoaderModule()))
             {
-                FixupField(p, offset, th.AsTypeDesc(), 2);
+                FixupField(p, offset, th.AsTypeDesc(), 2, type);
             }
             else
             {

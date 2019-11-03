@@ -102,7 +102,7 @@ void ThreadExceptionState::FreeAllStackTraces()
     }
 }
 
-void ThreadExceptionState::ClearThrowablesForUnload(HandleTableBucket* pHndTblBucket)
+void ThreadExceptionState::ClearThrowablesForUnload(IGCHandleStore* handleStore)
 {
     WRAPPER_NO_CONTRACT;
 
@@ -116,7 +116,7 @@ void ThreadExceptionState::ClearThrowablesForUnload(HandleTableBucket* pHndTblBu
           pNode != NULL;
           pNode = pNode->m_pPrevNestedInfo)
     {
-        if (pHndTblBucket->Contains(pNode->m_hThrowable))
+        if (handleStore->ContainsHandle(pNode->m_hThrowable))
         {
             pNode->DestroyExceptionHandle();
         }
@@ -151,7 +151,6 @@ OBJECTREF ThreadExceptionState::GetThrowable()
         MODE_COOPERATIVE;
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     
@@ -177,7 +176,6 @@ void ThreadExceptionState::SetThrowable(OBJECTREF throwable DEBUG_ARG(SetThrowab
         if ((throwable == NULL) || CLRException::IsPreallocatedExceptionObject(throwable)) NOTHROW; else THROWS; // From CreateHandle
         GC_NOTRIGGER;
         if (throwable == NULL) MODE_ANY; else MODE_COOPERATIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -207,13 +205,9 @@ void ThreadExceptionState::SetThrowable(OBJECTREF throwable DEBUG_ARG(SetThrowab
         }
         else
         {
-            BEGIN_SO_INTOLERANT_CODE(GetThread());
-            {
-                AppDomain* pDomain = GetMyThread()->GetDomain();
-                PREFIX_ASSUME(pDomain != NULL);
-                hNewThrowable = pDomain->CreateHandle(throwable);
-            }
-            END_SO_INTOLERANT_CODE;
+            AppDomain* pDomain = GetMyThread()->GetDomain();
+            PREFIX_ASSUME(pDomain != NULL);
+            hNewThrowable = pDomain->CreateHandle(throwable);
         }
 
 #ifdef WIN64EXCEPTIONS
@@ -498,7 +492,7 @@ BOOL DebuggerExState::SetDebuggerInterceptInfo(IJitManager *pJitManager,
 
     int nestingLevel = 0;
     
-#if defined(_TARGET_X86_)
+#ifndef WIN64EXCEPTIONS
     //
     // Get the SEH frame that covers this location on the stack. Note: we pass a skip count of 1. We know that when
     // this is called, there is a nested exception handler on pThread's stack that is only there during exception
@@ -517,11 +511,7 @@ BOOL DebuggerExState::SetDebuggerInterceptInfo(IJitManager *pJitManager,
     nestingLevel = ComputeEnclosingHandlerNestingLevel(pJitManager,
                                                            methodToken,
                                                            natOffset);
-#elif !defined(WIN64EXCEPTIONS)  
-    // !_TARGET_X86_ && !WIN64EXCEPTIONS
-    PORTABILITY_ASSERT("SetDebuggerInterceptInfo() (ExState.cpp) - continuable exceptions NYI\n");
-    return FALSE;
-#endif // !_TARGET_X86_
+#endif // !WIN64EXCEPTIONS
 
     //
     // These values will override the normal information used by the EH subsystem to handle the exception.

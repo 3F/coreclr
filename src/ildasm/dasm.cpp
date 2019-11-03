@@ -17,7 +17,6 @@
 #include "dasmenum.hpp"
 #include "dis.h"
 
-#include "dasmgui.h"
 #include "resource.h"
 #include "dasm_sz.h"
 
@@ -33,13 +32,6 @@
 
 #if defined(_DEBUG) && defined(FEATURE_PREJIT)
 #include <corcompile.h>
-#endif
-
-#ifndef FEATURE_CORECLR
-// Define also LegacyActivationShim::CoInitializeEE wrapper around CoInitializeEE
-#define LEGACY_ACTIVATION_SHIM_DEFINE_CoInitializeEE
-#include "LegacyActivationShim.h"
-#include "clrinternal.h"
 #endif
 
 #ifdef FEATURE_PAL
@@ -119,7 +111,6 @@ BOOL                    g_fHidePrivScope = TRUE;
 BOOL                    g_fProject = FALSE;  // if .winmd file, transform to .NET view
 
 extern BOOL             g_fQuoteAllNames; // declared in formatType.cpp, init to FALSE
-BOOL                    g_fShowProgressBar = TRUE;
 BOOL                    g_fForwardDecl=FALSE;
 
 char                    g_szAsmCodeIndent[MAX_MEMBER_LENGTH];
@@ -158,7 +149,7 @@ extern ULONG    g_LocalComTypeNum;
 
 // MetaInfo integration:
 #include "../tools/metainfo/mdinfo.h"
-#include "ivehandler.h"
+
 BOOL                    g_fDumpMetaInfo = FALSE;
 ULONG                   g_ulMetaInfoFilter = MDInfo::dumpDefault;
 // Validator module type.
@@ -170,8 +161,6 @@ void DisplayFile(__in __nullterminated wchar_t* szFile,
                  __in_opt __nullterminated wchar_t* szObjFile, 
                  strPassBackFn pDisplayString);
 extern mdMethodDef      g_tkEntryPoint; // integration with MetaInfo
-// Abort disassembly flag:
-BOOL    g_fAbortDisassembly = FALSE;
 
 DWORD   DumpResourceToFile(__in __nullterminated WCHAR*   wzFileName); // see DRES.CPP
 
@@ -319,12 +308,6 @@ extern CQuickBytes *        g_szBuf_JUMPPT;
 extern CQuickBytes *        g_szBuf_UnquotedProperName;
 extern CQuickBytes *        g_szBuf_ProperName;
 
-#ifndef FEATURE_CORECLR
-// CLR internal hosting API
-ICLRRuntimeHostInternal *g_pCLRRuntimeHostInternal = NULL;
-#endif
-
-#ifdef FEATURE_CORECLR
 #ifdef FEATURE_PAL
 CoreCLRLoader *g_loader;
 #endif
@@ -332,11 +315,9 @@ MetaDataGetDispenserFunc metaDataGetDispenser;
 GetMetaDataInternalInterfaceFunc getMetaDataInternalInterface;
 GetMetaDataInternalInterfaceFromPublicFunc getMetaDataInternalInterfaceFromPublic;
 GetMetaDataPublicInterfaceFromInternalFunc getMetaDataPublicInterfaceFromInternal;
-#endif
 
 BOOL Init()
 {
-#ifdef FEATURE_CORECLR
 #ifdef FEATURE_PAL
     g_loader = CoreCLRLoader::Create(g_pszExeFile);
     if (g_loader == NULL)
@@ -353,37 +334,7 @@ BOOL Init()
     getMetaDataInternalInterfaceFromPublic = (GetMetaDataInternalInterfaceFromPublicFunc)GetMetaDataInternalInterfaceFromPublic;
     getMetaDataPublicInterfaceFromInternal = (GetMetaDataPublicInterfaceFromInternalFunc)GetMetaDataPublicInterfaceFromInternal;
 #endif // FEATURE_PAL
-#else // FEATURE_CORECLR
-    if (FAILED(CoInitialize(NULL)))
-    {
-        return FALSE;
-    }
-    
-    if (FAILED(LegacyActivationShim::CoInitializeCor(COINITCOR_DEFAULT)))
-    {
-        return FALSE;
-    }
-    
-    if (FAILED(LegacyActivationShim::CoInitializeEE(COINITEE_DEFAULT)))
-    {
-        return FALSE;
-    }
-    
-    ICLRRuntimeInfo *pCLRRuntimeInfo = NULL;
-    if (FAILED(LegacyActivationShim::Util::GetCLRRuntimeInfo(&pCLRRuntimeInfo)))
-    {
-        return FALSE;
-    }
-    
-    if (FAILED(pCLRRuntimeInfo->GetInterface(
-        CLSID_CLRRuntimeHostInternal, 
-        IID_ICLRRuntimeHostInternal, 
-        (LPVOID *)&g_pCLRRuntimeHostInternal)))
-    {
-        return FALSE;
-    }
-#endif // FEATURE_CORECLR
-    
+
     g_szBuf_KEYWORD = new CQuickBytes();
     g_szBuf_COMMENT = new CQuickBytes();
     g_szBuf_ERRORMSG = new CQuickBytes();
@@ -482,10 +433,6 @@ void Cleanup()
 
 void Uninit()
 {
-#ifndef FEATURE_CORECLR
-    GUIAddOpcode(NULL,NULL);
-#endif
-
     if (g_pPtrTags != NULL)
     {
         SDELETE(g_pPtrTags);
@@ -536,28 +483,16 @@ void Uninit()
     {
         SDELETE(g_szBuf_UnquotedProperName);
     }
-    if (g_szBuf_UnquotedProperName != NULL)
+    if (g_szBuf_ProperName != NULL)
     {
         SDELETE(g_szBuf_ProperName);
     }
     
-#ifdef FEATURE_CORECLR
 #ifdef FEATURE_PAL
     if (g_loader != NULL)
     {
         g_loader->Finish();
     }
-#endif
-#else
-    if (g_pCLRRuntimeHostInternal != NULL)
-    {
-        g_pCLRRuntimeHostInternal->Release();
-        g_pCLRRuntimeHostInternal = NULL;
-    }
-    
-    LegacyActivationShim::CoUninitializeEE(COUNINITEE_DEFAULT);
-    LegacyActivationShim::CoUninitializeCor();
-    CoUninitialize();
 #endif
 } // Uninit
 
@@ -993,50 +928,51 @@ bool HasSuppressingAttribute()
 #endif
 void DumpMscorlib(void* GUICookie)
 {
-    if(g_pAssemblyImport==NULL) g_pAssemblyImport = GetAssemblyImport(GUICookie);
-    if(g_pAssemblyImport!=NULL)
+    // In the CoreCLR with reference assemblies and redirection it is more difficult to determine if
+    // a particular Assembly is the System assembly, like mscorlib.dll is for the Desktop CLR.
+    // In the CoreCLR runtimes, the System assembly can be System.Private.CoreLib.dll, System.Runtime.dll
+    // or netstandard.dll and in the future a different Assembly name could be used.
+    // We now determine the identity of the System assembly by querying if the Assembly defines the
+    // well known type System.Object as that type must be defined by the System assembly
+    // If this type is defined then we will output the ".mscorlib" directive to indicate that this 
+    // assembly is the System assembly.
+    //
+    mdTypeDef tkObjectTypeDef = mdTypeDefNil;
+
+    // Lookup the type System.Object and see it it has a type definition in this assembly
+    if (SUCCEEDED(g_pPubImport->FindTypeDefByName(W("System.Object"), mdTypeDefNil, &tkObjectTypeDef)))
     {
-        mdAssembly  tkAsm;
-        if(SUCCEEDED(g_pAssemblyImport->GetAssemblyFromScope(&tkAsm))&&(tkAsm != mdAssemblyNil))
+        if (tkObjectTypeDef != mdTypeDefNil)
         {
-            const void* pPublicKey;
-            ULONG       cbPublicKey = 0;
-            ULONG       ulHashAlgId;
-            WCHAR       wzName[1024];
-            ULONG       ulNameLen=0;
-            ASSEMBLYMETADATA    md;
-            WCHAR       wzLocale[1024];
-            DWORD       dwFlags;
-            //char        szString[4096];
-            
-            md.szLocale = wzLocale;
-            md.cbLocale = 1024;
-            md.rProcessor = NULL;
-            md.ulProcessor = 0;
-            md.rOS = NULL;
-            md.ulOS = 0;
-    
-            if(SUCCEEDED(g_pAssemblyImport->GetAssemblyProps(            // S_OK or error.
-                                                            tkAsm,       // [IN] The Assembly for which to get the properties.
-                                                            &pPublicKey, // [OUT] Pointer to the public key.
-                                                            &cbPublicKey,// [OUT] Count of bytes in the public key.
-                                                            &ulHashAlgId,// [OUT] Hash Algorithm.
-                                                            wzName,      // [OUT] Buffer to fill with name.
-                                                            1024,        // [IN] Size of buffer in wide chars.
-                                                            &ulNameLen,  // [OUT] Actual # of wide chars in name.
-                                                            &md,         // [OUT] Assembly MetaData.
-                                                            &dwFlags)))  // [OUT] Flags.
+            // We do have a type definition for System.Object in this assembly
+            //
+            DWORD dwClassAttrs = 0;
+            mdToken tkExtends = mdTypeDefNil;
+
+            // Retrieve the type def properties as well, so that we can check a few more things about 
+            // the System.Object type
+            //
+            if (SUCCEEDED(g_pPubImport->GetTypeDefProps(tkObjectTypeDef, NULL, NULL, 0, &dwClassAttrs, &tkExtends)))
             {
-                if(wcscmp(wzName,W("mscorlib")) == 0)
+                bool bExtends = g_pPubImport->IsValidToken(tkExtends);
+                bool isClass = ((dwClassAttrs & tdClassSemanticsMask) == tdClass);
+
+                // We also check the type properties to make sure that we have a class and not a Value type definition
+                // and that this type definition isn't extending another type.
+                // 
+                if (isClass & !bExtends)
                 {
-                    printLine(GUICookie,"");
-                    sprintf_s(szString,SZSTRING_SIZE,"%s%s ",g_szAsmCodeIndent,KEYWORD(".mscorlib"));
-                    printLine(GUICookie,szString);
-                    printLine(GUICookie,"");
+                    // We will mark this assembly with the System assembly directive: .mscorlib
+                    //
+                    printLine(GUICookie, "");
+                    sprintf_s(szString, SZSTRING_SIZE, "%s%s ", g_szAsmCodeIndent, KEYWORD(".mscorlib"));
+                    printLine(GUICookie, szString);
+                    printLine(GUICookie, "");                
                 }
             }
         }
     }
+
 }
 void DumpTypelist(void* GUICookie)
 {
@@ -1119,7 +1055,6 @@ BOOL EnumTypedefs()
 
 void DumpTypedefs(void* GUICookie)
 {
-    HRESULT hr;
     DWORD i;
     char* szptr;
     CQuickBytes out;
@@ -1565,7 +1500,6 @@ mdToken ResolveReflectionNotation(BYTE* dataPtr,
 
 unsigned UnderlyingTypeOfEnumTypeDef(mdToken tk, IMDInternalImport *pIMDI)
 {
-    HRESULT hr;
     // make sure it's a TypeDef
     if(TypeFromToken(tk) != mdtTypeDef) return 0;
     
@@ -1695,17 +1629,10 @@ mdToken TypeRefToTypeDef(mdToken tk, IMDInternalImport *pIMDI, IMDInternalImport
             IUnknown *pUnk; 
             if(FAILED(pIAMDI[0]->QueryInterface(IID_IUnknown, (void**)&pUnk))) goto AssignAndReturn;
 
-#ifdef FEATURE_CORECLR
             if (FAILED(getMetaDataInternalInterfaceFromPublic(
                 pUnk,
                 IID_IMDInternalImport,
                 (LPVOID *)ppIMDInew)))
-#else
-            if (FAILED(g_pCLRRuntimeHostInternal->GetMetaDataInternalInterfaceFromPublic(
-                pUnk, 
-                IID_IMDInternalImport, 
-                (LPVOID *)ppIMDInew)))
-#endif
             {
                 goto AssignAndReturn;
             }
@@ -2340,7 +2267,6 @@ BOOL PrettyPrintCustomAttributeNVPairs(unsigned nPairs, BYTE* dataPtr, BYTE* dat
 }
 BOOL PrettyPrintCustomAttributeBlob(mdToken tkType, BYTE* pBlob, ULONG ulLen, void* GUICookie, __inout __nullterminated char* szString)
 {
-    HRESULT hr;
     char* initszptr = szString + strlen(szString);
     PCCOR_SIGNATURE typePtr;            // type to convert,     
     ULONG typeLen;                  // the lenght of 'typePtr' 
@@ -2459,7 +2385,6 @@ BOOL PrettyPrintCustomAttributeBlob(mdToken tkType, BYTE* pBlob, ULONG ulLen, vo
 
 void DumpCustomAttributeProps(mdToken tkCA, mdToken tkType, mdToken tkOwner, BYTE* pBlob, ULONG ulLen, void *GUICookie, bool bWithOwner)
 {
-    HRESULT hr;
     char*           szptr = &szString[0];
     BOOL            fCommentItOut = FALSE;
     if((TypeFromToken(tkType) == mdtMemberRef)||(TypeFromToken(tkType) == mdtMethodDef))
@@ -3327,7 +3252,6 @@ void DumpGenericParsCA(mdToken tok, void* GUICookie/*=NULL*/)
 void PrettyPrintOverrideDecl(ULONG i, __inout __nullterminated char* szString, void* GUICookie, mdToken tkOverrider,
                              BOOL *pbOverridingTypeSpec)
 {
-    HRESULT hr;
     const char *    pszMemberName;
     mdToken         tkDecl,tkDeclParent=0;
     char            szBadToken[256];
@@ -3435,7 +3359,6 @@ void PrettyPrintOverrideDecl(ULONG i, __inout __nullterminated char* szString, v
 #endif
 BOOL DumpMethod(mdToken FuncToken, const char *pszClassName, DWORD dwEntryPointToken,void *GUICookie,BOOL DumpBody)
 {
-    HRESULT hr;
     const char      *pszMemberName = NULL;//[MAX_MEMBER_LENGTH];
     const char      *pszMemberSig = NULL;
     DWORD           dwAttrs = 0;
@@ -3725,6 +3648,7 @@ lDone: ;
     if(IsMiNoInlining(dwImplAttrs))         szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr)," noinlining");
     if(IsMiAggressiveInlining(dwImplAttrs)) szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr)," aggressiveinlining");
     if(IsMiNoOptimization(dwImplAttrs))     szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr)," nooptimization");
+    if(IsMiAggressiveOptimization(dwImplAttrs)) szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr)," aggressiveoptimization");
     szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr),KEYWORD((char*)-1));
     printLine(GUICookie, szString);
     VDELETE(buff);
@@ -4648,36 +4572,6 @@ BOOL DumpClass(mdTypeDef cl, DWORD dwEntryPointToken, void* GUICookie, ULONG Wha
     pszClassName = (char*)(pc1 ? pc1 : "");
     pszNamespace = (char*)(pc2 ? pc2 : "");
 
-#if (0)
-
-    if((!IsTdNested(dwClassAttrs))&&(!(g_Mode & MODE_GUI))) // don't dump namespaces in GUI mode!
-    {
-        // take care of namespace, if any
-        if(strcmp(pszNamespace,g_szNamespace))
-        {
-            if(strlen(g_szNamespace))
-            {
-                if(g_szAsmCodeIndent[0]) g_szAsmCodeIndent[strlen(g_szAsmCodeIndent)-2] = 0;
-                szptr = &szString[0];
-                szptr+=sprintf_s(szptr,SZSTRING_SIZE,"%s%s ",g_szAsmCodeIndent,UNSCOPE());
-                sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr),COMMENT("// end of namespace %s"),ProperName(g_szNamespace));
-                printLine(GUICookie,szString);
-                printLine(GUICookie,"");
-            }
-            strcpy_s(g_szNamespace,MAX_MEMBER_LENGTH,pszNamespace);
-            if(strlen(g_szNamespace))
-            {
-                sprintf_s(szString,SZSTRING_SIZE,"%s%s %s",
-                    g_szAsmCodeIndent,KEYWORD(".namespace"), ProperName(g_szNamespace));
-                printLine(GUICookie,szString);
-                sprintf_s(szString,SZSTRING_SIZE,"%s%s",g_szAsmCodeIndent,SCOPE());
-                printLine(GUICookie,szString);
-                strcat_s(g_szAsmCodeIndent,MAX_MEMBER_LENGTH,"  ");
-            }
-        }
-    }
-
-#endif
 
     szptr = &szString[0];
     szptr+=sprintf_s(szptr,SZSTRING_SIZE,"%s%s ",g_szAsmCodeIndent,KEYWORD(".class"));
@@ -4905,11 +4799,6 @@ BOOL DumpClass(mdTypeDef cl, DWORD dwEntryPointToken, void* GUICookie, ULONG Wha
             if(g_cl_enclosing[i] == cl)
             {
                 DumpClass(g_cl_list[i],dwEntryPointToken,GUICookie,WhatToDumpOrig);
-                if(g_fAbortDisassembly)
-                {
-                    g_Mode = dwMode;
-                    return FALSE;
-                }
                 fRegetClassLayout = TRUE;
             }
         }
@@ -4920,9 +4809,6 @@ BOOL DumpClass(mdTypeDef cl, DWORD dwEntryPointToken, void* GUICookie, ULONG Wha
     if(WhatToDump & 4)
     {
         DumpMembers(cl, pszNamespace, pszClassName, dwClassAttrs, dwEntryPointToken,GUICookie);
-#ifndef FEATURE_CORECLR
-        if(!ProgressStep()) g_fAbortDisassembly = TRUE;
-#endif
     }
 
     if(g_szAsmCodeIndent[0]) g_szAsmCodeIndent[strlen(g_szAsmCodeIndent)-2] = 0;
@@ -4931,10 +4817,7 @@ BOOL DumpClass(mdTypeDef cl, DWORD dwEntryPointToken, void* GUICookie, ULONG Wha
     if(*pszNamespace != 0) szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr),"%s.",ProperName(pszNamespace));
     sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr),"%s%s", ProperName(pszClassName),COMMENT((char*)-1));
     printLine(GUICookie,szString);
-    if(!(g_Mode & MODE_GUI))
-    {
-        printLine(GUICookie,"");
-    }
+    printLine(GUICookie,"");
     g_tkVarOwner = tkVarOwner;
     return TRUE;
 }
@@ -4953,7 +4836,7 @@ void DumpGlobalMethods(DWORD dwEntryPointToken)
 
     for (i = 0; g_pImport->EnumNext(&hEnumMethod, &FuncToken); i++)
     {
-        if ((i == 0)&&(!(g_Mode & MODE_GUI)))
+        if (i == 0)
         {
             printLine(g_pFile,"");
             printLine(g_pFile,COMMENT("// ================== GLOBAL METHODS ========================="));
@@ -4961,14 +4844,6 @@ void DumpGlobalMethods(DWORD dwEntryPointToken)
         }
         if(DumpMethod(FuncToken, NULL, dwEntryPointToken, g_pFile, TRUE)&&
             (g_Mode == MODE_DUMP_CLASS_METHOD || g_Mode == MODE_DUMP_CLASS_METHOD_SIG)) break;
-
-#ifndef FEATURE_CORECLR
-        if(!ProgressStep())
-        {
-            g_fAbortDisassembly = TRUE;
-            break;
-        }
-#endif
     }
     g_pImport->EnumClose(&hEnumMethod);
     if(i)
@@ -4991,7 +4866,7 @@ void DumpGlobalFields()
 
     for (i = 0; g_pImport->EnumNext(&hEnum, &FieldToken); i++)
     {
-        if ((i == 0)&&(!(g_Mode & MODE_GUI)))
+        if (i == 0)
         {
             printLine(g_pFile,"");
             printLine(g_pFile,COMMENT("// ================== GLOBAL FIELDS =========================="));
@@ -5018,8 +4893,6 @@ void DumpVTables(IMAGE_COR20_HEADER *CORHeader, void* GUICookie)
     char* szStr = &szString[0];
 
     if (VAL32(CORHeader->VTableFixups.VirtualAddress) == 0) return;
-
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
 
     sprintf_s(szString,SZSTRING_SIZE,"// VTableFixup Directory:");
     printLine(GUICookie,szStr);
@@ -5087,7 +4960,6 @@ void DumpEATTable(IMAGE_COR20_HEADER *CORHeader, void* GUICookie)
     DWORD       BufferRVA;
     DWORD       i;
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
 
     sprintf_s(szString,SZSTRING_SIZE,"// Export Address Table Jumps:");
     printLine(GUICookie,szStr);
@@ -5143,7 +5015,6 @@ exit:
 void DumpCodeManager(IMAGE_COR20_HEADER *CORHeader, void* GUICookie)
 {
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
     sprintf_s(szString,SZSTRING_SIZE,"// Code Manager Table:");
     printLine(GUICookie,szStr);
     if (!VAL32(CORHeader->CodeManagerTable.Size))
@@ -5180,7 +5051,6 @@ void DumpSectionHeaders(IMAGE_SECTION_HEADER* pSH, USHORT nSH, void* GUICookie)
 {
     char* szStr = &szString[0];
     char name[16];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
     printLine(GUICookie,"");
     strcpy_s(szString,SZSTRING_SIZE,"// Image sections:");
     printLine(GUICookie,szStr);
@@ -5280,7 +5150,6 @@ void DumpSectionHeaders(IMAGE_SECTION_HEADER* pSH, USHORT nSH, void* GUICookie)
 void DumpBaseReloc(const char *szName, IMAGE_DATA_DIRECTORY *pDir, void* GUICookie)
 {
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
     sprintf_s(szString,SZSTRING_SIZE,"// %s", szName);
     printLine(GUICookie,szStr);
     if (!VAL32(pDir->Size))
@@ -5322,7 +5191,7 @@ void DumpBaseReloc(const char *szName, IMAGE_DATA_DIRECTORY *pDir, void* GUICook
 void DumpIAT(const char *szName, IMAGE_DATA_DIRECTORY *pDir, void* GUICookie)
 {
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
+
     sprintf_s(szString,SZSTRING_SIZE,"// %s", szName);
     printLine(GUICookie,szStr);
     if (!VAL32(pDir->Size))
@@ -5398,7 +5267,7 @@ struct MDStreamHeader
 void DumpMetadataHeader(const char *szName, IMAGE_DATA_DIRECTORY *pDir, void* GUICookie)
 {
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
+
     printLine(GUICookie,"");
     sprintf_s(szString,SZSTRING_SIZE,"// %s", szName);
     printLine(GUICookie,szStr);
@@ -5501,7 +5370,7 @@ void DumpEntryPoint(DWORD dwAddrOfEntryPoint,DWORD dwEntryPointSize,void* GUICoo
     char* szStr = &szString[0];
     char* szptr = szStr+2;
     DWORD i;
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
+
     printLine(GUICookie,"");
     strcpy_s(szString,SZSTRING_SIZE,"// Entry point code:");
     printLine(GUICookie,szStr);
@@ -5531,7 +5400,7 @@ void DumpEntryPoint(DWORD dwAddrOfEntryPoint,DWORD dwEntryPointSize,void* GUICoo
 void DumpHeader(IMAGE_COR20_HEADER *CORHeader, void* GUICookie)
 {
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
+
     DWORD dwAddrOfEntryPoint=0, dwEntryPointSize=0;
 
     PIMAGE_DOS_HEADER pDOSHeader = g_pPELoader->dosHeader();
@@ -5905,8 +5774,6 @@ void DumpTable(unsigned long Table, const char *TableName, void* GUICookie)
     int   size;
     ULONG sizeRec, count;
 
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
-
     // Record that this table has been seen.
     TableSeen(Table);
 
@@ -5942,7 +5809,6 @@ void DumpStatistics(IMAGE_COR20_HEADER *CORHeader, void* GUICookie)
     ULONG   sizeRec, count;
     char    buf[MAX_MEMBER_LENGTH];
     char* szStr = &szString[0];
-    if(g_Mode & MODE_GUI) szStr += 2; // no need for "//" in GUI mode
 
     TableSeenReset();
     metaSize = 0;
@@ -6965,7 +6831,7 @@ void DumpMI(__in __nullterminated const char *str)
         strcpy_s(szString,5,"// ");
         fInit = FALSE;
         GUICookie = (void*)str;
-        if(g_Mode & MODE_GUI) szStr = &szString[3]; // don't need "//" in GUI mode
+
         return;
     }
     // Normal work
@@ -6979,29 +6845,6 @@ void DumpMI(__in __nullterminated const char *str)
     }
 }
 
-HRESULT VEHandlerReporter( // Return status.
-    LPCWSTR     szMsg,                  // Error message.
-    VEContext   Context,                // Error context (offset,token)
-    HRESULT     hrRpt)                  // HRESULT for the message
-{
-    WCHAR* wzMsg;
-    if(szMsg)
-    {
-        size_t L = wcslen(szMsg)+256;
-        if((wzMsg = new (nothrow) WCHAR[L]) != NULL)
-        {
-            wcscpy_s(wzMsg,L,szMsg);
-            // include token and offset from Context
-            if(Context.Token) swprintf_s(&wzMsg[wcslen(wzMsg)], L-wcslen(wzMsg), W(" [token:0x%08X]"),Context.Token);
-            if(Context.uOffset) swprintf_s(&wzMsg[wcslen(wzMsg)], L-wcslen(wzMsg), W(" [at:0x%X]"),Context.uOffset);
-            swprintf_s(&wzMsg[wcslen(wzMsg)], L-wcslen(wzMsg), W(" [hr:0x%08X]\n"),hrRpt);
-            DumpMI(UnicodeToUtf(wzMsg));
-            delete[] wzMsg;
-        }
-    }
-    return S_OK;
-}
-
 void DumpMetaInfo(__in __nullterminated const WCHAR* pwzFileName, __in_opt __nullterminated const char* pszObjFileName, void* GUICookie)
 {
     const WCHAR* pch = wcsrchr(pwzFileName,L'.');
@@ -7011,18 +6854,8 @@ void DumpMetaInfo(__in __nullterminated const WCHAR* pwzFileName, __in_opt __nul
     if(pch && (!_wcsicmp(pch+1,W("lib")) || !_wcsicmp(pch+1,W("obj"))))
     {   // This works only when all the rest does not
         // Init and run.
-#ifdef FEATURE_CORECLR
         if (metaDataGetDispenser(CLSID_CorMetaDataDispenser,
             IID_IMetaDataDispenserEx, (void **)&g_pDisp))
-#else
-        if(SUCCEEDED(CoInitialize(0)))
-        {
-            if(SUCCEEDED(LegacyActivationShim::CoInitializeCor(0)))
-            {
-                if (SUCCEEDED(LegacyActivationShim::ClrCoCreateInstance(
-                    CLSID_CorMetaDataDispenser, NULL, CLSCTX_INPROC_SERVER, 
-                    IID_IMetaDataDispenserEx, (void **) &g_pDisp)))
-#endif
                 {
                     WCHAR *pwzObjFileName=NULL;
                     if (pszObjFileName)
@@ -7037,39 +6870,24 @@ void DumpMetaInfo(__in __nullterminated const WCHAR* pwzFileName, __in_opt __nul
                     g_pDisp = NULL;
                     if (pwzObjFileName) VDELETE(pwzObjFileName);
                 }
-#ifndef FEATURE_CORECLR
-                LegacyActivationShim::CoUninitializeCor();
-            }
-            CoUninitialize();
-        }
-#endif
     }
     else
     {
         HRESULT hr = S_OK;
         if(g_pDisp == NULL)
         {
-#ifdef FEATURE_CORECLR
             hr = metaDataGetDispenser(CLSID_CorMetaDataDispenser,
                 IID_IMetaDataDispenserEx, (void **)&g_pDisp);
-#else
-            hr = LegacyActivationShim::ClrCoCreateInstance(
-                CLSID_CorMetaDataDispenser, NULL, CLSCTX_INPROC_SERVER,
-                IID_IMetaDataDispenserEx, (void **) &g_pDisp);
-#endif
         }
         if(SUCCEEDED(hr))
         {
             g_ValModuleType = ValidatorModuleTypePE;
             if(g_pAssemblyImport==NULL) g_pAssemblyImport = GetAssemblyImport(NULL);
-            if(!(g_Mode & MODE_GUI))
-                printLine(GUICookie,RstrUTF(IDS_E_MISTART));
+            printLine(GUICookie,RstrUTF(IDS_E_MISTART));
             //MDInfo metaDataInfo(g_pPubImport, g_pAssemblyImport, (LPCWSTR)pwzFileName, DumpMI, g_ulMetaInfoFilter);
             MDInfo metaDataInfo(g_pDisp,(LPCWSTR)pwzFileName, DumpMI, g_ulMetaInfoFilter);
-            metaDataInfo.SetVEHandlerReporter((__int64) (size_t) VEHandlerReporter);
             metaDataInfo.DisplayMD();
-            if(!(g_Mode & MODE_GUI))
-                printLine(GUICookie,RstrUTF(IDS_E_MIEND));
+            printLine(GUICookie,RstrUTF(IDS_E_MIEND));
         }
     }
     DumpMI((char*)-1); // reset the print function for DumpMetaInfo
@@ -7118,7 +6936,6 @@ void DumpPreamble()
 
 void DumpSummary()
 {
-    HRESULT hr;
     ULONG i;
     const char      *pcClass,*pcNS,*pcMember, *pcSig;
     char szFQN[4096];
@@ -7442,7 +7259,6 @@ BOOL DumpFile()
     const char *pszFilename = g_szInputFile;
     const DWORD openFlags = ofRead | (g_fProject ? 0 : ofNoTransform);
 
-    if(!(g_Mode & MODE_GUI))
     {
         if(g_fDumpHTML)
         {
@@ -7465,8 +7281,7 @@ BOOL DumpFile()
         char* pch = strrchr(g_szInputFile,'.');
         if(pch && (!_stricmp(pch+1,"lib") || !_stricmp(pch+1,"obj")))
         {
-            if(!(g_Mode & MODE_GUI))
-                DumpMetaInfo(g_wszFullInputFile,g_pszObjFileName,g_pFile);
+            DumpMetaInfo(g_wszFullInputFile,g_pszObjFileName,g_pFile);
             return FALSE;
         }
     }
@@ -7526,6 +7341,13 @@ BOOL DumpFile()
         }
         CORCOMPILE_HEADER * pNativeHeader;
         g_pPELoader->getVAforRVA(VAL32(g_CORHeader->ManagedNativeHeader.VirtualAddress), (void**)&pNativeHeader);
+
+        if (pNativeHeader->Signature != CORCOMPILE_SIGNATURE)
+        {
+            printError( g_pFile, "/native only works on NGen images." );
+            goto exit;
+        }
+
         g_pPELoader->getVAforRVA(VAL32(pNativeHeader->ManifestMetaData.VirtualAddress), &g_pMetaData);
         g_cbMetaData = VAL32(pNativeHeader->ManifestMetaData.Size);
     }
@@ -7542,21 +7364,12 @@ BOOL DumpFile()
         g_cbMetaData = VAL32(g_CORHeader->MetaData.Size);
     }
 
-#ifdef FEATURE_CORECLR
     if (FAILED(getMetaDataInternalInterface(
         (BYTE *)g_pMetaData,
         g_cbMetaData,
         openFlags,
         IID_IMDInternalImport,
         (LPVOID *)&g_pImport)))
-#else
-    if (FAILED(g_pCLRRuntimeHostInternal->GetMetaDataInternalInterface(
-        (BYTE *)g_pMetaData, 
-        g_cbMetaData, 
-        openFlags, 
-        IID_IMDInternalImport, 
-        (LPVOID *)&g_pImport)))
-#endif
     {
         if (g_fDumpHeader)
             DumpHeader(g_CORHeader, g_pFile);
@@ -7565,11 +7378,7 @@ BOOL DumpFile()
     }
 
     TokenSigInit(g_pImport);
-#ifdef FEATURE_CORECLR
     if (FAILED(metaDataGetDispenser(CLSID_CorMetaDataDispenser, IID_IMetaDataDispenser, (LPVOID*)&pMetaDataDispenser)))
-#else
-    if (FAILED(CoCreateInstance(CLSID_CorMetaDataDispenser, 0, CLSCTX_INPROC_SERVER, IID_IMetaDataDispenser, (LPVOID*)&pMetaDataDispenser)))
-#endif
     {
         if (g_fDumpHeader)
             DumpHeader(g_CORHeader, g_pFile);
@@ -7583,31 +7392,6 @@ BOOL DumpFile()
         printError(g_pFile, RstrUTF(IDS_E_OPENMD));
         goto exit;
     }
-
-#ifndef FEATURE_CORECLR
-    // Get a symbol binder.
-    ISymUnmanagedBinder *binder;
-    HRESULT hr;
-
-    hr = CoCreateInstance(CLSID_CorSymBinder_SxS, NULL,
-                                  CLSCTX_INPROC_SERVER,
-                                  IID_ISymUnmanagedBinder,
-                                  (void**)&binder);
-
-    if (SUCCEEDED(hr))
-    {
-        hr = binder->GetReaderForFile(g_pPubImport,
-                                      wzInputFileName,
-                                      NULL,
-                                      &g_pSymReader);
-
-        // Release the binder
-        binder->Release();
-    }
-
-    if (FAILED(hr))
-        g_fShowSource = FALSE;
-#endif
 
     if((g_uNCA = g_pImport->GetCountWithTokenKind(mdtCustomAttribute)))
     {
@@ -7636,13 +7420,6 @@ DoneInitialization:
     }
 #endif
 
-#ifndef FEATURE_CORECLR
-    if (g_Mode & MODE_GUI)
-    {
-        GUIAddItemsToList();
-    }
-    else
-#endif
     {
         // Dump the CLR header info if requested.
         printLine(g_pFile,COMMENT((char*)0)); // start multiline comment
@@ -7682,16 +7459,8 @@ DoneInitialization:
                     ulNumGlobalFunc = g_pImport->EnumGetCount(&hEnumMethod);
                     g_pImport->EnumClose(&hEnumMethod);
                 }
-#ifndef FEATURE_CORECLR
-                if(g_fShowProgressBar)
-                    CreateProgressBar((LONG) (g_NumClasses + ulNumGlobalFunc));
-#endif
 
             }
-#ifndef FEATURE_CORECLR
-            ProgressStep();
-#endif
-            g_fAbortDisassembly = FALSE;
             //DumpVtable(g_pFile);
             DumpMscorlib(g_pFile);
             if(g_fDumpTypeList) DumpTypelist(g_pFile);
@@ -7734,13 +7503,6 @@ DoneInitialization:
                     if(g_cl_enclosing[i] == mdTypeDefNil) // nested classes are dumped within enclosing ones
                     {
                         DumpClass(g_cl_list[i], VAL32(IMAGE_COR20_HEADER_FIELD(*g_CORHeader, EntryPointToken)),g_pFile,7); //7=everything
-                        if(g_fAbortDisassembly)
-                        {
-                            printError(g_pFile,"");
-                            printError(g_pFile,RstrUTF(IDS_E_DASMABORT));
-                            fSuccess = FALSE;
-                            goto CloseFileAndExit;
-                        }
                     }
                 }
                 CloseNamespace(szString);
@@ -7756,35 +7518,7 @@ DoneInitialization:
                     if(g_rchCA[i] == 0) DumpCustomAttribute(TokenFromRid(i,mdtCustomAttribute),g_pFile,true);
                 }
             }
-            if(g_fAbortDisassembly)
-            {
-                printError(g_pFile,"");
-                printError(g_pFile,RstrUTF(IDS_E_DASMABORT));
-                fSuccess = FALSE;
-                goto CloseFileAndExit;
-            }
-#ifndef FEATURE_CORECLR
-            ProgressStep();
-#endif
 
-#if (0)
-            /* Third, dump GC/EH info about the native methods, using the IPMap */
-            IMAGE_DATA_DIRECTORY *pIPMap;
-            if (g_pPELoader->IsPE32())
-            {
-                pIPMap = &g_pPELoader->ntHeaders32()->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
-            }
-            else
-            {
-                pIPMap = &g_pPELoader->ntHeaders64()->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
-            }
-            DWORD        IPMapSize;
-            const BYTE * ipmap;
-            IPMapSize  = VAL32(pIPMap->Size);
-            g_pPELoader->getVAforRVA(VAL32(pIPMap->VirtualAddress), (void **) &ipmap);
-
-            DumpNativeInfo(ipmap, IPMapSize);
-#endif
 
             // If there were "ldptr", dump the .rdata section with labels
             if(g_iPtrCount)
@@ -7947,15 +7681,14 @@ ReportAndExit:
             DumpRTFPostfix(g_pFile);
         }
 
+#ifndef _DEBUG
 CloseFileAndExit:
+#endif
         if(g_pFile)
         {
             fclose(g_pFile);
             g_pFile = NULL;
         }
-#ifndef FEATURE_CORECLR
-        DestroyProgressBar();
-#endif
     }
 
 exit:

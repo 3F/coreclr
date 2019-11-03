@@ -22,7 +22,6 @@ Abstract:
 #include "pal/palinternal.h"
 #include "pal/cruntime.h"
 #include "pal/dbgmsg.h"
-#include "pal/unicode_data.h"
 
 #include "pal/thread.hpp"
 #include "pal/threadsusp.hpp"
@@ -41,176 +40,9 @@ Abstract:
 #endif
 
 #include <errno.h>
+#include <algorithm>
 
 SET_DEFAULT_DEBUG_CHANNEL(CRT);
-
-
-/*--
-Function:
-  wtolower (internal)
-
-16-bit wide character version of the ANSI tolower() function.
-
-  --*/
-static
-wchar_16
-wtolower(wchar_16 c)
-{
-    /* Note: Surrogate pairs unicode character are not supported */
-
-#if HAVE_TOWLOWER
-
-    wchar_t w;
-    w = (wchar_t) c;
-    w = towlower(w);
-    return (wchar_16) w;
-
-#else
-
-    return PAL_towlower(c);
-
-#endif
-
-}
-
-/*******************************************************************************
-Function:
-  Internal_i64tow
-
-Parameters:
-  value
-    - INT64 value to be converted to a string
-  string
-    - out buffer to place interger string
-  radix
-    - numeric base to convert to
-  isI64
-    - TRUE if value is INT64, FALSE if value is a long
-
-Note:
-  - only a radix of ten (and value < 0) will result in a negative
-    sign in the output buffer
-*******************************************************************************/
-LPWSTR Internal_i64tow(INT64 value, LPWSTR string, int radix, BOOL isI64)
-{
-    int length = 0;
-    int n;
-    int r;
-    UINT64 uval = value;
-    LPWSTR stringPtr = string;
-    int start = 0;
-    int end;
-    WCHAR tempCh;
-
-    if (radix < 2 || radix > 36)
-    {
-        ASSERT( "Invalid radix, radix must be between 2 and 36\n" );
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return string;
-    }
-    if (FALSE == isI64)
-    {
-        uval = (ULONG) uval;
-    }
-    if (10 == radix && value < 0)
-    {
-        uval = value * -1;
-    }
-    if(0 == uval)
-    {
-        ++length;
-        *stringPtr++ = '0';
-    }
-    else while (uval > 0)
-    {
-        ++length;
-        n = uval / radix;
-        r = uval - (n * radix);
-        uval /= radix;
-        if (r > 9)
-        {
-            *stringPtr++ = r + 87;
-        }
-        else
-        {
-            *stringPtr++ = r + 48;
-        }
-    }
-    if (10 == radix && value < 0)
-    {
-        *stringPtr++ = '-';
-        ++length;
-    }
-    *stringPtr = 0; /* end the string */
-
-    /* reverse the string */
-    end = length - 1;
-    while (start < end)
-    {
-        tempCh = string[start];
-        string[start] = string[end];
-        string[end] = tempCh;
-        ++start;
-        --end;
-    }
-
-    return string;
-}
-
-/*--
-Function:
-  _itow
-
-16-bit wide character version of the ANSI tolower() function.
-
-  --*/
-wchar_16 *
-__cdecl
-_itow(
-    int value,
-    wchar_16 *string,
-    int radix)
-{
-    wchar_16 *ret;
-
-    PERF_ENTRY(_itow);
-    ENTRY("_itow (value=%d, string=%p, radix=%d)\n",
-          value, string, radix);
-
-    ret = Internal_i64tow(value, string, radix, FALSE);
-
-    LOGEXIT("_itow returns wchar_t* %p\n", ret);
-    PERF_EXIT(_itow);
-
-    return ret;
-}
-
-/*--
-Function:
-  _i64tow
-
-See MSDN doc
---*/
-wchar_16 *
- __cdecl 
-_i64tow(
-    __int64 value, 
-    wchar_16 *string, 
-    int radix)
-{
-    wchar_16 *ret;
-
-    PERF_ENTRY(_i64tow);
-    ENTRY("_i64tow (value=%ld, string=%p, radix=%d)\n",
-          value, string, radix);
-
-    ret = Internal_i64tow(value, string, radix, TRUE);
-
-    LOGEXIT("_i64tow returns wchar_t* %p\n", ret);
-    PERF_EXIT(_i64tow);
-
-    return ret;
-}
 
 
 /*--
@@ -261,28 +93,6 @@ _wtoi(
     return ret;
 }
 
-
-/*--
-Function:
-  PAL_iswspace
-
-See MSDN doc
---*/
-int
-__cdecl
-PAL_iswspace(wchar_16 c)
-{
-    int ret;
-
-    PERF_ENTRY(iswspace);
-    ENTRY("PAL_iswspace (c=%C)\n", c);
-
-    ret = iswspace(c);
-
-    LOGEXIT("PAL_iswspace returns int %d\n", ret);
-    PERF_EXIT(iswspace);
-    return ret;
-}
 
 /*++
 Function:
@@ -337,7 +147,7 @@ _wcsnicmp(
 
     for (i = 0; i < count; i++)
     {
-        diff = wtolower(string1[i]) - wtolower(string2[i]);
+        diff = towlower(string1[i]) - towlower(string2[i]);
         if (diff != 0 || 0 == string1[i] || 0 == string2[i])
         {
             break;
@@ -424,7 +234,7 @@ _wcslwr(
 
     for (i=0 ; string[i] != 0; i++)
     {
-        string[i] = wtolower(string[i]);
+        string[i] = towlower(string[i]);
     }
   
     LOGEXIT("_wcslwr returning wchar_t %p (%S)\n", string?string:W16_NULLSTRING, string?string:W16_NULLSTRING);
@@ -654,7 +464,7 @@ PAL_wcstoul(
     if (res > _UI32_MAX)
     {
         wchar_16 wc = *nptr;
-        while (PAL_iswspace(wc))
+        while (iswspace(wc))
         {
             wc = *nptr++;
         }
@@ -756,242 +566,6 @@ PAL__wcstoui64Exit:
 
     return res;
 }
-
-/*++
-Function:
-  PAL_towlower
-
-See MSDN
-
---*/
-wchar_16
-__cdecl
-PAL_towlower( wchar_16 c )
-{
-#if HAVE_COREFOUNDATION
-    PERF_ENTRY(towlower);
-    ENTRY("towlower (c=%d)\n", c);
-    if (!PAL_iswlower(c))
-    {
-        CFMutableStringRef cfString = CFStringCreateMutable(
-                                            kCFAllocatorDefault, 1);
-        if (cfString != NULL)
-        {
-            CFStringAppendCharacters(cfString, (const UniChar*)&c, 1);
-            CFStringLowercase(cfString, NULL);
-            c = CFStringGetCharacterAtIndex(cfString, 0);
-            CFRelease(cfString);
-        }
-    }
-    LOGEXIT("towlower returns int %d\n", c );
-    PERF_EXIT(towlower);
-    return c;
-#else   /* HAVE_COREFOUNDATION */
-    UnicodeDataRec dataRec;
-    
-    PERF_ENTRY(towlower);
-    ENTRY("towlower (c=%d)\n", c);
-    
-    if (!GetUnicodeData(c, &dataRec))
-    {
-        TRACE( "Unable to retrieve unicode data for the character %c.\n", c );
-        LOGEXIT("towlower returns int %d\n", c );
-        PERF_EXIT(towlower);
-        return c;
-    }
-
-    if ( (dataRec.C1_TYPE_FLAGS & C1_LOWER) || (dataRec.nOpposingCase ==  0 ))
-    {
-        LOGEXIT("towlower returns int %d\n", c );
-        PERF_EXIT(towlower);
-        return c;
-    }
-    else
-    {
-        LOGEXIT("towlower returns int %d\n", dataRec.nOpposingCase );
-        PERF_EXIT(towlower);
-        return dataRec.nOpposingCase;
-    }
-#endif  /* HAVE_COREFOUNDATION */
-}
-
-
-/*++
-Function:
-  PAL_towupper
-
-See MSDN
-
---*/
-wchar_16
-__cdecl
-PAL_towupper( wchar_16 c )
-{
-#if HAVE_COREFOUNDATION
-    PERF_ENTRY(towupper);
-    ENTRY("towupper (c=%d)\n", c);
-    if (!PAL_iswupper(c))
-    {
-        CFMutableStringRef cfString = CFStringCreateMutable(
-                                            kCFAllocatorDefault, 1);
-        if (cfString != NULL)
-        {
-            CFStringAppendCharacters(cfString, (const UniChar*)&c, 1);
-            CFStringUppercase(cfString, NULL);
-            c = CFStringGetCharacterAtIndex(cfString, 0);
-            CFRelease(cfString);
-        }
-    }
-    LOGEXIT("towupper returns int %d\n", c );
-    PERF_EXIT(towupper);
-    return c;
-#else   /* HAVE_COREFOUNDATION */
-    UnicodeDataRec dataRec;
-
-    PERF_ENTRY(towupper);
-    ENTRY("towupper (c=%d)\n", c);
-
-    if (!GetUnicodeData(c, &dataRec))
-    {
-        TRACE( "Unable to retrieve unicode data for the character %c.\n", c );
-        LOGEXIT("towupper returns int %d\n", c );
-        PERF_EXIT(towupper);
-        return c;
-    }
-    
-    if ( (dataRec.C1_TYPE_FLAGS & C1_UPPER) || (dataRec.nOpposingCase ==  0 ))
-    {
-        LOGEXIT("towupper returns int %d\n", c );
-        PERF_EXIT(towupper);
-        return c;
-    }
-    else
-    {
-        LOGEXIT("towupper returns int %d\n", dataRec.nOpposingCase );
-        PERF_EXIT(towupper);
-        return dataRec.nOpposingCase;
-    }
-#endif  /* HAVE_COREFOUNDATION */
-}
-
-/*++
-Function:
-  PAL_iswupper
-
-See MSDN
-
---*/
-int
-__cdecl
-PAL_iswupper( wchar_16 c )
-{
-    BOOL bRetVal = FALSE;
-#if HAVE_COREFOUNDATION
-    static CFCharacterSetRef sUppercaseSet;
-    
-    if (sUppercaseSet == NULL)
-    {
-        sUppercaseSet = CFCharacterSetGetPredefined(
-                                        kCFCharacterSetUppercaseLetter);
-    }
-    PERF_ENTRY(iswupper);
-    ENTRY( "iswupper (c=%d)\n", c );
-    bRetVal = CFCharacterSetIsCharacterMember(sUppercaseSet, c);
-#else   /* HAVE_COREFOUNDATION */
-    UnicodeDataRec dataRec;
-
-    PERF_ENTRY(iswupper);
-    ENTRY( "iswupper (c=%d)\n", c );
-
-    if (!GetUnicodeData(c, &dataRec))
-    {
-        TRACE( "Unable to retrieve unicode data for the character %c.\n", c );
-        goto exit;
-    }
-    
-    if (dataRec.C1_TYPE_FLAGS & C1_UPPER)
-    {
-        bRetVal = TRUE;
-    }
-exit:
-#endif  /* HAVE_COREFOUNDATION */
-    LOGEXIT( "iswupper returns %s.\n", bRetVal == TRUE ? "TRUE" : "FALSE" );
-    PERF_EXIT(iswupper);
-    return bRetVal;
-}
-
-/*++
-Function:
-  PAL_iswlower
-
-See MSDN
-
---*/
-int
-__cdecl
-PAL_iswlower( wchar_16 c )
-{
-    BOOL bRetVal = FALSE;
-#if HAVE_COREFOUNDATION
-    static CFCharacterSetRef sLowercaseSet;
-    
-    if (sLowercaseSet == NULL)
-    {
-        sLowercaseSet = CFCharacterSetGetPredefined(
-                                        kCFCharacterSetLowercaseLetter);
-    }
-    PERF_ENTRY(iswlower);
-    ENTRY("PAL_iswlower (c=%d)\n", c);
-    bRetVal = CFCharacterSetIsCharacterMember(sLowercaseSet, c);
-#else   /* HAVE_COREFOUNDATION */
-    UnicodeDataRec dataRec;
-
-    PERF_ENTRY(iswlower);
-    ENTRY("PAL_iswlower (c=%d)\n", c);
-    
-    if (!GetUnicodeData(c, &dataRec))
-    {
-        TRACE( "Unable to retrieve unicode data for the character %c.\n", c );
-        goto exit;
-    }
-    
-    if (dataRec.C1_TYPE_FLAGS & C1_LOWER)
-    {
-        bRetVal = TRUE;
-    }
-exit:
-#endif  /* HAVE_COREFOUNDATION */
-    LOGEXIT("PAL_iswlower returns %s.\n", bRetVal == TRUE ? "TRUE" : "FALSE");
-    PERF_EXIT(iswlower);
-    return bRetVal;
-}
-
-/*++
-Function:
-  PAL_iswalpha
-
-See MSDN
-
---*/
-int
-__cdecl
-PAL_iswalpha( wchar_16 c )
-{
-    PERF_ENTRY(iswalpha);
-    ENTRY( "PAL_iswalpha (c=%d)\n", c);
-    
-    if ( PAL_iswupper( c ) || PAL_iswlower( c ) )
-    {
-        LOGEXIT( "PAL_iswalpha returns 1.\n" );
-        PERF_EXIT(iswalpha);
-        return 1;
-    }
-
-    LOGEXIT( "PAL_iswalpha returns 0.\n" );
-    PERF_EXIT(iswalpha);
-    return 0;
-}
-
 
 /*++
 Function:
@@ -1334,16 +908,22 @@ PAL_wcsstr(
         i = 0;
         while (1)
         {
-            if (*(string + i) == 0 || *(strCharSet + i) == 0)
+            if (*(strCharSet + i) == 0)
             {
                 ret = (wchar_16 *) string;
                 goto leave;
             }
-            if (*(string + i) != *(strCharSet + i))
+            else if (*(string + i) == 0)
+            {
+                ret = NULL;
+                goto leave;
+            }
+            else if (*(string + i) != *(strCharSet + i))
             {
                 break;
             }
-        i++;
+
+            i++;
         }
         string++;
     }
@@ -1371,7 +951,7 @@ PAL_wcsncpy( wchar_16 * strDest, const wchar_16 *strSource, size_t count )
           strDest, strSource, strSource, (unsigned long) count);
     
     memset( strDest, 0, length );
-    length = min( count, PAL_wcslen( strSource ) ) * sizeof( wchar_16 );
+    length = std::min( count, PAL_wcslen( strSource ) ) * sizeof( wchar_16 );
     memcpy( strDest, strSource, length );
     
     LOGEXIT("wcsncpy returning (wchar_16*): %p\n", strDest);
@@ -1489,7 +1069,7 @@ PAL_wcstod( const wchar_16 * nptr, wchar_16 **endptr )
     }
 
     /* Eat white space. */
-    while ( PAL_iswspace( *lpStartOfExpression ) )
+    while ( iswspace( *lpStartOfExpression ) )
     {
         lpStartOfExpression++;
     }
@@ -1558,199 +1138,6 @@ PAL_wcstod( const wchar_16 * nptr, wchar_16 **endptr )
 }
 
 /*++
-Function :
-
-    _ui64tow
-
-See MSDN for more details.
---*/
-wchar_16 *
-__cdecl
-_ui64tow( unsigned __int64 value , wchar_16 * string , int radix )
-{
-    UINT ReversedIndex = 0;
-    WCHAR ReversedString[ 65 ];
-    LPWSTR lpString = string;
-    UINT Index = 0;
-
-    PERF_ENTRY(_ui64tow);
-    ENTRY( "_ui64tow( value=%I64d, string=%p (%S), radix=%d )\n", 
-           value, string, string, radix );
-
-    if ( !string )
-    {
-        ERROR( "string has to be a valid pointer.\n" );
-        LOGEXIT( "_ui64tow returning NULL.\n" );
-        PERF_EXIT(_ui64tow);
-        return NULL;
-    }
-    if ( radix < 2 || radix > 36 )
-    {
-        ERROR( "radix has to be between 2 and 36.\n" );
-        LOGEXIT( "_ui64tow returning NULL.\n" );
-        PERF_EXIT(_ui64tow);
-        return NULL;
-    }
-
-    if(0 == value)
-    {
-        ReversedString[0] = '0';
-        Index++;
-    }
-    else while ( value )
-    {
-        int temp = value % radix;
-        value /= radix;
-        
-        if ( temp < 10 )
-        {
-            ReversedString[ Index ] = temp + '0';
-            Index++;
-        }
-        else
-        {
-            ReversedString[ Index ] = temp - 10 + 'a';
-            Index++;
-        }
-    }
-    
-    /* Reverse the string. */
-    ReversedIndex = Index;
-    for ( Index = 0; ReversedIndex > 0; ReversedIndex--, Index++ )
-    {
-        string[ Index ] = ReversedString[ ReversedIndex - 1 ];
-    }
-
-    string[ Index ] = '\0';
-    LOGEXIT( "_ui64tow returning %p (%S).\n", lpString , lpString );
-    PERF_EXIT(_ui64tow);
-    return lpString;
-}
-
-
-/*++
-Function:
-
-    iswdigit
-    
-See MSDN for more details.
---*/
-int
-__cdecl
-PAL_iswdigit( wchar_16 c )
-{
-    UINT nRetVal = 0;
-#if HAVE_COREFOUNDATION
-    static CFCharacterSetRef sDigitSet;
-    
-    if (sDigitSet == NULL)
-    {
-        sDigitSet = CFCharacterSetGetPredefined(
-                                        kCFCharacterSetDecimalDigit);
-    }
-    PERF_ENTRY(iswdigit);
-    ENTRY("PAL_iswdigit (c=%d)\n", c);
-    nRetVal = CFCharacterSetIsCharacterMember(sDigitSet, c);
-#else   /* HAVE_COREFOUNDATION */
-    UnicodeDataRec dataRec;
-
-    PERF_ENTRY(iswdigit);
-    ENTRY("PAL_iswdigit (c=%d)\n", c);
-    
-    if (GetUnicodeData(c, &dataRec))
-    {
-        if (dataRec.C1_TYPE_FLAGS & C1_DIGIT)
-        {
-            nRetVal = 1; 
-        }
-        else
-        {
-            nRetVal = 0;
-        }
-    }
-    else
-    {
-        TRACE( "No corresonding unicode record for character %d.\n", c );
-    }
-#endif  /* HAVE_COREFOUNDATION */
-    LOGEXIT("PAL_iswdigit returning %d\n", nRetVal);
-    PERF_EXIT(iswdigit);
-    return nRetVal;
-}
-
-/*++
-Function:
-
-    iswxdigit
-    
-See MSDN for more details.
-
-Notes :
-the information in UnicodeData doesn't help us, it doesn't have enough 
-granularity. Results in windows show that only ASCII and "Fullwidth" (>0xFF10)
-numbers and letters are considered as "hex"; other "numbers" 
-(nGeneralCategory==8) aren't.
---*/
-int
-__cdecl
-PAL_iswxdigit( wchar_16 c )
-{
-    UINT nRetVal = 0;
-
-    PERF_ENTRY(iswxdigit);
-    ENTRY("PAL_iswxdigit( c=%d )\n", c);
-    
-    /* ASCII characters */
-    if((c>= 'A' && c<='F') ||        /* uppercase hex letters */
-       (c>= 'a' && c<='f') ||        /* lowercase hex letters */
-       (c>= '0' && c<='9'))          /* digits */
-    {
-        nRetVal = 1;
-    }
-    else
-    /* "fullwidth" characters, whatever that is */
-    if((c>= 0xFF10 && c<=0xFF19) ||  /* digits */
-       (c>= 0xFF21 && c<=0xFF26) ||  /* uppercase hex letters */
-       (c>= 0xFF41 && c<=0xFF46))    /* lowercase hex letters */
-    {
-        nRetVal = 1;
-    }
-    else
-    {
-        nRetVal = 0;
-    }               
-    LOGEXIT("PAL_iswxdigit returning %d\n", nRetVal);
-    PERF_EXIT(iswxdigit);
-    return nRetVal;
-}
-
-
-/*++
-Function:
-
-    iswprint
-     
-See MSDN for more details.
---*/
-int
-__cdecl
-PAL_iswprint( wchar_16 c ) 
-{
-    int ret;
-    
-
-    PERF_ENTRY(iswprint);
-    ENTRY("PAL_iswprint (%#X)\n", c);   
-
-    ret = iswprint(c);
-
-    LOGEXIT("PAL_iswprint returns %d\n", ret);
-    PERF_EXIT(iswprint);
-    return (ret);
-}
-
-
-/*++
 Function:
    PAL_wcscspn
 
@@ -1792,94 +1179,3 @@ PAL_wcscspn(const wchar_16 *string, const wchar_16 *strCharSet)
     PERF_EXIT(wcscspn);
     return count;
 }
-
-#if HAVE_COREFOUNDATION
-/*--
-Function:
-  PAL_iswblank
-
-Returns TRUE if c is a Win32 "blank" character.
---*/
-int 
-__cdecl 
-PAL_iswblank(wchar_16 c)
-{
-    int ret;
-    static CFCharacterSetRef sSpaceAndNewlineSet;
-    
-    if (sSpaceAndNewlineSet == NULL)
-    {
-        sSpaceAndNewlineSet = CFCharacterSetGetPredefined(
-                                            kCFCharacterSetWhitespaceAndNewline);
-    }
-    switch (c)
-    {
-        case 0x0085:
-        case 0x1680:
-        case 0x202f:
-        case 0xfeff:
-            // These are blank characters on Windows, but are not part
-            // of the SpaceAndNewline character set in Core Foundation.
-            ret = TRUE;
-            break;
-        case 0x2028:
-        case 0x2029:
-            // These are not blank characters on Windows, but are part
-            // of the SpaceAndNewline character set in Core Foundation.
-            ret = FALSE;
-            break;
-        default:
-            ret = CFCharacterSetIsCharacterMember(sSpaceAndNewlineSet, c);
-            break;
-    }
-    return ret;
-}
-
-/*--
-Function:
-  PAL_iswcntrl
-
-Returns TRUE if c is a control character.
---*/
-int 
-__cdecl 
-PAL_iswcntrl(wchar_16 c)
-{
-    int ret;
-    static CFCharacterSetRef sControlSet;
-    
-    if (sControlSet == NULL)
-    {
-        sControlSet = CFCharacterSetGetPredefined(kCFCharacterSetControl);
-    }
-    ret = CFCharacterSetIsCharacterMember(sControlSet, c);
-    return ret;
-}
-
-/*--
-Function:
-  PAL_iswpunct
-
-Returns TRUE if c is a punctuation character.
---*/
-int 
-__cdecl 
-PAL_iswpunct(wchar_16 c)
-{
-    int ret;
-    static CFCharacterSetRef sPunctuationSet = NULL;
-    static CFCharacterSetRef sSymbolSet = NULL;
-
-    if (sPunctuationSet == NULL)
-    {
-        sPunctuationSet = CFCharacterSetGetPredefined(kCFCharacterSetPunctuation);
-    }
-    if (sSymbolSet == NULL)
-    {
-        sSymbolSet = CFCharacterSetGetPredefined(kCFCharacterSetSymbol);
-    }
-    ret = CFCharacterSetIsCharacterMember(sPunctuationSet, c) ||
-          CFCharacterSetIsCharacterMember(sSymbolSet, c);
-    return ret;
-}
-#endif  // HAVE_COREFOUNDATION

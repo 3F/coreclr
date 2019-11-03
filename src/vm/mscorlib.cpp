@@ -26,40 +26,26 @@
 //
 #include "arraynative.h"
 #include "stringnative.h"
-#include "stringbuffer.h"
-#include "securityimperative.h"
-#include "securitystackwalk.h"
 #include "objectnative.h"
 #include "comdelegate.h"
 #include "customattribute.h"
 #include "comdynamic.h"
-#include "commethodrental.h"
-#ifndef FEATURE_LEGACYSURFACEAREA
-#include "nlsinfo.h"
-#endif 
-#include "calendardata.h"
+#include "excep.h"
+#include "fcall.h"
+#include "clrconfignative.h"
 #include "commodule.h"
 #include "marshalnative.h"
+#include "nativelibrarynative.h"
 #include "system.h"
 #include "comutilnative.h"
 #include "comsynchronizable.h"
-#include "floatclass.h"
-#include "decimal.h"
-#include "currency.h"
+#include "floatdouble.h"
+#include "floatsingle.h"
 #include "comdatetime.h"
-#include "comisolatedstorage.h"
-#include "securityconfig.h"
-#include "number.h"
 #include "compatibilityswitch.h"
-#ifdef FEATURE_REMOTING
-#include "remotingnative.h"
-#include "message.h"
-#include "stackbuildersink.h"
-#endif
 #include "debugdebugger.h"
 #include "assemblyname.hpp"
 #include "assemblynative.hpp"
-#include "rwlock.h"
 #include "comthreadpool.h"
 #include "comwaithandle.h"
 #include "nativeoverlapped.h"
@@ -72,43 +58,15 @@
 #include "reflectioninvocation.h"
 #include "managedmdimport.hpp"
 #include "synchronizationcontextnative.h"
-#include "newcompressedstack.h"
-#include "commemoryfailpoint.h"
 #include "typestring.h"
 #include "comdependenthandle.h"
 #include "weakreferencenative.h"
 #include "varargsnative.h"
-
-#ifndef FEATURE_CORECLR
-#include "confighelper.h"
-#include "console.h"
-#endif
-
-#ifdef MDA_SUPPORTED 
-#include "mdaassistants.h"
-#endif
-
-#ifdef FEATURE_CRYPTO
-#include "cryptography.h"
-#endif // FEATURE_CRYPTO
-
-#ifndef FEATURE_CORECLR
-#include "securityprincipal.h"
-#endif // !FEATURE_CORECLR
-
-#ifdef FEATURE_X509
-#include "x509certificate.h"
-#endif // FEATURE_X509
-
-#include "coverage.h"
+#include "mlinfo.h"
 
 #ifdef FEATURE_COMINTEROP
 #include "variant.h"
-#ifdef FEATURE_COMINTEROP_TLB_SUPPORT
-#include "comtypelibconverter.h"
-#endif
 #include "oavariant.h"
-#include "registration.h"
 #include "mngstdinterfaces.h"
 #include "extensibleclassfactory.h"
 #endif // FEATURE_COMINTEROP
@@ -116,23 +74,20 @@
 #include "stubhelpers.h"
 #include "ilmarshalers.h"
 
-#include "hostexecutioncontext.h"
-
 #ifdef FEATURE_MULTICOREJIT
 #include "multicorejit.h"
 #endif
 
-#ifdef FEATURE_COMINTEROP
-#include "clrprivtypecachereflectiononlywinrt.h"
-#endif
-
-#ifdef FEATURE_COMINTEROP
-#include "windowsruntimebufferhelper.h"
-#endif
-
 #if defined(FEATURE_EVENTSOURCE_XPLAT)
 #include "nativeeventsource.h"
+#include "eventpipe.h"
+#include "eventpipeinternal.h"
 #endif //defined(FEATURE_EVENTSOURCE_XPLAT)
+
+#ifdef FEATURE_PERFTRACING
+#include "eventpipe.h"
+#include "eventpipeinternal.h"
+#endif //FEATURE_PERFTRACING
 
 #endif // CROSSGEN_MSCORLIB
 
@@ -340,6 +295,7 @@ enum _gsigc {
 #define METASIG_RECURSE                 1
 #define C(x)                            1+
 #define g(x)                            1+
+#define Q(x)                            1+
 #include "metasig.h"
 
 //
@@ -355,6 +311,7 @@ enum _gsigc {
 #define METASIG_RECURSE                 1
 #define C(x)                            1+
 #define g(x)                            1+
+#define Q(x)                            1+
 #include "metasig.h"
 
 #endif

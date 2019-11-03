@@ -1,122 +1,191 @@
 #!/usr/bin/env bash
 
-initDistroName()
-{
-    if [ "$1" == "Linux" ]; then
-        if [ ! -e /etc/os-release ]; then
-            echo "WARNING: Can not determine runtime id for current distro."
-            export __DistroRid=""
-        else
-            source /etc/os-release
-            export __DistroRid="$ID.$VERSION_ID-x64"
-        fi
-    fi
-}
-
 __scriptpath=$(cd "$(dirname "$0")"; pwd -P)
+__init_tools_log="$__scriptpath/init-tools.log"
+__PACKAGES_DIR="$__scriptpath/.packages"
+__TOOLRUNTIME_DIR="$__scriptpath/Tools"
+__DOTNET_PATH="$__scriptpath/.dotnet"
+__DOTNET_CMD="$__DOTNET_PATH/dotnet"
+if [ -z "${__BUILDTOOLS_SOURCE:-}" ]; then __BUILDTOOLS_SOURCE=https://dotnet.myget.org/F/dotnet-buildtools/api/v3/index.json; fi
+export __BUILDTOOLS_USE_CSPROJ=true
+__BUILD_TOOLS_PACKAGE_VERSION=$(cat "$__scriptpath/BuildToolsVersion.txt" | sed 's/\r$//') # remove CR if mounted repo on Windows drive
+__DOTNET_TOOLS_VERSION=$(cat "$__scriptpath/DotnetCLIVersion.txt" | sed 's/\r$//') # remove CR if mounted repo on Windows drive
+__ILASM_VERSION=$(cat "$__scriptpath/ILAsmVersion.txt" | sed 's/\r$//') # remove CR if mounted repo on Windows drive
+__BUILD_TOOLS_PATH="$__PACKAGES_DIR/microsoft.dotnet.buildtools/$__BUILD_TOOLS_PACKAGE_VERSION/lib"
+__INIT_TOOLS_RESTORE_PROJECT="$__scriptpath/init-tools.msbuild"
+__BUILD_TOOLS_SEMAPHORE="$__TOOLRUNTIME_DIR/$__BUILD_TOOLS_PACKAGE_VERSION/init-tools.complete"
 
-# CI_SPECIFIC - On CI machines, $HOME may not be set. In such a case, create a subfolder and set the variable to set.
-# This is needed by CLI to function.
-if [ -z "$HOME" ]; then
-    if [ ! -d "$__scriptpath/temp_home" ]; then
-        mkdir temp_home
-    fi
-    export HOME=$__scriptpath/temp_home
-    echo "HOME not defined; setting it to $HOME"
+if [ -e "$__BUILD_TOOLS_SEMAPHORE" ]; then
+    echo "Tools are already initialized"
+    return #return instead of exit because this script is inlined in other scripts which we don't want to exit
 fi
 
-__PACKAGES_DIR=$__scriptpath/packages
-__TOOLRUNTIME_DIR=$__scriptpath/Tools
-__DOTNET_PATH=$__TOOLRUNTIME_DIR/dotnetcli
-__DOTNET_CMD=$__DOTNET_PATH/dotnet
-if [ -z "$__BUILDTOOLS_SOURCE" ]; then __BUILDTOOLS_SOURCE=https://www.myget.org/F/dotnet-buildtools/; fi
-__BUILD_TOOLS_PACKAGE_VERSION=$(cat $__scriptpath/BuildToolsVersion.txt)
-__DOTNET_TOOLS_VERSION=$(cat $__scriptpath/DotnetCLIVersion.txt)
-__BUILD_TOOLS_PATH=$__PACKAGES_DIR/Microsoft.DotNet.BuildTools/$__BUILD_TOOLS_PACKAGE_VERSION/lib
-__PROJECT_JSON_PATH=$__TOOLRUNTIME_DIR/$__BUILD_TOOLS_PACKAGE_VERSION
-__PROJECT_JSON_FILE=$__PROJECT_JSON_PATH/project.json
-__PROJECT_JSON_CONTENTS="{ \"dependencies\": { \"Microsoft.DotNet.BuildTools\": \"$__BUILD_TOOLS_PACKAGE_VERSION\" }, \"frameworks\": { \"dnxcore50\": { } } }"
-__DistroRid=""
+if [ -e "$__TOOLRUNTIME_DIR" ]; then rm -rf -- "$__TOOLRUNTIME_DIR"; fi
+
+if [ -d "${DotNetBuildToolsDir:-}" ]; then
+    echo "Using tools from '$DotNetBuildToolsDir'."
+    ln -s "$DotNetBuildToolsDir" "$__TOOLRUNTIME_DIR"
+
+    if [ ! -e "$__DOTNET_CMD" ]; then
+        echo "ERROR: Ensure that $DotNetBuildToolsDir contains the .NET Core SDK at $__DOTNET_PATH"
+        exit 1
+    fi
+
+    echo "Done initializing tools."
+    mkdir -p "$(dirname "$__BUILD_TOOLS_SEMAPHORE")" && touch "$__BUILD_TOOLS_SEMAPHORE"
+    return #return instead of exit because this script is inlined in other scripts which we don't want to exit
+fi
+
+echo "Running: $__scriptpath/init-tools.sh" > "$__init_tools_log"
+
+display_error_message()
+{
+    echo "Please check the detailed log that follows." 1>&2
+    cat "$__init_tools_log" 1>&2
+}
+
+# Executes a command and retries if it fails.
+execute_with_retry() {
+    local count=0
+    local retries=${retries:-5}
+    local waitFactor=${waitFactor:-6}
+    until "$@"; do
+        local exit=$?
+        count=$(( $count + 1 ))
+        if [ $count -lt $retries ]; then
+            local wait=$(( waitFactor ** (( count - 1 )) ))
+            echo "Retry $count/$retries exited $exit, retrying in $wait seconds..."
+            sleep $wait
+        else
+            say_err "Retry $count/$retries exited $exit, no more retries left."
+            return $exit
+        fi
+    done
+
+    return 0
+}
+
+if [ "$(uname -m | grep "i[3456]86")" = "i686" ]; then
+    echo "Warning: build not supported on 32 bit Unix"
+fi
+
+if [ "$(uname -m)" = "armhf" ] || [ "$(uname -m)" = "arm64" ] || [ "$(uname -m)" = "aarch64" ];  then
+    if [ "$(uname -m)" = "armhf" ]; then
+        __PKG_ARCH=arm
+    fi
+
+    if [ "$(uname -m)" = "arm64" ] || [ "$(uname -m)" = "aarch64" ]; then
+        __PKG_ARCH=arm64
+    fi
+else
+    __PKG_ARCH=x64
+fi
 
 OSName=$(uname -s)
 case $OSName in
     Darwin)
         OS=OSX
-        __DOTNET_PKG=dotnet-dev-osx-x64
+        __PKG_RID=osx
+        ulimit -n 2048
+        # Format x.y.z as single integer with three digits for each part
+        VERSION=`sw_vers -productVersion| sed -e 's/\./ /g' | xargs printf "%03d%03d%03d"`
+        if [ "$VERSION" -lt 010012000 ]; then
+            echo error: macOS version `sw_vers -productVersion` is too old. 10.12 is needed as minimum.
+            exit 1
+        fi
         ;;
-
+    FreeBSD)
+        __PKG_RID=freebsd
+        OS=FreeBSD
+        ;;
     Linux)
+        __PKG_RID=linux
         OS=Linux
 
-        if [ ! -e /etc/os-release ]; then
-            echo "Cannot determine Linux distribution, asuming Ubuntu 14.04."
-            __DOTNET_PKG=dotnet-dev-ubuntu.14.04-x64
-        else
+        if [ -e /etc/os-release ]; then
             source /etc/os-release
-            __DOTNET_PKG="dotnet-dev-$ID.$VERSION_ID-x64"
+            if [[ $ID == "alpine" ]]; then
+                __PKG_RID=linux-musl
+            fi
+        elif [ -e /etc/redhat-release ]; then
+            redhatRelease=$(</etc/redhat-release)
+            if [[ $redhatRelease == "CentOS release 6."* || $redhatRelease == "Red Hat Enterprise Linux Server release 6."* ]]; then
+                __PKG_RID=rhel.6
+            fi
         fi
+        OSArch=$(uname -m)
+        if [ $OSArch == 'armv7l' ];then
+            __PKG_ARCH=arm
+        elif [ $OSArch == 'aarch64' ]; then
+            __PKG_ARCH=arm64
+        fi
+
         ;;
 
     *)
-        echo "Unsupported OS $OSName detected. Downloading ubuntu-x64 tools"
+    echo "Unsupported OS '$OSName' detected. Downloading linux-$__PKG_ARCH tools."
         OS=Linux
-        __DOTNET_PKG=dotnet-dev-ubuntu.14.04-x64
+        __PKG_RID=linux
         ;;
 esac
+__PKG_RID=$__PKG_RID-$__PKG_ARCH
 
-# Initialize Linux Distribution name and .NET CLI package name.
-
-initDistroName $OS
-
-# Work around mac build issue 
-if [ "$OS"=="OSX" ]; then
-  echo Raising file open limit - otherwise Mac build may fail
-  echo ulimit -n 2048
-  ulimit -n 2048
+if [ ! -e "$__DOTNET_CMD" ]; then
+    source $__scriptpath/init-dotnet.sh
+    if [ ! -e "$__DOTNET_CMD" ]; then
+        echo "ERROR: Ensure arcade dotnet install did not install dotnet at $__DOTNET_CMD"
+        exit 1
+    fi
 fi
 
-__CLIDownloadURL=https://dotnetcli.blob.core.windows.net/dotnet/preview/Binaries/${__DOTNET_TOOLS_VERSION}/${__DOTNET_PKG}.${__DOTNET_TOOLS_VERSION}.tar.gz
-echo ".NET CLI will be downloaded from $__CLIDownloadURL"
-echo "Locating $__PROJECT_JSON_FILE to see if we already downloaded .NET CLI tools..." 
-
-if [ ! -e $__PROJECT_JSON_FILE ]; then
-    echo "$__PROJECT_JSON_FILE not found. Proceeding to download .NET CLI tools. " 
-    if [ -e $__TOOLRUNTIME_DIR ]; then rm -rf -- $__TOOLRUNTIME_DIR; fi
-
-    if [ ! -e $__DOTNET_PATH ]; then
-        # curl has HTTPS CA trust-issues less often than wget, so lets try that first.
-        which curl > /dev/null 2> /dev/null
-        if [ $? -ne 0 ]; then
-          mkdir -p "$__DOTNET_PATH"
-          wget -q -O $__DOTNET_PATH/dotnet.tar $__CLIDownloadURL
-          echo "wget -q -O $__DOTNET_PATH/dotnet.tar $__CLIDownloadURL"
-        else
-          curl -sSL --create-dirs -o $__DOTNET_PATH/dotnet.tar $__CLIDownloadURL
-          echo "curl -sSL --create-dirs -o $__DOTNET_PATH/dotnet.tar $__CLIDownloadURL"
-        fi
-        cd $__DOTNET_PATH
-        tar -xf $__DOTNET_PATH/dotnet.tar
-        if [ -n "$BUILDTOOLS_OVERRIDE_RUNTIME" ]; then
-            find $__DOTNET_PATH -name *.ni.* | xargs rm 2>/dev/null
-            cp -R $BUILDTOOLS_OVERRIDE_RUNTIME/* $__DOTNET_PATH/bin
-            cp -R $BUILDTOOLS_OVERRIDE_RUNTIME/* $__DOTNET_PATH/bin/dnx
-            cp -R $BUILDTOOLS_OVERRIDE_RUNTIME/* $__DOTNET_PATH/runtime/coreclr
-        fi
-
-        cd $__scriptpath
+if [ ! -e "$__BUILD_TOOLS_PATH" ]; then
+    echo "Restoring BuildTools version $__BUILD_TOOLS_PACKAGE_VERSION..."
+    echo "Running: $__DOTNET_CMD restore \"$__INIT_TOOLS_RESTORE_PROJECT\" --no-cache --packages $__PACKAGES_DIR --source $__BUILDTOOLS_SOURCE /p:BuildToolsPackageVersion=$__BUILD_TOOLS_PACKAGE_VERSION /p:ToolsDir=$__TOOLRUNTIME_DIR" >> "$__init_tools_log"
+    "$__DOTNET_CMD" restore "$__INIT_TOOLS_RESTORE_PROJECT" --no-cache --packages "$__PACKAGES_DIR" --source "$__BUILDTOOLS_SOURCE" /p:BuildToolsPackageVersion=$__BUILD_TOOLS_PACKAGE_VERSION /p:ToolsDir="$__TOOLRUNTIME_DIR" >> "$__init_tools_log"
+    if [ ! -e "$__BUILD_TOOLS_PATH/init-tools.sh" ]; then
+        echo "ERROR: Could not restore build tools correctly." 1>&2
+        display_error_message
     fi
+fi
 
-    mkdir "$__PROJECT_JSON_PATH"
-    echo $__PROJECT_JSON_CONTENTS > "$__PROJECT_JSON_FILE"
+if [ -z "${__ILASM_RID-}" ]; then
+    __ILASM_RID=$__PKG_RID
+fi
 
-    if [ ! -e $__BUILD_TOOLS_PATH ]; then
-        $__DOTNET_CMD restore "$__PROJECT_JSON_FILE" --packages $__PACKAGES_DIR --source $__BUILDTOOLS_SOURCE
-    fi
+echo "Using RID $__ILASM_RID for BuildTools native tools"
 
-    # On ubuntu 14.04, /bin/sh (symbolic link) calls /bin/dash by default.
-    $__BUILD_TOOLS_PATH/init-tools.sh $__scriptpath $__DOTNET_CMD $__TOOLRUNTIME_DIR
+export ILASMCOMPILER_VERSION=$__ILASM_VERSION
+export NATIVE_TOOLS_RID=$__ILASM_RID
 
-    chmod a+x $__TOOLRUNTIME_DIR/corerun
+if [ -n "${DotNetBootstrapCliTarPath-}" ]; then
+    # Assume ilasm is not in nuget yet when bootstrapping...
+    unset ILASMCOMPILER_VERSION
+fi
+
+# Build tools only supported on x64
+if [ "${__PKG_ARCH}" != "x64" ] &&  [ "${__PKG_ARCH}" != "arm" ]; then
+    echo "Skipped installing build tools."
 else
-    echo "$__PROJECT_JSON_FILE found. Skipping .NET CLI installation."   
+    echo "Initializing BuildTools..."
+    echo "Running: $__BUILD_TOOLS_PATH/init-tools.sh $__scriptpath $__DOTNET_CMD $__TOOLRUNTIME_DIR $__PACKAGES_DIR" >> "$__init_tools_log"
+
+    # Executables restored with .NET Core 2.0 do not have executable permission flags. https://github.com/NuGet/Home/issues/4424
+    chmod +x "$__BUILD_TOOLS_PATH/init-tools.sh"
+    "$__BUILD_TOOLS_PATH/init-tools.sh" "$__scriptpath" "$__DOTNET_CMD" "$__TOOLRUNTIME_DIR" "$__PACKAGES_DIR" >> "$__init_tools_log"
+    if [ "$?" != "0" ]; then
+        echo "ERROR: An error occurred when trying to initialize the tools." 1>&2
+        display_error_message
+        exit 1
+    fi
+
+    echo "Making all .sh files executable under Tools."
+    # Executables restored with .NET Core 2.0 do not have executable permission flags. https://github.com/NuGet/Home/issues/4424
+    ls "$__scriptpath/Tools/"*.sh | xargs chmod +x
+    ls "$__scriptpath/Tools/scripts/docker/"*.sh | xargs chmod +x
+
+    "$__scriptpath/Tools/crossgen.sh" "$__scriptpath/Tools" $__PKG_RID
+
+    mkdir -p "$(dirname "$__BUILD_TOOLS_SEMAPHORE")" && touch "$__BUILD_TOOLS_SEMAPHORE"
+
+    echo "Done initializing tools."
 fi

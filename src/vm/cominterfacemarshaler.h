@@ -51,8 +51,6 @@ public:
         _ASSERTE(pCallback != NULL);
         m_pCallback = pCallback;
     }
-    
-    VOID InitializeFlags();
 
     VOID InitializeObjectClass(IUnknown *pIncomingIP);
 
@@ -67,12 +65,6 @@ public:
     static void IKeyValuePairUnboxWorker(OBJECTREF oref, OBJECTREF *porefResult);
 
 private:
-    OBJECTREF GetCCWObject();
-    OBJECTREF HandleInProcManagedComponent();
-    OBJECTREF HandleTPComponents();
-    OBJECTREF GetObjectForRemoteManagedComponent();
-    OBJECTREF GetObjectForRemoteManagedComponentNoThrow();
-    
     OBJECTREF FindOrCreateObjectRefInternal(IUnknown **ppIncomingIP, MethodTable *pIncomingItfMT, bool bIncomingIPAddRefed);
     VOID      CreateObjectRef(BOOL fDuplicate, OBJECTREF *pComObj, IUnknown **ppIncomingIP, MethodTable *pIncomingItfMT, bool bIncomingIPAddRefed);
     void IReferenceUnbox(IUnknown **ppIncomingIP, OBJECTREF *poref, bool bIncomingIPAddRefed);
@@ -89,11 +81,8 @@ private:
     IUnknown*               m_pIdentity;        // NOT AddRef'ed
     TypeHandle              m_typeHandle;       // inited and computed if inited value is NULL.  Need to represent all array information too.
     TypeHandle              m_itfTypeHandle;    // an interface supported by the object as returned from GetRuntimeClassName
-    IManagedObject*         m_pIManaged;        // AddRef'ed  -  computed info
     Thread*                 m_pThread;          // Current thread - avoid calling GetThread multiple times
-    
-    INDEBUG(bool                    m_fFlagsInited;)        
-    bool                    m_fIsRemote;
+
     bool                    m_fIReference;      // Is this an IReference<T> (ie, a WinRT "boxed" value type)
     bool                    m_fIReferenceArray; // Is this an IReferenceArray<T> (ie, an array wrapped in a WinRT interface)
     bool                    m_fNonRCWType;      // Is this redirected to a non-RCW CLR type
@@ -101,10 +90,6 @@ private:
     DWORD                   m_flags;
     
     ICOMInterfaceMarshalerCallback  *m_pCallback;        // Callback to call when we created a RCW or got back RCW from cache
-
-    // For Transparent Proxys
-    ADID                    m_dwServerDomainId;
-    DWORD                   m_dwServerSyncBlockIndex;
 };
 
 

@@ -234,6 +234,42 @@ public:
         
         return hr;
     }
+
+//*****************************************************************************
+// Return a pointer to a null terminated string given an offset previously
+// handed out by AddString or FindString. Only valid for use if the Storage pool is actuall ReadOnly, and not derived
+//*****************************************************************************
+    __checkReturn 
+    inline HRESULT GetStringReadOnly(
+                    UINT32  nIndex, 
+        __deref_out LPCSTR *pszString)
+    {
+        HRESULT hr;
+        
+        // Size of the data in the heap will be ignored, because we have verified during creation of the string 
+        // heap (code:Initialize) and when adding new strings (e.g. code:AddString, 
+        // code:AddTemporaryStringBuffer), that the heap is null-terminated, therefore we don't have to check it 
+        // for each string in the heap
+        MetaData::DataBlob stringData;
+        
+        // Get data from the heap (clears stringData on error)
+        IfFailGo(GetDataReadOnly(
+            nIndex, 
+            &stringData));
+        _ASSERTE(hr == S_OK);
+        // Raw data are always at least 1 byte long, otherwise it would be invalid offset and hr != S_OK
+        PREFAST_ASSUME(stringData.GetDataPointer() != NULL);
+        // Fills output string
+        *pszString = reinterpret_cast<LPSTR>(stringData.GetDataPointer());
+        //_ASSERTE(stringData.GetSize() > strlen(*pszString));
+        
+        return hr;
+    ErrExit:
+        // Clears output string on error
+        *pszString = NULL;
+        
+        return hr;
+    }
 #ifdef _PREFAST_
 #pragma warning(pop)
 #endif
@@ -310,12 +346,11 @@ public:
     {
         LIMITED_METHOD_CONTRACT;
 
-// @todo: Triton workaround: FEATURE_METADATA_STANDALNE_WINRT_RO is supposed to disable FEATURE_PREJIT - remove this #ifdef once we figure out how to get that working in the CoreClr build. 
-#if !(defined(FEATURE_UTILCODE_NO_DEPENDENCIES) || defined(FEATURE_METADATA_STANDALNE_WINRT_RO))
+#if !defined(FEATURE_UTILCODE_NO_DEPENDENCIES)
         m_HotHeap = hotHeap;
 #else
         _ASSERTE(!"InitHotData(): Not supposed to exist in RoMetaData.dll");
-#endif //!(defined(FEATURE_UTILCODE_NO_DEPENDENCIES) || defined(FEATURE_METADATA_STANDALNE_WINRT_RO))
+#endif //!(defined(FEATURE_UTILCODE_NO_DEPENDENCIES))
     }
 #endif //FEATURE_PREJIT
 
@@ -345,8 +380,7 @@ protected:
             return CLDB_E_INDEX_NOTFOUND;
         }
 
-// @todo: Triton workaround: FEATURE_METADATA_STANDALNE_WINRT_RO is supposed to disable FEATURE_PREJIT - remove this #if once we figure out how to get that working in the CoreClr build. 
-#if !(defined(FEATURE_UTILCODE_NO_DEPENDENCIES) || defined(FEATURE_METADATA_STANDALNE_WINRT_RO))
+#if !defined(FEATURE_UTILCODE_NO_DEPENDENCIES)
 #ifdef FEATURE_PREJIT
         // try hot data first
         if (!m_HotHeap.IsEmpty())
@@ -359,7 +393,7 @@ protected:
             _ASSERTE(hr == S_FALSE);
         }
 #endif //FEATURE_PREJIT
-#endif //!(defined(FEATURE_UTILCODE_NO_DEPENDENCIES) || defined(FEATURE_METADATA_STANDALNE_WINRT_RO))
+#endif //!(defined(FEATURE_UTILCODE_NO_DEPENDENCIES))
 
         
         pData->Init(m_pSegData + nOffset, m_cbSegSize - nOffset);
@@ -381,11 +415,10 @@ protected:
     } // StgPoolReadOnly::GetData
     
 private:
-// @todo: Triton workaround: FEATURE_METADATA_STANDALNE_WINRT_RO is supposed to disable FEATURE_PREJIT - remove this #if once we figure out how to get that working in the CoreClr build. 
-#if !(defined(FEATURE_UTILCODE_NO_DEPENDENCIES) || defined(FEATURE_METADATA_STANDALNE_WINRT_RO))
+#if !defined(FEATURE_UTILCODE_NO_DEPENDENCIES)
     // hot pool data
     MetaData::HotHeap m_HotHeap;
-#endif //!(defined(FEATURE_UTILCODE_NO_DEPENDENCIES) || defined(FEATURE_METADATA_STANDALNE_WINRT_RO))
+#endif //!(defined(FEATURE_UTILCODE_NO_DEPENDENCIES))
     
 };  // class StgPoolReadOnly
 

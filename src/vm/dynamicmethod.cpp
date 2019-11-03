@@ -11,7 +11,6 @@
 #include "object.h"
 #include "method.hpp"
 #include "comdelegate.h"
-#include "security.h"
 #include "field.h"
 #include "contractimpl.h"
 #include "nibblemapmacros.h"
@@ -127,17 +126,18 @@ void DynamicMethodTable::Destroy()
     }
     CONTRACTL_END;
 
-    // Go over all DynamicMethodDescs and make sure that they are destroyed
-
-    if (m_pMethodTable != NULL)
+#if _DEBUG
+    // This method should be called only for collectible types or for non-collectible ones
+    // at the construction time when there are no DynamicMethodDesc instances added to the
+    // DynamicMethodTable yet (from the DynamicMethodTable::CreateDynamicMethodTable in case
+    // there were two threads racing to construct the instance for the thread that lost
+    // the race)
+    if (m_pMethodTable != NULL && !m_pMethodTable->GetLoaderAllocator()->IsCollectible())
     {
         MethodTable::IntroducedMethodIterator it(m_pMethodTable);
-        for (; it.IsValid(); it.Next())
-        {
-            DynamicMethodDesc *pMD = (DynamicMethodDesc*)it.GetMethodDesc();
-            pMD->Destroy(TRUE /* fDomainUnload */);
-        }
+        _ASSERTE(!it.IsValid());
     }
+#endif
 
     m_Crst.Destroy();
     LOG((LF_BCL, LL_INFO10, "Level1 - DynamicMethodTable destroyed {0x%p}\n", this));
@@ -156,7 +156,7 @@ void DynamicMethodTable::AddMethodsToList()
 
     AllocMemTracker amt;
 
-    LoaderHeap* pHeap = m_pDomain->GetHighFrequencyHeap();
+    LoaderHeap* pHeap = m_pMethodTable->GetLoaderAllocator()->GetHighFrequencyHeap();
     _ASSERTE(pHeap);
 
     //
@@ -272,7 +272,7 @@ DynamicMethodDesc* DynamicMethodTable::GetDynamicMethod(BYTE *psig, DWORD sigSiz
     // the store sig part of the method desc
     pNewMD->SetStoredMethodSig((PCCOR_SIGNATURE)psig, sigSize);
     // the dynamic part of the method desc
-    pNewMD->m_pszMethodName = name;
+    pNewMD->m_pszMethodName.SetValueMaybeNull(name);
 
     pNewMD->m_dwExtendedFlags = mdPublic | mdStatic | DynamicMethodDesc::nomdLCGMethod;
 
@@ -281,6 +281,11 @@ DynamicMethodDesc* DynamicMethodTable::GetDynamicMethod(BYTE *psig, DWORD sigSiz
     pNewMD->m_pszDebugClassName  = (LPUTF8)"dynamicclass";
     pNewMD->m_pszDebugMethodSignature = "DynamicMethod Signature not available";
 #endif // _DEBUG
+
+#ifdef HAVE_GCCOVER
+    pNewMD->m_GcCover = NULL;
+#endif
+
     pNewMD->SetNotInline(TRUE);
     pNewMD->GetLCGMethodResolver()->Reset();
 
@@ -323,64 +328,21 @@ HeapList* HostCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, EEJitManager 
         GC_NOTRIGGER;
         MODE_ANY;
         INJECT_FAULT(COMPlusThrowOM());
-        POSTCONDITION(CheckPointer(RETVAL));
+        POSTCONDITION((RETVAL != NULL) || !pInfo->getThrowOnOutOfMemoryWithinRange());
     }
     CONTRACT_END;
 
-    size_t MaxCodeHeapSize  = pInfo->getRequestSize();
-    size_t ReserveBlockSize = MaxCodeHeapSize + sizeof(HeapList);
+    NewHolder<HostCodeHeap> pCodeHeap(new HostCodeHeap(pJitManager));
 
-    ReserveBlockSize += sizeof(TrackAllocation) + PAGE_SIZE; // make sure we have enough for the allocation
-    // take a conservative size for the nibble map, we may change that later if appropriate
-    size_t nibbleMapSize = ROUND_UP_TO_PAGE(HEAP2MAPSIZE(ROUND_UP_TO_PAGE(ALIGN_UP(ReserveBlockSize, VIRTUAL_ALLOC_RESERVE_GRANULARITY))));
-    size_t heapListSize = (sizeof(HeapList) + CODE_SIZE_ALIGN - 1) & (~(CODE_SIZE_ALIGN - 1));
-    size_t otherData = heapListSize;
-    // make conservative estimate of the memory needed for otherData
-    size_t reservedData = (otherData + HOST_CODEHEAP_SIZE_ALIGN - 1) & (~(HOST_CODEHEAP_SIZE_ALIGN - 1));
-    
-    NewHolder<HostCodeHeap> pCodeHeap(new HostCodeHeap(ReserveBlockSize + nibbleMapSize + reservedData, pJitManager, pInfo));
-    LOG((LF_BCL, LL_INFO10, "Level2 - CodeHeap creation {0x%p} - requested 0x%p, size available 0x%p, private data 0x%p, nibble map 0x%p\n", 
-                            (HostCodeHeap*)pCodeHeap, ReserveBlockSize, pCodeHeap->m_TotalBytesAvailable, reservedData, nibbleMapSize));
+    HeapList *pHp = pCodeHeap->InitializeHeapList(pInfo);
+    if (pHp == NULL)
+    {
+        _ASSERTE(!pInfo->getThrowOnOutOfMemoryWithinRange());
+        RETURN NULL;
+    }
 
-    BYTE *pBuffer = pCodeHeap->InitCodeHeapPrivateData(ReserveBlockSize, reservedData, nibbleMapSize);
-    _ASSERTE(((size_t)pBuffer & PAGE_MASK) == 0);
     LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap creation {0x%p} - base addr 0x%p, size available 0x%p, nibble map ptr 0x%p\n",
-                            (HostCodeHeap*)pCodeHeap, pCodeHeap->m_pBaseAddr, pCodeHeap->m_TotalBytesAvailable, pBuffer));
-
-    void* pHdrMap = pBuffer;
-
-    HeapList *pHp = (HeapList*)pCodeHeap->AllocMemory(otherData, 0);
-    pHp->pHeap = (PTR_CodeHeap)pCodeHeap;
-    // wire it back
-    pCodeHeap->m_pHeapList = (PTR_HeapList)pHp;
-    // assign beginning of nibble map
-    pHp->pHdrMap = (PTR_DWORD)(DWORD*)pHdrMap;
-
-    TrackAllocation *pTracker = *((TrackAllocation**)pHp - 1);
-    LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap creation {0x%p} - size available 0x%p, private data ptr [0x%p, 0x%p]\n",
-                            (HostCodeHeap*)pCodeHeap, pCodeHeap->m_TotalBytesAvailable, pTracker, pTracker->size));
-
-    // need to update the reserved data
-    pCodeHeap->m_ReservedData += pTracker->size;
-
-    pHp->startAddress    = dac_cast<TADDR>(pCodeHeap->m_pBaseAddr) + pTracker->size;
-    pHp->mapBase         = ROUND_DOWN_TO_PAGE(pHp->startAddress);  // round down to next lower page align
-    pHp->endAddress      = pHp->startAddress;
-
-    pHp->maxCodeHeapSize = pCodeHeap->m_TotalBytesAvailable - pTracker->size;
-    _ASSERTE(pHp->maxCodeHeapSize >= MaxCodeHeapSize);
-
-    // We do not need to memset this memory, since ClrVirtualAlloc() guarantees that the memory is zero.
-    // Furthermore, if we avoid writing to it, these pages don't come into our working set
-
-    pHp->bFull           = FALSE;
-    pHp->cBlocks         = 0;
-#ifdef _WIN64
-    emitJump((LPBYTE)pHp->CLRPersonalityRoutine, (void *)ProcessCLRException);
-#endif
-
-    // zero the ref count as now starts the real counter
-    pCodeHeap->m_AllocationCount = 0;
+                            (HostCodeHeap*)pCodeHeap, pCodeHeap->m_pBaseAddr, pCodeHeap->m_TotalBytesAvailable, pCodeHeap->m_pHeapList->pHdrMap));
 
     pCodeHeap.SuppressRelease();
 
@@ -388,7 +350,7 @@ HeapList* HostCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, EEJitManager 
     RETURN pHp;
 }
 
-HostCodeHeap::HostCodeHeap(size_t ReserveBlockSize, EEJitManager *pJitManager, CodeHeapRequestInfo *pInfo)
+HostCodeHeap::HostCodeHeap(EEJitManager *pJitManager)
 {
     CONTRACTL
     {
@@ -399,45 +361,31 @@ HostCodeHeap::HostCodeHeap(size_t ReserveBlockSize, EEJitManager *pJitManager, C
     }
     CONTRACTL_END;
 
-    // reserve ReserveBlockSize rounded-up to VIRTUAL_ALLOC_RESERVE_GRANULARITY of memory
-    ReserveBlockSize = ALIGN_UP(ReserveBlockSize, VIRTUAL_ALLOC_RESERVE_GRANULARITY);
-
-    if (pInfo->m_loAddr != NULL || pInfo->m_hiAddr != NULL)
-    {
-        m_pBaseAddr = ClrVirtualAllocWithinRange(pInfo->m_loAddr, pInfo->m_hiAddr,
-                                                ReserveBlockSize, MEM_RESERVE, PAGE_NOACCESS);
-        if (!m_pBaseAddr)
-            ThrowOutOfMemoryWithinRange();
-    }
-    else
-    {
-        m_pBaseAddr = ClrVirtualAllocExecutable(ReserveBlockSize, MEM_RESERVE, PAGE_NOACCESS);
-        if (!m_pBaseAddr)
-            ThrowOutOfMemory();
-    }
-
-    m_pLastAvailableCommittedAddr = m_pBaseAddr;
-    m_TotalBytesAvailable = ReserveBlockSize;
+    m_pBaseAddr = NULL;
+    m_pLastAvailableCommittedAddr = NULL;
+    m_TotalBytesAvailable = 0;
+    m_ApproximateLargestBlock = 0;
     m_AllocationCount = 0;
-    m_ReservedData = 0;
+    m_pHeapList = NULL;
     m_pJitManager = (PTR_EEJitManager)pJitManager;
     m_pFreeList = NULL;
-    m_pAllocator = pInfo->m_pAllocator;
+    m_pAllocator = NULL;
     m_pNextHeapToRelease = NULL;
-    LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap creation {0x%p, vt(0x%x)} - base addr 0x%p, total size 0x%p\n", 
-                            this, *(size_t*)this, m_pBaseAddr, m_TotalBytesAvailable));
 }
 
 HostCodeHeap::~HostCodeHeap()
 {
     LIMITED_METHOD_CONTRACT;
 
+    if (m_pHeapList != NULL && m_pHeapList->pHdrMap != NULL)
+        delete[] m_pHeapList->pHdrMap;
+
     if (m_pBaseAddr)
         ClrVirtualFree(m_pBaseAddr, 0, MEM_RELEASE);
     LOG((LF_BCL, LL_INFO10, "Level1 - CodeHeap destroyed {0x%p}\n", this));
 }
 
-BYTE* HostCodeHeap::InitCodeHeapPrivateData(size_t ReserveBlockSize, size_t otherData, size_t nibbleMapSize)
+HeapList* HostCodeHeap::InitializeHeapList(CodeHeapRequestInfo *pInfo)
 {
     CONTRACTL
     {
@@ -447,43 +395,79 @@ BYTE* HostCodeHeap::InitCodeHeapPrivateData(size_t ReserveBlockSize, size_t othe
     }
     CONTRACTL_END;
 
-    size_t nibbleNewSize = ROUND_UP_TO_PAGE(HEAP2MAPSIZE(ROUND_UP_TO_PAGE(m_TotalBytesAvailable)));
-    if (m_TotalBytesAvailable - nibbleNewSize < ReserveBlockSize + otherData)
+    size_t ReserveBlockSize = pInfo->getRequestSize();
+
+    // Add TrackAllocation, HeapList and very conservative padding to make sure we have enough for the allocation
+    ReserveBlockSize += sizeof(TrackAllocation) + sizeof(HeapList) + HOST_CODEHEAP_SIZE_ALIGN + 0x100;
+
+    // reserve ReserveBlockSize rounded-up to VIRTUAL_ALLOC_RESERVE_GRANULARITY of memory
+    ReserveBlockSize = ALIGN_UP(ReserveBlockSize, VIRTUAL_ALLOC_RESERVE_GRANULARITY);
+
+    if (pInfo->m_loAddr != NULL || pInfo->m_hiAddr != NULL)
     {
-        // the new allocation for the nibble map would notleave enough room for the requested memory, bail out
-        nibbleNewSize = nibbleMapSize;
+        m_pBaseAddr = ClrVirtualAllocWithinRange(pInfo->m_loAddr, pInfo->m_hiAddr,
+            ReserveBlockSize, MEM_RESERVE, PAGE_NOACCESS);
+        if (!m_pBaseAddr)
+        {
+            if (pInfo->getThrowOnOutOfMemoryWithinRange())
+                ThrowOutOfMemoryWithinRange();
+            return NULL;
+        }
+    }
+    else
+    {
+        // top up the ReserveBlockSize to suggested minimum
+        ReserveBlockSize = max(ReserveBlockSize, pInfo->getReserveSize());
+
+        m_pBaseAddr = ClrVirtualAllocExecutable(ReserveBlockSize, MEM_RESERVE, PAGE_NOACCESS);
+        if (!m_pBaseAddr)
+            ThrowOutOfMemory();
     }
 
-    BYTE *pAddress = (BYTE*)ROUND_DOWN_TO_PAGE(dac_cast<TADDR>(m_pLastAvailableCommittedAddr) + 
-                                               m_TotalBytesAvailable - nibbleNewSize);
-    _ASSERTE(m_pLastAvailableCommittedAddr + m_TotalBytesAvailable >= pAddress + nibbleNewSize);
-    if (NULL == ClrVirtualAlloc(pAddress, nibbleNewSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE))
+    m_pLastAvailableCommittedAddr = m_pBaseAddr;
+    m_TotalBytesAvailable = ReserveBlockSize;
+    m_ApproximateLargestBlock = ReserveBlockSize;
+    m_pAllocator = pInfo->m_pAllocator;
+
+    TrackAllocation *pTracker = AllocMemory_NoThrow(0, sizeof(HeapList), sizeof(void*), 0);
+    if (pTracker == NULL)
+    {
+        // This should only ever happen with fault injection
+        _ASSERTE(g_pConfig->ShouldInjectFault(INJECTFAULT_DYNAMICCODEHEAP));
         ThrowOutOfMemory();
-    m_TotalBytesAvailable = pAddress - m_pLastAvailableCommittedAddr;
-    _ASSERTE(m_TotalBytesAvailable >= ReserveBlockSize + otherData);
-    return pAddress;
-}
-
- // used to flag a block that is too small
-#define UNUSABLE_BLOCK      ((size_t)-1)
- 
-size_t HostCodeHeap::GetPadding(TrackAllocation *pCurrent, size_t size, DWORD alignment)
-{
-    LIMITED_METHOD_CONTRACT;
-    if (pCurrent->size < size)
-        return UNUSABLE_BLOCK;
-    size_t padding = 0;
-    if (alignment)
-    {
-        size_t pointer = (size_t)((BYTE*)pCurrent + sizeof(TrackAllocation));
-        padding = ((pointer + (size_t)alignment - 1) & (~((size_t)alignment - 1))) - pointer;
     }
-    if (pCurrent->size < size + padding)
-        return UNUSABLE_BLOCK;
-    return padding;
+
+    HeapList* pHp = (HeapList *)(pTracker + 1);
+
+    pHp->hpNext = NULL;
+    pHp->pHeap = (PTR_CodeHeap)this;
+    // wire it back
+    m_pHeapList = (PTR_HeapList)pHp;
+
+    LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap creation {0x%p} - size available 0x%p, private data ptr [0x%p, 0x%p]\n",
+        (HostCodeHeap*)this, m_TotalBytesAvailable, pTracker, pTracker->size));
+
+    // It is imporant to exclude the CLRPersonalityRoutine from the tracked range
+    pHp->startAddress = dac_cast<TADDR>(m_pBaseAddr) + pTracker->size;
+    pHp->mapBase = ROUND_DOWN_TO_PAGE(pHp->startAddress);  // round down to next lower page align
+    pHp->pHdrMap = NULL;
+    pHp->endAddress = pHp->startAddress;
+
+    pHp->maxCodeHeapSize = m_TotalBytesAvailable - pTracker->size;
+    pHp->reserveForJumpStubs = 0;
+
+#ifdef _WIN64
+    emitJump((LPBYTE)pHp->CLRPersonalityRoutine, (void *)ProcessCLRException);
+#endif
+
+    size_t nibbleMapSize = HEAP2MAPSIZE(ROUND_UP_TO_PAGE(pHp->maxCodeHeapSize));
+    pHp->pHdrMap = new DWORD[nibbleMapSize / sizeof(DWORD)];
+    ZeroMemory(pHp->pHdrMap, nibbleMapSize);
+
+    return pHp;
 }
 
-void* HostCodeHeap::AllocFromFreeList(size_t size, DWORD alignment)
+HostCodeHeap::TrackAllocation* HostCodeHeap::AllocFromFreeList(size_t header, size_t size, DWORD alignment, size_t reserveForJumpStubs)
 {
     CONTRACTL
     {
@@ -501,19 +485,16 @@ void* HostCodeHeap::AllocFromFreeList(size_t size, DWORD alignment)
         TrackAllocation *pPrevious = NULL;
         while (pCurrent)
         {
-            // GetPadding will return UNUSABLE_BLOCK if the current block is not big enough
-            size_t padding = GetPadding(pCurrent, size, alignment);
-            if (UNUSABLE_BLOCK != padding)
+            BYTE* pPointer = ALIGN_UP((BYTE*)(pCurrent + 1) + header, alignment);
+            size_t realSize = ALIGN_UP(pPointer + size, sizeof(void*)) - (BYTE*)pCurrent;
+            if (pCurrent->size >= realSize + reserveForJumpStubs)
             {
                 // found a block
                 LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - Block found, size 0x%X\n", this, pCurrent->size));
-                size_t realSize = size + padding;
-                BYTE *pPointer = (BYTE*)pCurrent + sizeof(TrackAllocation) + padding;
-                _ASSERTE((size_t)(pPointer - (BYTE*)pCurrent) >= sizeof(TrackAllocation));
 
                 // The space left is not big enough for a new block, let's just
                 // update the TrackAllocation record for the current block
-                if (pCurrent->size - realSize <= sizeof(TrackAllocation))
+                if (pCurrent->size - realSize < max(HOST_CODEHEAP_SIZE_ALIGN, sizeof(TrackAllocation)))
                 {
                     LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - Item removed %p, size 0x%X\n", this, pCurrent, pCurrent->size));
                     // remove current
@@ -546,13 +527,10 @@ void* HostCodeHeap::AllocFromFreeList(size_t size, DWORD alignment)
                     pCurrent->size = realSize;
                 }
 
-                // now fill all the padding data correctly
                 pCurrent->pHeap = this;
-                // store the location of the TrackAllocation record right before pPointer
-                *((void**)pPointer - 1) = pCurrent;
 
                 LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - Allocation returned %p, size 0x%X - data -> %p\n", this, pCurrent, pCurrent->size, pPointer));
-                return pPointer;
+                return pCurrent;
             }
             pPrevious = pCurrent;
             pCurrent = pCurrent->pNext;
@@ -657,7 +635,7 @@ void HostCodeHeap::AddToFreeList(TrackAllocation *pBlockToInsert)
                                                         m_pFreeList, m_pFreeList->size));
 }
 
-void* HostCodeHeap::AllocMemForCode_NoThrow(size_t header, size_t size, DWORD alignment)
+void* HostCodeHeap::AllocMemForCode_NoThrow(size_t header, size_t size, DWORD alignment, size_t reserveForJumpStubs)
 {
     CONTRACTL
     {
@@ -668,45 +646,36 @@ void* HostCodeHeap::AllocMemForCode_NoThrow(size_t header, size_t size, DWORD al
     CONTRACTL_END;
 
     _ASSERTE(header == sizeof(CodeHeader));
+    _ASSERTE(alignment <= HOST_CODEHEAP_SIZE_ALIGN);
 
-    // The code allocator has to guarantee that there is only one entrypoint per nibble map entry. 
+    // The code allocator has to guarantee that there is only one entrypoint per nibble map entry.
     // It is guaranteed because of HostCodeHeap allocator always aligns the size up to HOST_CODEHEAP_SIZE_ALIGN,
     // and because the size of nibble map entries (BYTES_PER_BUCKET) is smaller than HOST_CODEHEAP_SIZE_ALIGN.
     // Assert the later fact here.
     _ASSERTE(HOST_CODEHEAP_SIZE_ALIGN >= BYTES_PER_BUCKET);
 
-    BYTE * pMem = (BYTE *)AllocMemory_NoThrow(size + sizeof(CodeHeader) + (alignment - 1), sizeof(void *));
-    if (pMem == NULL)
+    header += sizeof(TrackAllocation*);
+
+    TrackAllocation* pTracker = AllocMemory_NoThrow(header, size, alignment, reserveForJumpStubs);
+    if (pTracker == NULL)
         return NULL;
 
-    BYTE * pCode = (BYTE *)ALIGN_UP(pMem + sizeof(CodeHeader), alignment);
+    BYTE * pCode = ALIGN_UP((BYTE*)(pTracker + 1) + header, alignment);
 
-    // Update tracker to account for the alignment we have just added
-    TrackAllocation *pTracker = *((TrackAllocation **)pMem - 1);
-
-    CodeHeader * pHdr = dac_cast<PTR_CodeHeader>(pCode) - 1;
+    // Pointer to the TrackAllocation record is stored just before the code header
+    CodeHeader * pHdr = (CodeHeader *)pCode - 1;
     *((TrackAllocation **)(pHdr) - 1) = pTracker;
+
+    _ASSERTE(pCode + size <= (BYTE*)pTracker + pTracker->size);
+
+    // ref count the whole heap
+    m_AllocationCount++;
+    LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - ref count %d\n", this, m_AllocationCount));
 
     return pCode;
 }
 
-void* HostCodeHeap::AllocMemory(size_t size, DWORD alignment)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    void *pAllocation = AllocMemory_NoThrow(size, alignment);
-    if (!pAllocation)
-        ThrowOutOfMemory();
-    return pAllocation;
-}
-
-void* HostCodeHeap::AllocMemory_NoThrow(size_t size, DWORD alignment)
+HostCodeHeap::TrackAllocation* HostCodeHeap::AllocMemory_NoThrow(size_t header, size_t size, DWORD alignment, size_t reserveForJumpStubs)
 {
     CONTRACTL
     {
@@ -726,18 +695,15 @@ void* HostCodeHeap::AllocMemory_NoThrow(size_t size, DWORD alignment)
     }
 #endif // _DEBUG
 
-    // honor alignment (should assert the value is proper)
-    if (alignment)
-        size = (size + (size_t)alignment - 1) & (~((size_t)alignment - 1));
-    // align size to HOST_CODEHEAP_SIZE_ALIGN always
-    size = (size + HOST_CODEHEAP_SIZE_ALIGN - 1) & (~(HOST_CODEHEAP_SIZE_ALIGN - 1));
-
-    size += sizeof(TrackAllocation);
+    // Skip walking the free list if the cached size of the largest block is not enough
+    size_t totalRequiredSize = ALIGN_UP(sizeof(TrackAllocation) + header + size + (alignment - 1) + reserveForJumpStubs, sizeof(void*));
+    if (totalRequiredSize > m_ApproximateLargestBlock)
+        return NULL;
 
     LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - Allocation requested 0x%X\n", this, size));
 
-    void *pAddr = AllocFromFreeList(size, alignment);
-    if (!pAddr)
+    TrackAllocation* pTracker = AllocFromFreeList(header, size, alignment, reserveForJumpStubs);
+    if (!pTracker)
     {
         // walk free list to end to find available space
         size_t availableInFreeList = 0;
@@ -752,9 +718,10 @@ void* HostCodeHeap::AllocMemory_NoThrow(size_t size, DWORD alignment)
         {
             availableInFreeList = pLastBlock->size;
         }
-        _ASSERTE(size > availableInFreeList);
-        size_t sizeToCommit = size - availableInFreeList; 
-        sizeToCommit = (size + PAGE_SIZE - 1) & (~(PAGE_SIZE - 1)); // round up to page
+
+        _ASSERTE(totalRequiredSize > availableInFreeList);
+        size_t sizeToCommit = totalRequiredSize - availableInFreeList;
+        sizeToCommit = ROUND_UP_TO_PAGE(sizeToCommit);
 
         if (m_pLastAvailableCommittedAddr + sizeToCommit <= m_pBaseAddr + m_TotalBytesAvailable)
         {
@@ -769,20 +736,18 @@ void* HostCodeHeap::AllocMemory_NoThrow(size_t size, DWORD alignment)
             pBlockToInsert->size = sizeToCommit;
             m_pLastAvailableCommittedAddr += sizeToCommit;
             AddToFreeList(pBlockToInsert);
-            pAddr = AllocFromFreeList(size, alignment);
+            pTracker = AllocFromFreeList(header, size, alignment, reserveForJumpStubs);
+            _ASSERTE(pTracker != NULL);
         }
         else
         {
             LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - allocation failed:\n\tm_pLastAvailableCommittedAddr: 0x%X\n\tsizeToCommit: 0x%X\n\tm_pBaseAddr: 0x%X\n\tm_TotalBytesAvailable: 0x%X\n", this, m_pLastAvailableCommittedAddr, sizeToCommit, m_pBaseAddr, m_TotalBytesAvailable));
-            return NULL;
+            // Update largest available block size
+            m_ApproximateLargestBlock = totalRequiredSize - 1;
         }
     }
 
-    _ASSERTE(pAddr);
-    // ref count the whole heap
-    m_AllocationCount++;
-    LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap [0x%p] - ref count %d\n", this, m_AllocationCount));
-    return pAddr;
+    return pTracker;
 }
 
 #endif //!DACCESS_COMPILE
@@ -836,7 +801,7 @@ struct HostCodeHeap::TrackAllocation * HostCodeHeap::GetTrackAllocation(TADDR co
 {
     LIMITED_METHOD_CONTRACT;
 
-    CodeHeader * pHdr = dac_cast<PTR_CodeHeader>(codeStart) - 1;
+    CodeHeader * pHdr = dac_cast<PTR_CodeHeader>(PCODEToPINSTR(codeStart)) - 1;
 
     // Pointer to the TrackAllocation record is stored just before the code header
     return *((TrackAllocation **)(pHdr) - 1);
@@ -858,6 +823,8 @@ void HostCodeHeap::FreeMemForCode(void * codeStart)
     TrackAllocation *pTracker = HostCodeHeap::GetTrackAllocation((TADDR)codeStart);
     AddToFreeList(pTracker);
 
+    m_ApproximateLargestBlock += pTracker->size;
+
     m_AllocationCount--;
     LOG((LF_BCL, LL_INFO100, "Level2 - CodeHeap released [0x%p, vt(0x%x)] - ref count %d\n", this, *(size_t*)this, m_AllocationCount));
 
@@ -870,40 +837,40 @@ void HostCodeHeap::FreeMemForCode(void * codeStart)
 //
 // Implementation for DynamicMethodDesc declared in method.hpp
 //
-void DynamicMethodDesc::Destroy(BOOL fDomainUnload)
+void DynamicMethodDesc::Destroy()
 {
     CONTRACTL
     {
-        if (fDomainUnload) NOTHROW; else THROWS;
+        THROWS;
         GC_TRIGGERS;
         MODE_ANY;
     }
     CONTRACTL_END;
 
     _ASSERTE(IsDynamicMethod());
-    LoaderAllocator *pLoaderAllocator = GetLoaderAllocatorForCode();
+    LoaderAllocator *pLoaderAllocator = GetLoaderAllocator();
 
     LOG((LF_BCL, LL_INFO1000, "Level3 - Destroying DynamicMethod {0x%p}\n", this));
-    if (m_pSig)
+    if (!m_pSig.IsNull())
     {
-        delete[] (BYTE*)m_pSig;
-        m_pSig = NULL;
+        delete[] (BYTE*)m_pSig.GetValue();
+        m_pSig.SetValueMaybeNull(NULL);
     }
     m_cSig = 0;
-    if (m_pszMethodName)
+    if (!m_pszMethodName.IsNull())
     {
-        delete[] m_pszMethodName;
-        m_pszMethodName = NULL;
+        delete[] m_pszMethodName.GetValue();
+        m_pszMethodName.SetValueMaybeNull(NULL);
     }
 
-    GetLCGMethodResolver()->Destroy(fDomainUnload);
+    GetLCGMethodResolver()->Destroy();
 
-    if (pLoaderAllocator->IsCollectible() && !fDomainUnload)
+    if (pLoaderAllocator->IsCollectible())
     {
         if (pLoaderAllocator->Release())
         {
             GCX_PREEMP();
-            LoaderAllocator::GCLoaderAllocators(pLoaderAllocator->GetDomain()->AsAppDomain());
+            LoaderAllocator::GCLoaderAllocators(pLoaderAllocator);
         }
     }
 }
@@ -917,7 +884,7 @@ void LCGMethodResolver::Reset()
     m_DynamicStringLiterals = NULL;
     m_recordCodePointer     = NULL;
     m_UsedIndCellList       = NULL;
-    m_jumpStubBlock         = NULL;
+    m_pJumpStubCache        = NULL;
     m_next                  = NULL;
     m_Code                  = NULL;
 }
@@ -957,15 +924,15 @@ void LCGMethodResolver::RecycleIndCells()
         }
 
         // Insert the linked list to the free list of the VirtualCallStubManager of the current domain.
-        // We should use GetLoaderAllocatorForCode because that is where the ind cell was allocated.
-        LoaderAllocator *pLoaderAllocator = GetDynamicMethod()->GetLoaderAllocatorForCode();
+        // We should use GetLoaderAllocator because that is where the ind cell was allocated.
+        LoaderAllocator *pLoaderAllocator = GetDynamicMethod()->GetLoaderAllocator();
         VirtualCallStubManager *pMgr = pLoaderAllocator->GetVirtualCallStubManager();
         pMgr->InsertIntoRecycledIndCellList_Locked(cellhead, cellcurr);
         m_UsedIndCellList = NULL;
     }
 }
 
-void LCGMethodResolver::Destroy(BOOL fDomainUnload)
+void LCGMethodResolver::Destroy()
 {
     CONTRACTL {
         NOTHROW;
@@ -1005,41 +972,33 @@ void LCGMethodResolver::Destroy(BOOL fDomainUnload)
         }
     }
 
-
-    if (!fDomainUnload)
-    {
-        // No need to recycle if the domain is unloading.
-        // Note that we need to do this before m_jitTempData is deleted
-        RecycleIndCells();
-    }
+    // Note that we need to do this before m_jitTempData is deleted
+    RecycleIndCells();
 
     m_jitMetaHeap.Delete();
     m_jitTempData.Delete();
 
 
-    // Per-appdomain resources has been reclaimed already if the appdomain is being unloaded. Do not try to
-    // release them again.
-    if (!fDomainUnload)
+    if (m_recordCodePointer)
     {
-        if (m_recordCodePointer)
-        {
 #if defined(_TARGET_AMD64_)
-            // Remove the unwind information (if applicable)
-            UnwindInfoTable::UnpublishUnwindInfoForMethod((TADDR)m_recordCodePointer);
+        // Remove the unwind information (if applicable)
+        UnwindInfoTable::UnpublishUnwindInfoForMethod((TADDR)m_recordCodePointer);
 #endif // defined(_TARGET_AMD64_)
 
-            HostCodeHeap *pHeap = HostCodeHeap::GetCodeHeap((TADDR)m_recordCodePointer);
-            LOG((LF_BCL, LL_INFO1000, "Level3 - Resolver {0x%p} - Release reference to heap {%p, vt(0x%x)} \n", this, pHeap, *(size_t*)pHeap));
-            pHeap->m_pJitManager->FreeCodeMemory(pHeap, m_recordCodePointer);
+        HostCodeHeap *pHeap = HostCodeHeap::GetCodeHeap((TADDR)m_recordCodePointer);
+        LOG((LF_BCL, LL_INFO1000, "Level3 - Resolver {0x%p} - Release reference to heap {%p, vt(0x%x)} \n", this, pHeap, *(size_t*)pHeap));
+        pHeap->m_pJitManager->FreeCodeMemory(pHeap, m_recordCodePointer);
 
-            m_recordCodePointer = NULL;
-        }
+        m_recordCodePointer = NULL;
+    }
 
-        JumpStubBlockHeader* current = m_jumpStubBlock;
-        JumpStubBlockHeader* next;
+    if (m_pJumpStubCache != NULL)
+    {
+        JumpStubBlockHeader* current = m_pJumpStubCache->m_pBlocks;  
         while (current)
         {
-            next = current->m_next;
+            JumpStubBlockHeader* next = current->m_next;
 
             HostCodeHeap *pHeap = current->GetHostCodeHeap();
             LOG((LF_BCL, LL_INFO1000, "Level3 - Resolver {0x%p} - Release reference to heap {%p, vt(0x%x)} \n", current, pHeap, *(size_t*)pHeap));
@@ -1047,16 +1006,19 @@ void LCGMethodResolver::Destroy(BOOL fDomainUnload)
 
             current = next;
         }
-        m_jumpStubBlock = NULL;
+        m_pJumpStubCache->m_pBlocks = NULL;
 
-        if (m_managedResolver)
-        {
-            ::DestroyLongWeakHandle(m_managedResolver);
-            m_managedResolver = NULL;
-        }
-
-        m_DynamicMethodTable->LinkMethod(m_pDynamicMethod);
+        delete m_pJumpStubCache;
+        m_pJumpStubCache = NULL;
     }
+
+    if (m_managedResolver)
+    {
+        ::DestroyLongWeakHandle(m_managedResolver);
+        m_managedResolver = NULL;
+    }
+
+    m_DynamicMethodTable->LinkMethod(m_pDynamicMethod);
 }
 
 void LCGMethodResolver::FreeCompileTimeState()
@@ -1082,21 +1044,6 @@ void LCGMethodResolver::GetJitContext(SecurityControlFlags * securityControlFlag
     } CONTRACTL_END;
     
     GCX_COOP();
-    GetJitContextCoop(securityControlFlags, typeOwner);
-}
-
-void LCGMethodResolver::GetJitContextCoop(SecurityControlFlags * securityControlFlags,
-                                      TypeHandle *typeOwner)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE;
-        SO_INTOLERANT;
-        INJECT_FAULT(COMPlusThrowOM(););
-        PRECONDITION(CheckPointer(securityControlFlags));
-        PRECONDITION(CheckPointer(typeOwner));
-    } CONTRACTL_END;
 
     MethodDescCallSite getJitContext(METHOD__RESOLVER__GET_JIT_CONTEXT, m_managedResolver);
 
@@ -1137,8 +1084,7 @@ BYTE* LCGMethodResolver::GetCodeInfo(unsigned *pCodeSize, unsigned *pStackSize, 
         OBJECTREF resolver = ObjectFromHandle(m_managedResolver);
         VALIDATEOBJECTREF(resolver); // gc root must be up the stack
 
-        DWORD initLocals = 0, EHSize = 0;
-        unsigned short stackSize = 0;
+        int32_t stackSize = 0, initLocals = 0, EHSize = 0;
         ARG_SLOT args[] =
         {
             ObjToArgSlot(resolver),
@@ -1148,7 +1094,7 @@ BYTE* LCGMethodResolver::GetCodeInfo(unsigned *pCodeSize, unsigned *pStackSize, 
         };
         U1ARRAYREF dataArray = (U1ARRAYREF) getCodeInfo.Call_RetOBJECTREF(args);
         DWORD codeSize = dataArray->GetNumComponents();
-        NewHolder<BYTE> code(new BYTE[codeSize]);
+        NewArrayHolder<BYTE> code(new BYTE[codeSize]);
         memcpy(code, dataArray->GetDataPtr(), codeSize);
         m_CodeSize = codeSize;
         _ASSERTE(FitsIn<unsigned short>(stackSize));
@@ -1196,7 +1142,7 @@ LCGMethodResolver::GetLocalSig()
         };
         U1ARRAYREF dataArray = (U1ARRAYREF) getLocalsSignature.Call_RetOBJECTREF(args);
         DWORD localSigSize = dataArray->GetNumComponents();
-        NewHolder<COR_SIGNATURE> localSig(new COR_SIGNATURE[localSigSize]);
+        NewArrayHolder<COR_SIGNATURE> localSig(new COR_SIGNATURE[localSigSize]);
         memcpy((void *)localSig, dataArray->GetDataPtr(), localSigSize);
 
         m_LocalSig = SigPointer((PCCOR_SIGNATURE)localSig, localSigSize);
@@ -1308,7 +1254,7 @@ STRINGREF* LCGMethodResolver::GetOrInternString(STRINGREF *pProtectedStringRef)
 }
 
 // AddToUsedIndCellList adds a IndCellList link to the beginning of m_UsedIndCellList. It is called by
-// code:CEEInfo::getCallInfo when a indirection cell is alocated for m_pDynamicMethod.
+// code:CEEInfo::getCallInfo when a indirection cell is allocated for m_pDynamicMethod.
 // All the indirection cells usded by m_pDynamicMethod will be recycled when this resolver
 // is finalized, see code:LCGMethodResolver::RecycleIndCells
 void LCGMethodResolver::AddToUsedIndCellList(BYTE * indcell)
@@ -1517,7 +1463,6 @@ void* ChunkAllocator::New(size_t size)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -1544,7 +1489,7 @@ void* ChunkAllocator::New(size_t size)
     if (size + (sizeof(void*) * 2) < CHUNK_SIZE)
     {
         // make the allocation
-        NewHolder<BYTE> newBlock(new BYTE[CHUNK_SIZE]);
+        NewArrayHolder<BYTE> newBlock(new BYTE[CHUNK_SIZE]);
         pNewBlock = (BYTE*)newBlock;
         ((size_t*)pNewBlock)[1] = CHUNK_SIZE - size - (sizeof(void*) * 2); 
         LOG((LF_BCL, LL_INFO10, "Level1 - DM - Allocator [0x%p] - new block {0x%p}\n", this, pNewBlock));
@@ -1553,7 +1498,7 @@ void* ChunkAllocator::New(size_t size)
     else
     {
         // request bigger than default size this is going to be a single block
-        NewHolder<BYTE> newBlock(new BYTE[size + (sizeof(void*) * 2)]);
+        NewArrayHolder<BYTE> newBlock(new BYTE[size + (sizeof(void*) * 2)]);
         pNewBlock = (BYTE*)newBlock;
         ((size_t*)pNewBlock)[1] = 0; // no available bytes left
         LOG((LF_BCL, LL_INFO10, "Level1 - DM - Allocator [0x%p] - new BIG block {0x%p}\n", this, pNewBlock));

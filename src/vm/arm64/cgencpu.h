@@ -14,7 +14,9 @@
 #define INSTRFMT_K64
 #include <stublink.h>
 
+#ifndef FEATURE_PAL
 #define USE_REDIRECT_FOR_GCSTRESS
+#endif // FEATURE_PAL
 
 EXTERN_C void getFPReturn(int fpSize, INT64 *pRetVal);
 EXTERN_C void setFPReturn(int fpSize, INT64 retVal);
@@ -22,6 +24,7 @@ EXTERN_C void setFPReturn(int fpSize, INT64 retVal);
 
 class ComCallMethodDesc;
 
+extern PCODE GetPreStubEntryPoint();
 
 #define COMMETHOD_PREPAD                        24   // # extra bytes to allocate in addition to sizeof(ComCallMethodDesc)
 #ifdef FEATURE_COMINTEROP
@@ -38,28 +41,23 @@ class ComCallMethodDesc;
 
 #define USE_INDIRECT_CODEHEADER
 
-#ifdef FEATURE_REMOTING
-#define HAS_REMOTING_PRECODE                    1
-#endif
-
-//ARM64TODO: Enable it once we complete work on precode
-//#define HAS_FIXUP_PRECODE                       1
-//#define HAS_FIXUP_PRECODE_CHUNKS                1
+#define HAS_FIXUP_PRECODE                       1
+#define HAS_FIXUP_PRECODE_CHUNKS                1
 
 // ThisPtrRetBufPrecode one is necessary for closed delegates over static methods with return buffer
 #define HAS_THISPTR_RETBUF_PRECODE              1
 
-//ARM64TODO: verify this
 #define CODE_SIZE_ALIGN                         8
-#define CACHE_LINE_SIZE                         32  // As per Intel Optimization Manual the cache line size is 32 bytes
+#define CACHE_LINE_SIZE                         64
 #define LOG2SLOT                                LOG2_PTRSIZE
 
-#define ENREGISTERED_RETURNTYPE_MAXSIZE         64  // bytes (maximum HFA size is 8 doubles)
-#define ENREGISTERED_RETURNTYPE_INTEGER_MAXSIZE 8   // bytes
+#define ENREGISTERED_RETURNTYPE_MAXSIZE         64  // bytes (four vector registers: q0,q1,q2 and q3)
+#define ENREGISTERED_RETURNTYPE_INTEGER_MAXSIZE 16  // bytes (two int registers: x0 and x1)
 #define ENREGISTERED_PARAMTYPE_MAXSIZE          16  // bytes (max value type size that can be passed by value)
 
 #define CALLDESCR_ARGREGS                       1   // CallDescrWorker has ArgumentRegister parameter
 #define CALLDESCR_FPARGREGS                     1   // CallDescrWorker has FloatArgumentRegisters parameter
+#define CALLDESCR_RETBUFFARGREG                 1   // CallDescrWorker has RetBuffArg parameter that's separate from arg regs
 
 // Given a return address retrieved during stackwalk,
 // this is the offset by which it should be decremented to arrive at the callsite.
@@ -71,8 +69,22 @@ class ComCallMethodDesc;
 // as large as the largest FieldMarshaler subclass. This requirement
 // is guarded by an assert.
 //=======================================================================
-//ARM64TODO: verify this
 #define MAXFIELDMARSHALERSIZE               40
+
+inline
+ARG_SLOT FPSpillToR8(void* pSpillSlot)
+{
+    LIMITED_METHOD_CONTRACT;
+    return *(SIZE_T*)pSpillSlot;
+}
+
+inline
+void     R8ToFPSpill(void* pSpillSlot, SIZE_T  srcDoubleAsSIZE_T)
+{
+    LIMITED_METHOD_CONTRACT;
+    *(SIZE_T*)pSpillSlot = srcDoubleAsSIZE_T;
+    *((SIZE_T*)pSpillSlot + 1) = 0;
+}
 
 //**********************************************************************
 // Parameter size
@@ -81,15 +93,29 @@ class ComCallMethodDesc;
 typedef INT64 StackElemType;
 #define STACK_ELEM_SIZE sizeof(StackElemType)
 
-// !! This expression assumes STACK_ELEM_SIZE is a power of 2.
+// The expression below assumes STACK_ELEM_SIZE is a power of 2, so check that.
+static_assert(((STACK_ELEM_SIZE & (STACK_ELEM_SIZE-1)) == 0), "STACK_ELEM_SIZE must be a power of 2");
+
 #define StackElemSize(parmSize) (((parmSize) + STACK_ELEM_SIZE - 1) & ~((ULONG)(STACK_ELEM_SIZE - 1)))
+
+//
+// JIT HELPERS.
+//
+// Create alias for optimized implementations of helpers provided on this platform
+//
+#define JIT_GetSharedGCStaticBase           JIT_GetSharedGCStaticBase_SingleAppDomain
+#define JIT_GetSharedNonGCStaticBase        JIT_GetSharedNonGCStaticBase_SingleAppDomain
+#define JIT_GetSharedGCStaticBaseNoCtor     JIT_GetSharedGCStaticBaseNoCtor_SingleAppDomain
+#define JIT_GetSharedNonGCStaticBaseNoCtor  JIT_GetSharedNonGCStaticBaseNoCtor_SingleAppDomain
+
+#define JIT_Stelem_Ref                      JIT_Stelem_Ref
 
 //**********************************************************************
 // Frames
 //**********************************************************************
 
 //--------------------------------------------------------------------
-// This represents the callee saved (non-volatile) registers saved as
+// This represents the callee saved (non-volatile) integer registers saved as
 // of a FramedMethodFrame.
 //--------------------------------------------------------------------
 typedef DPTR(struct CalleeSavedRegisters) PTR_CalleeSavedRegisters;
@@ -100,18 +126,18 @@ struct CalleeSavedRegisters {
 };
 
 //--------------------------------------------------------------------
-// This represents the arguments that are stored in volatile registers.
+// This represents the arguments that are stored in volatile integer registers.
 // This should not overlap the CalleeSavedRegisters since those are already
 // saved separately and it would be wasteful to save the same register twice.
 // If we do use a non-volatile register as an argument, then the ArgIterator
 // will probably have to communicate this back to the PromoteCallerStack
 // routine to avoid a double promotion.
 //--------------------------------------------------------------------
+#define NUM_ARGUMENT_REGISTERS 8
 typedef DPTR(struct ArgumentRegisters) PTR_ArgumentRegisters;
 struct ArgumentRegisters {
-    INT64 x[8]; // x0 ....x7
+    INT64 x[NUM_ARGUMENT_REGISTERS]; // x0 ....x7. Note that x8 (return buffer address) is not included.
 };
-#define NUM_ARGUMENT_REGISTERS 8
 
 #define ARGUMENTREGISTERS_SIZE sizeof(ArgumentRegisters)
 
@@ -127,10 +153,10 @@ typedef DPTR(struct FloatArgumentRegisters) PTR_FloatArgumentRegisters;
 struct FloatArgumentRegisters {
     // armV8 supports 32 floating point registers. Each register is 128bits long.
     // It can be accessed as 128-bit value or 64-bit value(d0-d31) or as 32-bit value (s0-s31)
-    // or as 16-bit value or as 8-bit values. C# only has two builtin floating datatypes float(32-bit) and 
-    // double(64-bit). It does not have a quad-precision floating point.So therefore it does not make sense to
-    // store full 128-bit values in Frame when the upper 64 bit will not contain any values.
-    double  d[8];  // d0-d7
+    // or as 16-bit value or as 8-bit values.
+    // Although C# only has two builtin floating datatypes float(32-bit) and double(64-bit),
+    // HW Intrinsics support using the full 128-bit value for passing Vectors.
+    NEON128   q[8];  // q0-q7
 };
 
 
@@ -153,9 +179,34 @@ inline TADDR GetSP(const T_CONTEXT * context) {
     return TADDR(context->Sp);
 }
 
-inline PCODE GetLR(const T_CONTEXT * context) {
+inline TADDR GetLR(const T_CONTEXT * context) {
     LIMITED_METHOD_DAC_CONTRACT;
-    return PCODE(context->Lr);
+    return context->Lr;
+}
+
+inline void SetLR( T_CONTEXT * context, TADDR eip) {
+    LIMITED_METHOD_DAC_CONTRACT;
+    context->Lr = eip;
+}
+
+inline TADDR GetReg(T_CONTEXT * context, int Regnum)
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+    _ASSERTE(Regnum >= 0 && Regnum < 32 );
+     return context->X[Regnum];
+}
+
+inline void SetReg(T_CONTEXT * context,  int Regnum, PCODE RegContent)
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+    _ASSERTE(Regnum >= 0 && Regnum <=28 );
+    context->X[Regnum] = RegContent;
+}
+inline void SetSimdReg(T_CONTEXT * context, int Regnum, NEON128 RegContent)
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+    _ASSERTE(Regnum >= 0 && Regnum <= 28);
+    context->V[Regnum] = RegContent;
 }
 
 extern "C" LPVOID __stdcall GetCurrentSP();
@@ -175,6 +226,40 @@ inline TADDR GetFP(const T_CONTEXT * context)
     LIMITED_METHOD_DAC_CONTRACT;
     return (TADDR)(context->Fp);
 }
+
+inline NEON128 GetSimdMem(PCODE ip)
+{
+    NEON128 mem;
+    LIMITED_METHOD_DAC_CONTRACT;
+    EX_TRY
+    {
+        mem.Low  = dac_cast<PCODE>(ip);
+        mem.High = dac_cast<PCODE>(ip + sizeof(PCODE));
+    }
+    EX_CATCH
+    {
+        _ASSERTE(!"Memory read within jitted Code Failed, this should not happen!!!!");
+    }
+    EX_END_CATCH(SwallowAllExceptions);
+
+    return mem;
+}
+inline TADDR GetMem(PCODE ip)
+{
+    TADDR mem;
+    LIMITED_METHOD_DAC_CONTRACT;
+    EX_TRY
+    {
+        mem = dac_cast<TADDR>(ip);
+    }
+    EX_CATCH
+    {
+        _ASSERTE(!"Memory read within jitted Code Failed, this should not happen!!!!");
+    }
+    EX_END_CATCH(SwallowAllExceptions);
+    return mem;
+}
+
 
 #ifdef FEATURE_COMINTEROP
 void emitCOMStubCall (ComCallMethodDesc *pCOMMethod, PCODE target);
@@ -261,8 +346,8 @@ inline PCODE decodeBackToBackJump(PCODE pBuffer)
 
 inline BOOL IsUnmanagedValueTypeReturnedByRef(UINT sizeofvaluetype) 
 {
-//   ARM64TODO : Check if we need to consider HFA
-    return (sizeofvaluetype > 8);
+    // ARM64TODO: Does this need to care about HFA. It does not for ARM32
+    return (sizeofvaluetype > ENREGISTERED_RETURNTYPE_INTEGER_MAXSIZE);
 }
 
 
@@ -373,10 +458,8 @@ public:
     void EmitUnboxMethodStub(MethodDesc* pRealMD);
     void EmitCallManagedMethod(MethodDesc *pMD, BOOL fTailCall);
     void EmitCallLabel(CodeLabel *target, BOOL fTailCall, BOOL fIndirect);
-    void EmitSecureDelegateInvoke(UINT_PTR hash);
-    static UINT_PTR HashMulticastInvoke(MetaSig* pSig);
+
     void EmitShuffleThunk(struct ShuffleEntry *pShuffleEntryArray);
-    void EmitGetThreadInlined(IntReg Xt);
 
 #ifdef _DEBUG
     void EmitNop() { Emit32(0xD503201F); }
@@ -417,9 +500,7 @@ extern "C" void SinglecastDelegateInvokeStub();
 
 
 // preferred alignment for data
-//ARM64TODO: double check
 #define DATA_ALIGNMENT 8
-
 
 struct DECLSPEC_ALIGN(16) UMEntryThunkCode
 {
@@ -429,6 +510,7 @@ struct DECLSPEC_ALIGN(16) UMEntryThunkCode
     TADDR       m_pvSecretParam;
 
     void Encode(BYTE* pTargetCode, void* pvSecretParam);
+    void Poison();
 
     LPCBYTE GetEntryPoint() const
     {
@@ -456,8 +538,21 @@ struct HijackArgs
     DWORD64 X19, X20, X21, X22, X23, X24, X25, X26, X27, X28;
     union
     {
-        DWORD64 X0;
-        size_t ReturnValue;
+        struct {  
+             DWORD64 X0;  
+             DWORD64 X1;  
+         }; 
+        size_t ReturnValue[2];
+    };
+    union
+    {
+        struct {  
+             NEON128 Q0;  
+             NEON128 Q1;  
+             NEON128 Q2;  
+             NEON128 Q3;  
+         }; 
+        NEON128 FPReturnValue[4];
     };
 };
 
@@ -496,12 +591,25 @@ struct StubPrecode {
         return m_pTarget;
     }
 
+    void ResetTargetInterlocked()
+    {
+        CONTRACTL
+        {
+            THROWS;
+            GC_NOTRIGGER;
+        }
+        CONTRACTL_END;
+
+        EnsureWritableExecutablePages(&m_pTarget);
+        InterlockedExchange64((LONGLONG*)&m_pTarget, (TADDR)GetPreStubEntryPoint());
+    }
+
     BOOL SetTargetInterlocked(TADDR target, TADDR expected)
     {
         CONTRACTL
         {
             THROWS;
-            GC_TRIGGERS;
+            GC_NOTRIGGER;
         }
         CONTRACTL_END;
 
@@ -519,10 +627,10 @@ typedef DPTR(StubPrecode) PTR_StubPrecode;
 
 struct NDirectImportPrecode {
 
-    static const int Type = 0x88;
+    static const int Type = 0x8B;
 
-    // adr x8, #16             ; Notice that x8 register is used to differentiate the stub from StubPrecode which uses x9
-    // ldp x10,x12,[x8]      ; =m_pTarget,m_pMethodDesc
+    // adr x11, #16             ; Notice that x11 register is used to differentiate the stub from StubPrecode which uses x9
+    // ldp x10,x12,[x11]      ; =m_pTarget,m_pMethodDesc
     // br x10
     // 4 byte padding for 8 byte allignement
     // dcd pTarget
@@ -560,44 +668,89 @@ typedef DPTR(NDirectImportPrecode) PTR_NDirectImportPrecode;
 
 struct FixupPrecode {
 
-    static const int Type = 0xfc;
+    static const int Type = 0x0C;
 
-    // mov r12, pc
-    // ldr pc, [pc, #4]     ; =m_pTarget
+    // adr x12, #0 
+    // ldr x11, [pc, #12]     ; =m_pTarget
+    // br  x11
     // dcb m_MethodDescChunkIndex
     // dcb m_PrecodeChunkIndex
+    // 2 byte padding
     // dcd m_pTarget
-    WORD    m_rgCode[3];
+
+
+    UINT32  m_rgCode[3];
+    BYTE    padding[2];
     BYTE    m_MethodDescChunkIndex;
     BYTE    m_PrecodeChunkIndex;
     TADDR   m_pTarget;
 
     void Init(MethodDesc* pMD, LoaderAllocator *pLoaderAllocator, int iMethodDescChunkIndex = 0, int iPrecodeChunkIndex = 0);
+    void InitCommon()
+    {
+        WRAPPER_NO_CONTRACT;
+        int n = 0;
+
+        m_rgCode[n++] = 0x1000000C;   // adr x12, #0
+        m_rgCode[n++] = 0x5800006B;   // ldr x11, [pc, #12]     ; =m_pTarget
+
+        _ASSERTE((UINT32*)&m_pTarget == &m_rgCode[n + 2]);
+
+        m_rgCode[n++] = 0xD61F0160;   // br  x11
+
+        _ASSERTE(n == _countof(m_rgCode));
+    }
 
     TADDR GetBase()
     {
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
+        LIMITED_METHOD_CONTRACT;
+        SUPPORTS_DAC;
+
+        return dac_cast<TADDR>(this) + (m_PrecodeChunkIndex + 1) * sizeof(FixupPrecode);
     }
 
     TADDR GetMethodDesc();
 
     PCODE GetTarget()
     {
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
+        LIMITED_METHOD_DAC_CONTRACT;
+        return m_pTarget;
+    }
+
+    void ResetTargetInterlocked()
+    {
+        CONTRACTL
+        {
+            THROWS;
+            GC_NOTRIGGER;
+        }
+        CONTRACTL_END;
+
+        EnsureWritableExecutablePages(&m_pTarget);
+        InterlockedExchange64((LONGLONG*)&m_pTarget, (TADDR)GetEEFuncEntryPoint(PrecodeFixupThunk));
     }
 
     BOOL SetTargetInterlocked(TADDR target, TADDR expected)
     {
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
+        CONTRACTL
+        {
+            THROWS;
+            GC_NOTRIGGER;
+        }
+        CONTRACTL_END;
+
+        EnsureWritableExecutablePages(&m_pTarget);
+        return (TADDR)InterlockedCompareExchange64(
+            (LONGLONG*)&m_pTarget, (TADDR)target, (TADDR)expected) == expected;
     }
 
     static BOOL IsFixupPrecodeByASM(PCODE addr)
     {
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
+        PTR_DWORD pInstr = dac_cast<PTR_DWORD>(PCODEToPINSTR(addr));
+        return
+            (pInstr[0] == 0x1000000C) &&
+            (pInstr[1] == 0x5800006B) &&
+            (pInstr[2] == 0xD61F0160);
     }
 
 #ifdef FEATURE_PREJIT
@@ -643,7 +796,7 @@ struct ThisPtrRetBufPrecode {
         CONTRACTL
         {
             THROWS;
-            GC_TRIGGERS;
+            GC_NOTRIGGER;
         }
         CONTRACTL_END;
 
@@ -653,58 +806,5 @@ struct ThisPtrRetBufPrecode {
     }
 };
 typedef DPTR(ThisPtrRetBufPrecode) PTR_ThisPtrRetBufPrecode;
-
-
-#ifdef HAS_REMOTING_PRECODE
-
-// Precode with embedded remoting interceptor
-struct RemotingPrecode {
-
-    static const int Type = 0x02;
-
-    // push {r1,lr}
-    // ldr r1, [pc, #16]    ; =m_pPrecodeRemotingThunk
-    // blx r1
-    // pop {r1,lr}
-    // ldr pc, [pc, #12]    ; =m_pLocalTarget
-    // nop                  ; padding for alignment
-    // dcd m_pMethodDesc
-    // dcd m_pPrecodeRemotingThunk
-    // dcd m_pLocalTarget
-    WORD    m_rgCode[8];
-    TADDR   m_pMethodDesc;
-    TADDR   m_pPrecodeRemotingThunk;
-    TADDR   m_pLocalTarget;
-
-    void Init(MethodDesc* pMD, LoaderAllocator *pLoaderAllocator = NULL);
-
-    TADDR GetMethodDesc()
-    {
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
-    }
-
-    PCODE GetTarget()
-    { 
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
-    }
-
-    BOOL SetTargetInterlocked(TADDR target, TADDR expected)
-    {
-        _ASSERTE(!"ARM64:NYI");
-        return NULL;
-    }
-
-#ifdef FEATURE_PREJIT
-    void Fixup(DataImage *image, ZapNode *pCodeNode);
-#endif
-};
-typedef DPTR(RemotingPrecode) PTR_RemotingPrecode;
-
-EXTERN_C void PrecodeRemotingThunk();
-
-#endif // HAS_REMOTING_PRECODE
-
 
 #endif // __cgencpu_h__

@@ -2,119 +2,116 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-// ==++==
-//
-
-//
-
-//
-// ==--==
-
-/*XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-XX                                                                           XX
-XX                                  SSA                                      XX
-XX                                                                           XX
-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-*/
-
 #pragma once
 
-#include "jitstd.h"
-
-struct SsaRenameStateForBlock
+class SsaRenameState
 {
-    BasicBlock* m_bb;
-    unsigned    m_count;
+    struct StackNode;
 
-    SsaRenameStateForBlock(BasicBlock* bb, unsigned count) : m_bb(bb), m_count(count) {}
-    SsaRenameStateForBlock() : m_bb(NULL), m_count(0) {}
-};
-
-// A record indicating that local "m_loc" was defined in block "m_bb".
-struct SsaRenameStateLocDef
-{
-    BasicBlock* m_bb;
-    unsigned    m_lclNum;
-
-    SsaRenameStateLocDef(BasicBlock* bb, unsigned lclNum) : m_bb(bb), m_lclNum(lclNum) {}
-};
-
-struct SsaRenameState
-{
-    typedef jitstd::list<SsaRenameStateForBlock> Stack;
-    typedef Stack** Stacks;
-    typedef unsigned* Counts;
-    typedef jitstd::list<SsaRenameStateLocDef> DefStack;
-
-    SsaRenameState(const jitstd::allocator<int>& allocator, unsigned lvaCount);
-
-    void EnsureCounts();
-    void EnsureStacks();
-
-    // Requires "lclNum" to be a variable number for which a new count corresponding to a
-    // definition is desired. The method post increments the counter for the "lclNum."
-    unsigned CountForDef(unsigned lclNum);
-
-    // Requires "lclNum" to be a variable number for which an ssa number at the top of the
-    // stack is required i.e., for variable "uses."
-    unsigned CountForUse(unsigned lclNum);
-
-    // Requires "lclNum" to be a variable number, and requires "count" to represent
-    // an ssa number, that needs to be pushed on to the stack corresponding to the lclNum.
-    void Push(BasicBlock* bb, unsigned lclNum, unsigned count);
-    
-    // Pop all stacks that have an entry for "bb" on top.
-    void PopBlockStacks(BasicBlock* bb);
-
-    // Similar functions for the special implicit "Heap" variable.
-    unsigned CountForHeapDef()
+    class Stack
     {
-        if (heapCount == 0)
-            heapCount = SsaConfig::FIRST_SSA_NUM;
-        unsigned res = heapCount;
-        heapCount++;
-        return res;
-    }
-    unsigned CountForHeapUse()
+        StackNode* m_top;
+
+    public:
+        Stack() : m_top(nullptr)
+        {
+        }
+
+        StackNode* Top()
+        {
+            return m_top;
+        }
+
+        void Push(StackNode* node)
+        {
+            node->m_stackPrev = m_top;
+            m_top             = node;
+        }
+
+        StackNode* Pop()
+        {
+            StackNode* top = m_top;
+            m_top          = top->m_stackPrev;
+            return top;
+        }
+    };
+
+    struct StackNode
     {
-        return heapStack.back().m_count;
-    }
+        // Link to the previous stack top node
+        StackNode* m_stackPrev;
+        // Link to the previously pushed stack (used only when popping blocks)
+        Stack* m_listPrev;
+        // The basic block (used only when popping blocks)
+        BasicBlock* m_block;
+        // The actual information StackNode stores - the SSA number
+        unsigned m_ssaNum;
 
-    void PushHeap(BasicBlock* bb, unsigned count)
+        StackNode(Stack* listPrev, BasicBlock* block, unsigned ssaNum)
+            : m_listPrev(listPrev), m_block(block), m_ssaNum(ssaNum)
+        {
+        }
+    };
+
+    // Memory allocator
+    CompAllocator m_alloc;
+    // Number of local variables to allocate stacks for
+    unsigned m_lvaCount;
+    // An array of stack objects, one for each local variable
+    Stack* m_stacks;
+    // The tail of the list of stacks that have been pushed to
+    Stack* m_stackListTail;
+    // Same state for the special implicit memory variables
+    Stack m_memoryStack[MemoryKindCount];
+    // A stack of free stack nodes
+    Stack m_freeStack;
+
+public:
+    SsaRenameState(CompAllocator alloc, unsigned lvaCount);
+
+    // Get the SSA number at the top of the stack for the specified variable.
+    unsigned Top(unsigned lclNum);
+
+    // Push a SSA number onto the stack for the specified variable.
+    void Push(BasicBlock* block, unsigned lclNum, unsigned ssaNum);
+
+    // Pop all stacks that have an entry for "block" on top.
+    void PopBlockStacks(BasicBlock* block);
+
+    // Similar functions for the special implicit memory variable.
+    unsigned TopMemory(MemoryKind memoryKind)
     {
-        heapStack.push_back(SsaRenameStateForBlock(bb, count));
+        return m_memoryStack[memoryKind].Top()->m_ssaNum;
     }
 
-    void PopBlockHeapStack(BasicBlock* bb);
-
-    unsigned HeapCount() { return heapCount; }
-
-#ifdef DEBUG
-    // Debug interface
-    void DumpStacks();
-#endif
+    void PushMemory(MemoryKind memoryKind, BasicBlock* block, unsigned ssaNum)
+    {
+        Push(&m_memoryStack[memoryKind], block, ssaNum);
+    }
 
 private:
+    void EnsureStacks();
 
-    // Map of lclNum -> count.
-    Counts counts;
+    // Allocate a new stack entry (possibly by popping it from the free stack)
+    template <class... Args>
+    StackNode* AllocStackNode(Args&&... args)
+    {
+        StackNode* stack = m_freeStack.Top();
 
-    // Map of lclNum -> SsaRenameStateForBlock.
-    Stacks stacks;
+        if (stack != nullptr)
+        {
+            m_freeStack.Pop();
+        }
+        else
+        {
+            stack = m_alloc.allocate<StackNode>(1);
+        }
 
-    // This list represents the set of locals defined in the current block.
-    DefStack definedLocs;
+        return new (stack, jitstd::placement_t()) StackNode(jitstd::forward<Args>(args)...);
+    }
 
-    // Same state for the special implicit Heap variable.
-    Stack     heapStack;
-    unsigned  heapCount;
+    // Push a SSA number onto a stack
+    void Push(Stack* stack, BasicBlock* block, unsigned ssaNum);
 
-    // Number of stacks/counts to allocate.
-    unsigned  lvaCount;
-
-    // Allocator to allocate stacks.
-    jitstd::allocator<void> m_alloc;
+    INDEBUG(void DumpStack(Stack* stack);)
 };
-

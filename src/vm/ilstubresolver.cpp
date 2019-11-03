@@ -56,14 +56,7 @@ LPCUTF8 ILStubResolver::GetStubClassName(MethodDesc* pMD)
     }
     CONTRACTL_END;
 
-    if (pMD->GetDomain()->IsSharedDomain())
-    {
-        return "DomainNeutralILStubClass";
-    }
-    else
-    {
-        return "DomainBoundILStubClass";
-    }
+    return "ILStubClass";
 }
 
 LPCUTF8 ILStubResolver::GetStubMethodName()
@@ -87,10 +80,13 @@ LPCUTF8 ILStubResolver::GetStubMethodName()
 #ifdef FEATURE_ARRAYSTUB_AS_IL
         case ArrayOpStub:            return "IL_STUB_Array";
 #endif
-#ifdef FEATURE_STUBS_AS_IL
+#ifdef FEATURE_MULTICASTSTUB_AS_IL
         case MulticastDelegateStub:  return "IL_STUB_MulticastDelegate_Invoke";
+#endif
+#ifdef FEATURE_STUBS_AS_IL
         case UnboxingILStub:         return "IL_STUB_UnboxingStub";
         case InstantiatingStub:      return "IL_STUB_InstantiatingStub";
+        case SecureDelegateStub:     return "IL_STUB_SecureDelegate_Invoke";
 #endif
         default:
             UNREACHABLE_MSG("Unknown stub type");
@@ -237,6 +233,11 @@ bool ILStubResolver::IsNativeToCLRInteropStub()
     return (m_type == NativeToCLRInteropStub);
 }
 
+bool ILStubResolver::IsCLRToNativeInteropStub()
+{
+    return (m_type == CLRToNativeInteropStub);
+}
+
 void ILStubResolver::SetStubType(ILStubType stubType)
 {
     LIMITED_METHOD_CONTRACT;
@@ -270,7 +271,7 @@ ILStubResolver::SetStubTargetMethodSig(
     }
     CONTRACTL_END;
 
-    NewHolder<BYTE> pNewSig = new BYTE[cbStubTargetSigLength];
+    NewArrayHolder<BYTE> pNewSig = new BYTE[cbStubTargetSigLength];
     
     memcpyNoGCRefs((void *)pNewSig, pStubTargetMethodSig, cbStubTargetSigLength);
     
@@ -298,7 +299,7 @@ ILStubResolver::ILStubResolver() :
     m_pStubMD(dac_cast<PTR_MethodDesc>(nullptr)),
     m_pStubTargetMD(dac_cast<PTR_MethodDesc>(nullptr)),
     m_type(Unassigned),
-    m_dwJitFlags(0)
+    m_jitFlags()
 {
     LIMITED_METHOD_CONTRACT;
     
@@ -317,9 +318,9 @@ ILStubResolver::AllocGeneratedIL(
 #if !defined(DACCESS_COMPILE)
     _ASSERTE(0 != cbCode);
 
-    NewHolder<BYTE>             pNewILCodeBuffer        = NULL;
-    NewHolder<BYTE>             pNewLocalSig            = NULL;
-    NewHolder<CompileTimeState> pNewCompileTimeState    = NULL;
+    NewArrayHolder<BYTE>             pNewILCodeBuffer        = NULL;
+    NewArrayHolder<BYTE>             pNewLocalSig            = NULL;
+    NewArrayHolder<CompileTimeState> pNewCompileTimeState    = NULL;
 
     pNewCompileTimeState = (CompileTimeState *)new BYTE[sizeof(CompileTimeState)];
     memset(pNewCompileTimeState, 0, sizeof(CompileTimeState));
@@ -396,7 +397,6 @@ COR_ILMETHOD_SECT_EH* ILStubResolver::AllocEHSect(size_t nClauses)
         return NULL;
     }
 }
-
 
 void ILStubResolver::FreeCompileTimeState()
 {
@@ -487,16 +487,16 @@ bool ILStubResolver::IsILGenerated()
     return (dac_cast<TADDR>(m_pCompileTimeState) != ILNotYetGenerated);
 }
 
-void ILStubResolver::SetJitFlags(DWORD dwFlags)
+void ILStubResolver::SetJitFlags(CORJIT_FLAGS jitFlags)
 {
     LIMITED_METHOD_CONTRACT;
-    m_dwJitFlags = dwFlags;
+    m_jitFlags = jitFlags;
 }
 
-DWORD ILStubResolver::GetJitFlags()
+CORJIT_FLAGS ILStubResolver::GetJitFlags()
 {
     LIMITED_METHOD_CONTRACT;
-    return m_dwJitFlags;
+    return m_jitFlags;
 }
 
 // static

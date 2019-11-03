@@ -2363,7 +2363,7 @@ typedef struct __F_ __F_;
 
 #ifdef  __cplusplus // [
 #ifndef __nothrow // [
-# define __nothrow __declspec(nothrow)
+# define __nothrow NOTHROW_DECL
 #endif // ]
 extern "C" {
 #else // ][
@@ -2604,6 +2604,7 @@ extern "C" {
 #ifndef PAL_STDCPP_COMPAT
     #define __null
     #define __notnull
+    #define __deref
 #endif // !PAL_STDCPP_COMPAT
     #define __maybenull
     #define __readonly
@@ -2618,7 +2619,6 @@ extern "C" {
     #define __writableTo(size)
     #define __elem_writableTo(size)
     #define __byte_writableTo(size)
-    #define __deref
     #define __pre
     #define __post
     #define __precond(expr)
@@ -2861,7 +2861,7 @@ of each annotation, see the advanced annotations section.
 #define __success(expr)                      _Success_(expr)
 #define __nullterminated                     _Null_terminated_
 #define __nullnullterminated
-#define __reserved                           _SAL1_Source_(__reserved, (), _Reserved_)
+#define __clr_reserved                       _SAL1_Source_(__reserved, (), _Reserved_)
 #define __checkReturn                        _SAL1_Source_(__checkReturn, (), _Check_return_)
 #define __typefix(ctype)                     _SAL1_Source_(__typefix, (ctype), __inner_typefix(ctype))
 #define __override                           __inner_override
@@ -2951,7 +2951,3 @@ __PRIMOP(int, _In_function_class_(__In_impl_ char*);)
 #ifdef  __cplusplus // [
 }
 #endif // ]
-
-// Rotor doesn't need concurrency sal.
-// #include <ConcurrencySal.h>
-

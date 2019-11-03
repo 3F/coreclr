@@ -196,45 +196,6 @@ static BOOL WriteOnlyMode(FILE* pFile)
 
 /*++
 Function:
-  _getw
-
-Gets an integer from a stream.
-
-Return Value
-
-_getw returns the integer value read. A return value of EOF indicates
-either an error or end of file. However, because the EOF value is also
-a legitimate integer value, use feof or ferror to verify an
-end-of-file or error condition.
-
-Parameter
-
-file  Pointer to FILE structure
-
---*/
-int
-__cdecl
-_getw(PAL_FILE *f)
-{
-    INT ret = 0;
-    
-    PERF_ENTRY(_getw);
-    ENTRY("_getw (f=%p)\n", f);
-
-    _ASSERTE(f != NULL);
-
-    CLEARERR(f);
-    
-    ret = getw( f->bsdFilePtr );
-    LOGEXIT( "returning %d\n", ret );
-    PERF_EXIT(_getw);
-    
-    return ret;
-}
-
-
-/*++
-Function:
   _fdopen
 
 see MSDN
@@ -448,45 +409,6 @@ _wfsopen(
 }
 
 /*++
-Function:
-  _putw
-
-Writes an integer to a stream.
-
-Return Value
-
-_putw returns the value written. A return value of EOF may indicate an
-error. Because EOF is also a legitimate integer value, use ferror to
-verify an error.
-
-Parameters
-
-c     Binary integer to be output
-file  Pointer to FILE structure
-
---*/
-int
-__cdecl
-_putw(int c, PAL_FILE *f)
-{
-    INT ret = 0;
-
-    PERF_ENTRY(_putw);
-    ENTRY("_putw (c=0x%x, f=%p)\n", c, f);
-
-    _ASSERTE(f != NULL);
-
-    CLEARERR(f);
- 
-    ret = putw(c,  f->bsdFilePtr );
-    LOGEXIT( "returning %d\n", ret );
-    PERF_EXIT(_putw);
-
-    return ret;
-}
-
-
-/*++
 Function
     PAL_get_stdout.
 
@@ -531,6 +453,18 @@ PAL_FILE * __cdecl PAL_get_stderr(int caller)
     return &PAL_Stderr;
 }
 
+/*++
+
+Function:
+
+    PAL_pread
+
+See msdn for more details.
+--*/
+size_t __cdecl PAL__pread(int fd, void *buf, size_t nbytes, ULONG64 offset)
+{
+    return pread(fd, buf, nbytes, offset);
+}
 
 /*++
 

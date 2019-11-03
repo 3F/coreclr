@@ -3,10 +3,11 @@
 // See the LICENSE file in the project root for more information.
 
 #include <xplatform.h>
+#include <platformdefines.h>
 
 const int NSTRINGS = 6;
 #ifdef _WIN32
-wchar_t  *utf8strings[] = { L"Managed",
+const wchar_t  *utf8strings[] = { L"Managed",
 L"S\x00EEne kl\x00E2wen durh die wolken sint geslagen" ,
 L"\x0915\x093E\x091A\x0902 \x0936\x0915\x094D\x0928\x094B\x092E\x094D\x092F\x0924\x094D\x0924\x0941\x092E\x094D \x0964 \x0928\x094B\x092A\x0939\x093F\x0928\x0938\x094D\x0924\x093F \x092E\x093E\x092E\x094D",
 L"\x6211\x80FD\x541E\x4E0B\x73BB\x7483\x800C\x4E0D\x4F24\x8EAB\x4F53",
@@ -17,12 +18,12 @@ L"\0"
 
 
 
-char* utf16_to_utf8(wchar_t *srcstring)
+char* utf16_to_utf8(const wchar_t *srcstring)
 {
     if ((srcstring == NULL) || (*srcstring == L'\0')) {
         return 0;
     }
-    size_t cchUTF16 = wcslen(srcstring) + 1;
+    size_t cchUTF16 = TP_slen(srcstring) + 1;
     int cbUTF8 = WideCharToMultiByte(CP_UTF8, 0,
         srcstring,
         (int)cchUTF16,
@@ -31,7 +32,7 @@ char* utf16_to_utf8(wchar_t *srcstring)
         NULL,
         NULL);
 
-    char *pszUTF8 = (char*)CoTaskMemAlloc(sizeof(char) * (cbUTF8 + 1));
+    char *pszUTF8 = (char*)CoreClrAlloc(sizeof(char) * (cbUTF8 + 1));
     int nc = WideCharToMultiByte(CP_UTF8, // convert to UTF-8
         0,       //default flags 
         srcstring, //source wide string
@@ -69,7 +70,7 @@ wchar_t* utf8_to_utf16(const char *utf8)
         0                   // request size of destination buffer, in wchar_t's
     );
 
-    wszTextUTF16 = (wchar_t*)(CoTaskMemAlloc((cbUTF16 + 1) * sizeof(wchar_t)));
+    wszTextUTF16 = (wchar_t*)(CoreClrAlloc((cbUTF16 + 1) * sizeof(wchar_t)));
     // Do the actual conversion from UTF-8 to UTF-16
     int nc = ::MultiByteToWideChar(
         CP_UTF8,            // convert from UTF-8
@@ -95,7 +96,7 @@ char *get_utf8_string(int index) {
 
 void free_utf8_string(char *str)
 {
-    CoTaskMemFree(str);
+    CoreClrFree(str);
 }
 
 #else //Not WIndows
@@ -128,7 +129,7 @@ LPSTR build_return_string(const char* pReturn)
         return ret;
 
     size_t strLength = strlen(pReturn);
-    ret = (LPSTR)(CoTaskMemAlloc(sizeof(char)* (strLength + 1)));
+    ret = (LPSTR)(CoreClrAlloc(sizeof(char)* (strLength + 1)));
     memset(ret, '\0', strLength + 1);
     strncpy_s(ret, strLength + 1, pReturn, strLength);
     return ret;
@@ -181,7 +182,7 @@ extern "C" DLL_EXPORT char* __cdecl  StringBuilderParameterReturn(int index)
 {
     char *pszTextutf8 = get_utf8_string(index);
     size_t strLength = strlen(pszTextutf8);
-    LPSTR ret = (LPSTR)(CoTaskMemAlloc(sizeof(char)* (strLength + 1)));
+    LPSTR ret = (LPSTR)(CoreClrAlloc(sizeof(char)* (strLength + 1)));
     memcpy(ret, pszTextutf8, strLength);
     ret[strLength] = '\0';
     free_utf8_string(pszTextutf8);
@@ -209,7 +210,7 @@ typedef struct FieldWithUtf8
 }FieldWithUtf8;
 
 //utf8 struct field
-extern "C" DLL_EXPORT void _cdecl TestStructWithUtf8Field(struct FieldWithUtf8 fieldStruct)
+extern "C" DLL_EXPORT void __cdecl TestStructWithUtf8Field(struct FieldWithUtf8 fieldStruct)
 {
     char *pszManagedutf8 = fieldStruct.pFirst;
     int stringIndex = fieldStruct.index;
@@ -233,12 +234,22 @@ extern "C" DLL_EXPORT void _cdecl TestStructWithUtf8Field(struct FieldWithUtf8 f
     free_utf8_string(pszNative);
 }
 
+extern "C" DLL_EXPORT void __cdecl SetStringInStruct(FieldWithUtf8* fieldStruct, char* str)
+{
+    size_t strLength = strlen(str);
+    char* strCopy = (char*)CoreClrAlloc(sizeof(char) * strlen(str) + 1);
+
+    memcpy(strCopy, str, strLength + 1);
+    fieldStruct->pFirst = strCopy;
+    fieldStruct->index = 0;
+}
+
 // test c# out keyword
 extern "C" DLL_EXPORT void __cdecl StringParameterRefOut(/*out*/ char **s, int index)
 {
     char *pszTextutf8 = get_utf8_string(index);
     size_t strLength = strlen(pszTextutf8);
-     *s = (LPSTR)(CoTaskMemAlloc(sizeof(char)* (strLength + 1)));
+     *s = (LPSTR)(CoreClrAlloc(sizeof(char)* (strLength + 1)));
     memcpy(*s, pszTextutf8, strLength);
     (*s)[strLength] = '\0';
     free_utf8_string(pszTextutf8);
@@ -262,10 +273,10 @@ extern "C" DLL_EXPORT void __cdecl StringParameterRef(/*ref*/ char **s, int inde
 
     if (*s)
     {
-       CoTaskMemFree(*s);
+       CoreClrFree(*s);
     }
     // overwrite the orginal 
-    *s = (LPSTR)(CoTaskMemAlloc(sizeof(char)* (strLength + 1)));
+    *s = (LPSTR)(CoreClrAlloc(sizeof(char)* (strLength + 1)));
     memcpy(*s, pszTextutf8, strLength);
     (*s)[strLength] = '\0';
     free_utf8_string(pszTextutf8);
@@ -273,7 +284,7 @@ extern "C" DLL_EXPORT void __cdecl StringParameterRef(/*ref*/ char **s, int inde
 
 // delegate test
 typedef void (__cdecl * Callback)(char *text, int index);
-extern "C" DLL_EXPORT void _cdecl Utf8DelegateAsParameter(Callback managedCallback)
+extern "C" DLL_EXPORT void __cdecl Utf8DelegateAsParameter(Callback managedCallback)
 {
     for (int i = 0; i < NSTRINGS; ++i) 
     {        

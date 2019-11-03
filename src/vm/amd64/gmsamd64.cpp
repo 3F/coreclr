@@ -19,7 +19,6 @@ void LazyMachState::unwindLazyState(LazyMachState* baseState,
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END;
@@ -62,7 +61,12 @@ void LazyMachState::unwindLazyState(LazyMachState* baseState,
             DacError(hr);
         }
 #else
-        PAL_VirtualUnwind(&ctx, &nonVolRegPtrs);
+        BOOL success = PAL_VirtualUnwind(&ctx, &nonVolRegPtrs);
+        if (!success)
+        {
+            _ASSERTE(!"unwindLazyState: Unwinding failed");
+            EEPOLICY_HANDLE_FATAL_ERROR(COR_E_EXECUTIONENGINE);
+        }
 #endif  // DACCESS_COMPILE    
 
         pvControlPc = GetIP(&ctx);
@@ -121,6 +125,11 @@ void LazyMachState::unwindLazyState(LazyMachState* baseState,
 
     // For DAC, we have to update the registers directly, since we don't have context pointers.
 #define CALLEE_SAVED_REGISTER(regname) unwoundState->m_Capture.regname = ctx.regname;
+    ENUM_CALLEE_SAVED_REGISTERS();
+#undef CALLEE_SAVED_REGISTER
+
+    // Since we don't have context pointers in this case, just assing them to NULL.
+#define CALLEE_SAVED_REGISTER(regname) unwoundState->m_Ptrs.p##regname = NULL;
     ENUM_CALLEE_SAVED_REGISTERS();
 #undef CALLEE_SAVED_REGISTER
 

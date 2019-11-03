@@ -73,6 +73,7 @@ static_assert_no_msg((sizeof(callReasons)/sizeof(callReasons[0])) == CORINFO_IND
 ZapperStats::ZapperStats()
     : m_methods( 0 )
     , m_failedMethods( 0 )
+    , m_failedILStubs( 0 )
     , m_ilCodeSize( 0 )
     , m_nativeCodeSize( 0 )
     , m_nativeColdCodeSize( 0 )
@@ -90,6 +91,9 @@ ZapperStats::ZapperStats()
     , m_nativeColdCodeSizeInSplitProfiledMethods( 0 )
     , m_nativeCodeSizeInProfiledMethods( 0 )
     , m_nativeColdCodeSizeInProfiledMethods( 0 )
+    , m_totalHotCodeSize( 0 )
+    , m_totalUnprofiledCodeSize( 0 )
+    , m_totalColdCodeSize( 0 )
     , m_totalCodeSizeInProfiledMethods( 0 )
     , m_totalColdCodeSizeInProfiledMethods( 0 )
     , m_inputFileSize( 0 )
@@ -103,7 +107,6 @@ ZapperStats::ZapperStats()
     , m_helperTableSize( 0 )
     , m_dynamicInfoTableSize( 0 )
     , m_dynamicInfoDelayListSize( 0 )
-    , m_importTableSize( 0 )
     , m_debuggingTableSize( 0 )
     , m_headerSectionSize( 0 )
     , m_codeSectionSize( 0 )
@@ -152,8 +155,7 @@ void ZapperStats::PrintStats()
           m_dynamicInfoDelayListSize +
           m_eeInfoTableSize +
           m_helperTableSize +
-          m_dynamicInfoTableSize +
-          m_importTableSize;
+          m_dynamicInfoTableSize;
 
         GetSvcLogger()->Printf( "Indirections:               %8d\t%8.2f%%\n",
                 totalIndirections, (double)totalIndirections/m_outputFileSize*100);

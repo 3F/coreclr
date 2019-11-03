@@ -9,15 +9,21 @@
 //     DataFlow flow(m_pCompiler);
 //     flow.ForwardAnalysis(callback);
 //
-//  The "callback" object needs to implement the necessary callback
-//  functions that  the "flow" object will call as the data flow
-//  analysis progresses.
+//  The "callback" object needs to implement the following member
+//  functions that the "flow" object will call as the data flow
+//  analysis progresses:
 //
+//  class Callback
+//  {
+//  public:
+//      void StartMerge(BasicBlock* block);
+//      void Merge(BasicBlock* block, BasicBlock* pred, flowList* preds);
+//      bool EndMerge(BasicBlock* block);
+//  };
 #pragma once
 
 #include "compiler.h"
 #include "jitstd.h"
-
 
 class DataFlow
 {
@@ -25,21 +31,6 @@ private:
     DataFlow();
 
 public:
-    // The callback interface that needs to be implemented by anyone
-    // needing updates by the dataflow object.
-    class Callback
-    {
-    public:
-        Callback(Compiler* pCompiler);
-
-        void StartMerge(BasicBlock* block);
-        void Merge(BasicBlock* block, BasicBlock* pred, flowList* preds);
-        bool EndMerge(BasicBlock* block);
-
-    private:
-        Compiler* m_pCompiler;
-    };
-
     DataFlow(Compiler* pCompiler);
 
     template <typename TCallback>
@@ -71,13 +62,10 @@ void DataFlow::ForwardAnalysis(TCallback& callback)
 
         if (callback.EndMerge(block))
         {
-            AllSuccessorIter succsBegin = block->GetAllSuccs(m_pCompiler).begin();
-            AllSuccessorIter succsEnd = block->GetAllSuccs(m_pCompiler).end(); 
-            for (AllSuccessorIter succ = succsBegin; succ != succsEnd; ++succ)
+            for (BasicBlock* succ : block->GetAllSuccs(m_pCompiler))
             {
-                worklist.insert(worklist.end(), *succ);
+                worklist.insert(worklist.end(), succ);
             }
         }
     }
 }
-

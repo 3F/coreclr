@@ -5,214 +5,109 @@
 #ifndef __XPLAT_H__
 #define __XPLAT_H__
 
-#ifdef _MSC_VER
-// Our tests don't care about secure CRT
-#define _CRT_SECURE_NO_WARNINGS 1
-#endif
+#include <platformdefines.h>
 
-// common headers
-#include <stdio.h>
-#include <memory.h>
-#include <stdlib.h>
+#ifndef WINDOWS
 
-// This macro is used to standardize the wide character string literals between UNIX and Windows.
-// Unix L"" is UTF32, and on windows it's UTF16.  Because of built-in assumptions on the size
-// of string literals, it's important to match behaviour between Unix and Windows.  Unix will be defined
-// as u"" (char16_t)
-#ifdef _WIN32
-#define W(str)  L##str
-#else // !_WIN32
-#define W(str)  u##str
-#endif //_WIN32
+#include <stddef.h>
 
+#undef INT_MIN
+#define INT_MIN	   (-2147483647 - 1)
 
-//  include 
-#ifdef _WIN32
-	#include <windows.h>
-	#include <tchar.h>
-#else
-	#include "types.h"
-#endif
-#include <wchar.h>
+typedef ptrdiff_t INT_PTR;
+typedef size_t UINT_PTR;
 
+typedef unsigned long long ULONG64;
+typedef long long LONG64;
+typedef double DOUBLE;
+typedef float FLOAT;
+typedef int INT, *LPINT;
+typedef unsigned int UINT;
+typedef char CHAR, *PCHAR;
+typedef unsigned short USHORT;
+typedef signed short SHORT;
+typedef unsigned short WORD, *PWORD, *LPWORD;
+typedef int LONG;
 
-// dllexport
-#if defined _WIN32
-#define DLL_EXPORT __declspec(dllexport)
-
-#ifndef snprintf
-#define snprintf _snprintf
-#endif //snprintf
-
-#else //!_Win32
-#if __GNUC__ >= 4    
-#define DLL_EXPORT __attribute__ ((visibility ("default")))
-#else
-#define DLL_EXPORT
-#endif
-
-#endif //_WIN32
-
-#ifndef WINAPI
-#define WINAPI __stdcall
-#endif
-
-#ifndef _MSC_VER
-#if __i386__
-#define __stdcall __attribute__((stdcall))
-#define _cdecl __attribute__((cdecl))
-#define __cdecl __attribute__((cdecl))
-#else
-#define __stdcall
-#define _cdecl
-#define __cdecl
-#endif
-#endif
-
-
-
-
-
-// Ensure that both UNICODE and _UNICODE are set.
-#ifdef UNICODE
-#ifndef _UNICODE
-#define _UNICODE
-#endif
-#else
-#ifdef _UNICODE
-#define UNICODE
-#endif
-#endif
-
-
-// redirected functions
-#ifdef UNICODE
-#define _tcslen	wcslen
-#define _tcsncmp wcsncmp
-#else
-#define _tcslen strlen
-#define _tcsncmp strncmp
-#endif // UNICODE
-
-
-
-// redirected types not-windows only
-#ifndef  _WIN32
+typedef size_t SIZE_T;
 
 typedef union tagCY {
-	struct {
-		unsigned long Lo;
-		long          Hi;
-	};
-	long int64;
-} CY, CURRENCY;
+    struct {
+#if BIGENDIAN
+        LONG    Hi;
+        LONG   Lo;
+#else
+        LONG   Lo;
+        LONG    Hi;
+#endif
+    };
+    LONG64 int64;
+} CY, *LPCY;
 
+typedef CY CURRENCY;
+
+typedef struct tagDEC {
+    // Decimal.cs treats the first two shorts as one long
+    // And they seriable the data so we need to little endian
+    // seriliazation
+    // The wReserved overlaps with Variant's vt member
+#if BIGENDIAN
+    union {
+        struct {
+            BYTE sign;
+            BYTE scale;
+        };
+        USHORT signscale;
+    };
+    USHORT wReserved;
+#else
+    USHORT wReserved;
+    union {
+        struct {
+            BYTE scale;
+            BYTE sign;
+        };
+        USHORT signscale;
+    };
+#endif
+    LONG Hi32;
+    union {
+        struct {
+            LONG Lo32;
+            LONG Mid32;
+        };
+        ULONG64 Lo64;
+    };
+} DECIMAL, *LPDECIMAL;
+
+
+#ifndef TRUE
+#define TRUE 1
+#endif
+
+#ifndef FALSE
+#define FALSE 0
+#endif
 
 class IUnknown
 {
 public:
-  virtual int  QueryInterface(void* riid,void** ppvObject);
-  virtual unsigned long  AddRef();
-  virtual unsigned long  Release();
+    virtual int QueryInterface(void* riid,void** ppvObject) = 0;
+    virtual unsigned long AddRef() = 0;
+    virtual unsigned long Release() = 0;
 };
 
-#define CoTaskMemAlloc(p) malloc(p)
-#define CoTaskMemFree(p) free(p)
+#define DECIMAL_NEG ((BYTE)0x80)
+#define DECIMAL_SCALE(dec)       ((dec).u.u.scale)
+#define DECIMAL_SIGN(dec)        ((dec).u.u.sign)
+#define DECIMAL_SIGNSCALE(dec)   ((dec).u.signscale)
+#define DECIMAL_LO32(dec)        ((dec).v.v.Lo32)
+#define DECIMAL_MID32(dec)       ((dec).v.v.Mid32)
+#define DECIMAL_HI32(dec)        ((dec).Hi32)
+#define DECIMAL_LO64_GET(dec)    ((dec).v.Lo64)
+#define DECIMAL_LO64_SET(dec,value)   {(dec).v.Lo64 = value; }
 
-// function implementation
-size_t strncpy_s(char* strDest, size_t numberOfElements, const char *strSource, size_t count)
-{
-    // NOTE: Need to pass count + 1 since strncpy_s does not count null,
-    // while snprintf does. 
-	return snprintf(strDest, count + 1, "%s", strSource);
-}
-
-size_t strcpy_s(char *dest, size_t n, char const *src)
-{
-	return snprintf(dest, n, "%s", src);
-}
-
-void SysFreeString(char* str)
-{
-	free(str);
-}
-
-
-char* SysAllocString( const char* str)
-{
-	size_t nz = strlen(str);
-	char *cArr = (char*) malloc(nz);
-	memcpy(cArr, str, nz);
-	return cArr;
-}
-
-
-size_t wcslen(const WCHAR *str)
-{
-	int len;
-	if (!str) return 0;
-	len = 0;
-	while ('\0' != *(str + len)) len++;
-	return len;
-}
-
-WCHAR* SysAllocString(const WCHAR* str)
-{
-	size_t nz = wcslen(str);
-	nz *= 2;
-	WCHAR *cArr = (WCHAR*)malloc(nz);
-	memcpy(cArr, str, nz);
-	return cArr;
-}
-
-
-
-int wcsncpy_s(LPWSTR strDestination, size_t size1, LPCWSTR strSource, size_t size2)
-{
-	int cnt;
-	// copy sizeInBytes bytes of strSource into strDestination
-	if (NULL == strDestination || NULL == strSource) return 1;
-
-	cnt = 0;
-	while (cnt < size1 && '\0' != strSource[cnt])
-	{
-		strDestination[cnt] = strSource[cnt];
-		cnt++;
-	}
-	strDestination[cnt] = '\0';
-	return 0;
-}
-
-int wcsncpy_s(LPWSTR strDestination, size_t size1, LPCWSTR strSource)
-{
-	return wcsncpy_s(strDestination, size1, strSource, 0);
-
-}
-
-int wmemcmp(LPWSTR str1, LPWSTR str2,size_t len)
-{
-	// < 0 str1 less than str2
-	// 0  str1 identical to str2
-	// > 0 str1 greater than str2
-
-	if (NULL == str1 && NULL != str2) return -1;
-	if (NULL != str1 && NULL == str2) return 1;
-	if (NULL == str1 && NULL == str2) return 0;
-
-	while (*str1 == *str2 && '\0' != *str1 && '\0' != *str2 && len--!= 0)
-	{
-		str1++;
-		str2++;
-	}
-
-	if ('\0' == *str1 && '\0' == *str2) return 0;
-
-	if ('\0' != *str1) return -1;
-	if ('\0' != *str2) return 1;
-
-	return (*str1 > *str2) ? 1 : -1;
-}
-
+#define DECIMAL_SETZERO(dec) {DECIMAL_LO32(dec) = 0; DECIMAL_MID32(dec) = 0; DECIMAL_HI32(dec) = 0; DECIMAL_SIGNSCALE(dec) = 0;}
 
 #endif //!_Win32
 

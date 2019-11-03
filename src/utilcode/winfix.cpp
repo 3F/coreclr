@@ -52,7 +52,7 @@ static BOOL gWinWrapperContractRecursionBreak = FALSE;
 class WinWrapperContract
 {
     public:
-        WinWrapperContract(char *szFunction, char *szFile, int lineNum)
+        WinWrapperContract(const char *szFunction, const char *szFile, int lineNum)
         {
             CANNOT_HAVE_CONTRACT;
 
@@ -199,7 +199,6 @@ void EnsureCharSetInfoInitialized()
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_FORBID_FAULT;
     STATIC_CONTRACT_CANNOT_TAKE_LOCK;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     if (!g_fEnsureCharSetInfoInitialized)
     {
@@ -253,270 +252,44 @@ BOOL RunningInteractive()
     return fInteractive != 0;
 }
 
+typedef HRESULT(WINAPI *pfnSetThreadDescription)(HANDLE hThread, PCWSTR lpThreadDescription);
+extern pfnSetThreadDescription g_pfnSetThreadDescription;
 
-// Wrapper function around CheckTokenMembership to determine if the token enables the SID "S-1-5-<rid>".
-// If hToken is NULL, this function uses the thread's impersonation token. If the thread is not impersonating, the 
-// process token is used.
-//
-// If the function succeeds, it returns ERROR_SUCCESS, else it returns the error code returned by GetLastError()
-static DWORD TokenEnablesSID(IN HANDLE hToken OPTIONAL, IN DWORD rid, OUT BOOL& fResult)
+// Dummy method if windows version does not support it
+HRESULT SetThreadDescriptionDummy(HANDLE hThread, PCWSTR lpThreadDescription)
 {
-    DWORD dwError;
-    SID_IDENTIFIER_AUTHORITY SIDAuthNT = SECURITY_NT_AUTHORITY;
-    PSID pSid = NULL;
-    HMODULE hAdvApi32 = NULL;
-    typedef BOOL (WINAPI *CheckTokenMembership_t)(HANDLE TokenHandle, PSID SidToCheck, PBOOL IsMember);
-    CheckTokenMembership_t pfnCheckTokenMembership = NULL;
-
-    hAdvApi32 = WszGetModuleHandle(W("advapi32.dll"));
-    if (hAdvApi32 == NULL)
-    {
-        dwError = ERROR_MOD_NOT_FOUND;
-        goto lExit;
-    }
-    pfnCheckTokenMembership = (CheckTokenMembership_t) GetProcAddress(hAdvApi32, "CheckTokenMembership");
-    if (pfnCheckTokenMembership == NULL)
-    {
-        dwError = GetLastError();
-        goto lExit;
-    }
-
-    fResult = FALSE;
-    if (!AllocateAndInitializeSid(&SIDAuthNT, 1, rid, 0, 0, 0, 0, 0, 0, 0, &pSid))
-    {
-        dwError = GetLastError();
-        goto lExit;
-    }
-    if (!pfnCheckTokenMembership(hToken, pSid, &fResult))
-    {
-        dwError = GetLastError();
-        goto lExit;
-    }
-    dwError = ERROR_SUCCESS;
-
-lExit:
-    if (pSid) FreeSid(pSid);
-    return dwError;
-    
+    return NOERROR;
 }
 
-// Determines if the process is running as Local System or as a service. Note that
-// the function attempts to determine the process' identity and not the thread's 
-// (if the thread is impersonating).
-//
-// Parameters:
-//    fIsLocalSystemOrService - TRUE if the function succeeds and the process is
-//                              running as SYSTEM or as a service
-//
-// Return value:
-//
-// If the function succeeds, it returns ERROR_SUCCESS, else it returns the error
-// code returned by GetLastError()
-//
-// Notes:
-// 
-// This function will generally fail if the calling thread is impersonating at the 
-// ANONYMOUS level; see the comments in the function.
-//
-DWORD RunningAsLocalSystemOrService(OUT BOOL& fIsLocalSystemOrService)
+HRESULT WINAPI InitializeSetThreadDescription(HANDLE hThread, PCWSTR lpThreadDescription)
 {
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_FORBID_FAULT;
+    HMODULE hKernel32 = WszLoadLibrary(W("kernel32.dll"));
 
-    static int fLocalSystemOrService = -1;
-    if (fLocalSystemOrService != -1)
+    pfnSetThreadDescription pLocal = NULL; 
+    if (hKernel32 != NULL)
     {
-        fIsLocalSystemOrService = fLocalSystemOrService != 0;
-        return ERROR_SUCCESS;
-    }
-
-    DWORD dwError;
-    HANDLE hThreadToken = NULL;
-    HANDLE hProcessToken = NULL;
-    HANDLE hDuplicatedProcessToken = NULL;
-    BOOL fLocalSystem = FALSE;
-    BOOL fService = FALSE;
-    BOOL bReverted = FALSE;
-
-    if (OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, TRUE, &hThreadToken))
-    {
-        if (RevertToSelf())
-        {
-            bReverted = TRUE;
-        }
-#ifdef _DEBUG
-        else
-        {
-            // For debugging only, continue as the impersonated user; see comment below
-            dwError = GetLastError();
-        }
-#endif // #ifdef _DEBUG
-    }
-#ifdef _DEBUG
-    else
-    {
-        dwError = GetLastError();
-        if (dwError == ERROR_NO_IMPERSONATION_TOKEN || dwError == ERROR_NO_TOKEN)
-        {
-            // The thread is not impersonating; it's safe to continue
-        }
-        else
-        {
-            // The thread could be impersonating, but we won't be able to restore the impersonation
-            // token if we RevertToSelf(). Continue as the impersonated user. OpenProcessToken will
-            // fail (unless the impersonated user is SYSTEM or the same as the process' user).
-            //
-            // Note that this case will occur if the impersonation level is ANONYMOUS, the error
-            // code will be ERROR_CANT_OPEN_ANONYMOUS. 
-        }
-    }
-#endif // #ifdef _DEBUG
-
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE, &hProcessToken))
-    {
-        dwError = GetLastError();
-        goto lExit;
-    }
-        
-    if (!DuplicateToken(hProcessToken, SecurityImpersonation, &hDuplicatedProcessToken))
-    {
-        dwError = GetLastError();
-        goto lExit;
+        // store to thread local variable to prevent data race
+        pLocal = (pfnSetThreadDescription)GetProcAddress(hKernel32, "SetThreadDescription");
     }
 
-    dwError = TokenEnablesSID(hDuplicatedProcessToken, SECURITY_LOCAL_SYSTEM_RID, fLocalSystem);
-    if (dwError != ERROR_SUCCESS)
+    if (pLocal == NULL) // method is only available with Windows 10 Creators Update or later
     {
-        goto lExit;
-    }
-    if (fLocalSystem)
-    {
-        goto lExit;
-    }
-
-    dwError = TokenEnablesSID(hDuplicatedProcessToken, SECURITY_SERVICE_RID, fService);
-    
-lExit:
-    if (bReverted)
-    {
-        if (!SetThreadToken(NULL, hThreadToken))
-        {
-            DWORD dwLastError = GetLastError();
-            _ASSERT("SetThreadToken failed");
-
-            TerminateProcess(GetCurrentProcess(), dwLastError);
-        }
-    }
-    
-    if (hThreadToken) CloseHandle(hThreadToken);
-    if (hProcessToken) CloseHandle(hProcessToken);
-    if (hDuplicatedProcessToken) CloseHandle(hDuplicatedProcessToken);
-    
-    if (dwError != ERROR_SUCCESS)
-    {
-        fIsLocalSystemOrService = FALSE; // We don't really know
+        g_pfnSetThreadDescription = SetThreadDescriptionDummy;
     }
     else
     {
-        fLocalSystemOrService = (fLocalSystem || fService)? 1 : 0;
-        fIsLocalSystemOrService = fLocalSystemOrService != 0;
+        g_pfnSetThreadDescription = pLocal;
     }
-        
-    return dwError;
-    
+
+    return g_pfnSetThreadDescription(hThread, lpThreadDescription);
 }
 
+pfnSetThreadDescription g_pfnSetThreadDescription = &InitializeSetThreadDescription;
 
-DWORD
-WszGetWorkingSet()
+// Set unmanaged thread name which will show up in ETW and Debuggers which know how to read this data.
+HRESULT SetThreadName(HANDLE hThread, PCWSTR lpThreadDescription)
 {
-    WINWRAPPER_NO_CONTRACT(SetLastError(ERROR_OUTOFMEMORY); return 0;);
-
-    DWORD dwMemUsage = 0;
-
-    // Consider also calling GetProcessWorkingSetSize to get the min & max working
-    // set size.  I don't know how to get the current working set though...
-    PROCESS_MEMORY_COUNTERS pmc;
-
-    HINSTANCE hPSapi;
-    typedef BOOL (GET_PROCESS_MEMORY_INFO)(HANDLE, PROCESS_MEMORY_COUNTERS*, DWORD);
-    GET_PROCESS_MEMORY_INFO* pGetProcessMemoryInfo;
-
-    hPSapi = WszLoadLibrary(W("psapi.dll"));
-    if (hPSapi == NULL) {
-        _ASSERTE(0);
-        return 0;
-    }
-
-    pGetProcessMemoryInfo =
-        (GET_PROCESS_MEMORY_INFO*)GetProcAddress(hPSapi, "GetProcessMemoryInfo");
-    // 403746: Prefix correctly complained about
-    // pGetProcessMemoryInfo != NULL assertion.
-    if (pGetProcessMemoryInfo == NULL) {
-        _ASSERTE(0);
-        FreeLibrary(hPSapi);
-        return 0;
-    }
-    PREFIX_ASSUME(pGetProcessMemoryInfo != NULL);
-
-    BOOL r = pGetProcessMemoryInfo(GetCurrentProcess(), &pmc, (DWORD) sizeof(PROCESS_MEMORY_COUNTERS));
-    FreeLibrary(hPSapi);
-    _ASSERTE(r);
-
-    dwMemUsage = (DWORD)pmc.WorkingSetSize;
-
-    return dwMemUsage;
-}
-
-
-SIZE_T
-WszGetPagefileUsage()
-{
-    WINWRAPPER_NO_CONTRACT(SetLastError(ERROR_OUTOFMEMORY); return 0;);
-
-    SIZE_T dwPagefileUsage = 0;
-
-    typedef BOOL (WINAPI FnGetProcessMemoryInfo)(HANDLE, PROCESS_MEMORY_COUNTERS *, DWORD);
-
-    HMODULE hPSApi = WszLoadLibrary(W("Psapi.dll"));
-    if (hPSApi== NULL)
-    {
-        return 0;
-    }
-
-    FnGetProcessMemoryInfo *pfnGetProcessMemoryInfo = reinterpret_cast<FnGetProcessMemoryInfo *>(
-        GetProcAddress(hPSApi, "GetProcessMemoryInfo"));
-
-    if (pfnGetProcessMemoryInfo != NULL)
-    {
-        PROCESS_MEMORY_COUNTERS pmc;
-        ZeroMemory(&pmc, sizeof(pmc));
-
-        if (pfnGetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
-        {
-            dwPagefileUsage = pmc.PagefileUsage;
-        }
-    }
-
-    FreeLibrary(hPSApi);
-    hPSApi = NULL;
-
-    return dwPagefileUsage;
-}
-
-DWORD
-WszGetProcessHandleCount()
-{
-    WINWRAPPER_NO_CONTRACT(SetLastError(ERROR_OUTOFMEMORY); return 0;);
-
-    DWORD dwHandleCount = 0;
-
-    if (!GetProcessHandleCount(GetCurrentProcess(), &dwHandleCount))
-    {
-        dwHandleCount = 0;
-    }
-
-    return dwHandleCount;
+    return g_pfnSetThreadDescription(hThread, lpThreadDescription);
 }
 
 #endif //!FEATURE_PAL

@@ -18,11 +18,11 @@
 #include "typestring.h"
 #include "debugdebugger.h"
 
+#include <configuration.h>
+
 #include "../dlls/mscorrc/resource.h"
 
-#if defined(FEATURE_CORECLR)
 #include "getproductversionnumber.h"
-#endif // FEATURE_CORECLR
 
 //---------------------------------------------------------------------------------------
 //
@@ -66,7 +66,7 @@ EventReporter::EventReporter(EventReporterType type)
     {
         // If app name has a '\', consider the part after that; otherwise consider whole name.
         LPCWSTR appName =  wcsrchr(appPath, W('\\'));
-        appName = appName ? appName+1 : appPath;
+        appName = appName ? appName+1 : (LPCWSTR)appPath;
         m_Description.Append(appName);
         m_Description.Append(W("\n"));
     }
@@ -84,30 +84,13 @@ EventReporter::EventReporter(EventReporterType type)
 
     ssMessage.Clear();
     if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_FRAMEWORK_VERSION))
-#ifndef FEATURE_CORECLR
-        m_Description.Append(W("Framework Version: "));
-#else // FEATURE_CORECLR
         m_Description.Append(W("CoreCLR Version: "));
-#endif // !FEATURE_CORECLR
     else
     {
         m_Description.Append(ssMessage);
     }
 
     BOOL fHasVersion = FALSE;
-#ifndef FEATURE_CORECLR
-    if (GetCLRModule() != NULL)
-    {
-        WCHAR buffer[80];
-        DWORD length;
-        if (SUCCEEDED(GetCORVersionInternal(buffer, 80, &length)))
-        {
-            m_Description.Append(buffer);
-            m_Description.Append(W("\n"));
-            fHasVersion = TRUE;
-        }
-    }
-#else // FEATURE_CORECLR
     DWORD dwMajorVersion = 0;
     DWORD dwMinorVersion = 0;
     DWORD dwBuild = 0;
@@ -115,7 +98,6 @@ EventReporter::EventReporter(EventReporterType type)
     EventReporter::GetCoreCLRInstanceProductVersion(&dwMajorVersion, &dwMinorVersion, &dwBuild, &dwRevision);
     m_Description.AppendPrintf(W("%lu.%lu.%lu.%lu\n"),dwMajorVersion, dwMinorVersion, dwBuild, dwRevision);
     fHasVersion = TRUE;
-#endif // !FEATURE_CORECLR
 
     if (!fHasVersion)
     {
@@ -126,7 +108,16 @@ EventReporter::EventReporter(EventReporterType type)
         {
             m_Description.Append(ssMessage);
             m_Description.Append(W("\n"));
-        }        
+        }
+    }
+
+    // Log the .NET Core Version if we can get it
+    LPCWSTR fxProductVersion = Configuration::GetKnobStringValue(W("FX_PRODUCT_VERSION"));
+    if (fxProductVersion != nullptr)
+    {
+        m_Description.Append(W(".NET Core Version: "));
+        m_Description.Append(fxProductVersion);
+        m_Description.Append(W("\n"));
     }
 
     ssMessage.Clear();
@@ -144,7 +135,7 @@ EventReporter::EventReporter(EventReporterType type)
 
     case ERT_ManagedFailFast:
         if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_MANAGEDFAILFAST))
-            m_Description.Append(W("Description: The application requested process termination through System.Environment.FailFast(string message)."));
+            m_Description.Append(W("Description: The application requested process termination through Environment.FailFast."));
         else
         {
             m_Description.Append(ssMessage);
@@ -154,7 +145,7 @@ EventReporter::EventReporter(EventReporterType type)
 
     case ERT_UnmanagedFailFast:
         if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_UNMANAGEDFAILFAST))
-            m_Description.Append(W("Description: The process was terminated due to an internal error in the .NET Runtime "));
+            m_Description.Append(W("Description: The process was terminated due to an internal error in the .NET Runtime."));
         else
         {
             m_Description.Append(ssMessage);
@@ -164,7 +155,7 @@ EventReporter::EventReporter(EventReporterType type)
     case ERT_StackOverflow:
         // Fetch the localized Stack Overflow Error text or fall back on a hardcoded variant if things get dire.
         if(!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_STACK_OVERFLOW))
-            m_Description.Append(W("Description: The process was terminated due to stack overflow."));
+            m_Description.Append(W("Description: The process was terminated due to a stack overflow."));
         else
         {
             m_Description.Append(ssMessage);
@@ -205,7 +196,6 @@ void EventReporter::AddDescription(__in WCHAR *pString)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -229,7 +219,6 @@ void EventReporter::AddDescription(SString& s)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -285,7 +274,6 @@ void EventReporter::BeginStackTrace()
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -361,6 +349,40 @@ void EventReporter::AddStackTrace(SString& s)
             fBufferFull = TRUE;
         }
     }
+}
+
+//---------------------------------------------------------------------------------------
+//
+// Add the stack trace of exception passed to managed FailFast call (Environment.FailFast()) to Event Log
+//
+// Arguments:
+//    s       - String representation of the stack trace of argument exception
+//
+// Return Value:
+//    None.
+//
+void EventReporter::AddFailFastStackTrace(SString& s)
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_NOTRIGGER;
+        MODE_ANY;
+    }
+    CONTRACTL_END;
+
+    _ASSERTE(m_eventType == ERT_ManagedFailFast);
+    InlineSString<80> ssMessage;
+    if (!ssMessage.LoadResource(CCompRC::Optional, IDS_ER_UNHANDLEDEXCEPTION))
+    {
+        m_Description.Append(W("Exception stack:\n"));
+    }
+    else
+    {
+        m_Description.Append(ssMessage);
+    }
+    m_Description.Append(s);
+    m_Description.Append(W("\n"));
 }
 
 //---------------------------------------------------------------------------------------
@@ -468,7 +490,6 @@ BOOL ShouldLogInEventLog()
     }
     CONTRACTL_END;
 
-#ifndef FEATURE_CORESYSTEM
     // If the process is being debugged, don't log
     if ((CORDebuggerAttached() || IsDebuggerPresent())
 #ifdef _DEBUG
@@ -491,10 +512,6 @@ BOOL ShouldLogInEventLog()
         return FALSE;
     else
         return TRUE;
-#else
-    // no event log on Apollo
-    return FALSE;
-#endif //!FEATURE_CORESYSTEM
 }
 
 //---------------------------------------------------------------------------------------
@@ -523,7 +540,6 @@ StackWalkAction LogCallstackForEventReporterCallback(
     {
         THROWS;
         GC_TRIGGERS;
-        SO_INTOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -665,7 +681,7 @@ void ReportExceptionStackHelper(OBJECTREF exObj, EventReporter& reporter, SmallS
 
 //---------------------------------------------------------------------------------------
 //
-// Generate an EventLog entry for unhandled exception.
+// Generate an EventLog entry for unhandled exceptions that are not sent to DefaultCatchHandler.
 //
 // Arguments:
 //    pExceptionInfo - Exception information
@@ -673,10 +689,10 @@ void ReportExceptionStackHelper(OBJECTREF exObj, EventReporter& reporter, SmallS
 // Return Value:
 //    None
 //
-void DoReportForUnhandledException(PEXCEPTION_POINTERS pExceptionInfo)
+void DoReportForUnhandledNativeException(PEXCEPTION_POINTERS pExceptionInfo)
 {
     WRAPPER_NO_CONTRACT;
-    
+
     if (ShouldLogInEventLog())
     {
         Thread *pThread = GetThread();
@@ -684,109 +700,21 @@ void DoReportForUnhandledException(PEXCEPTION_POINTERS pExceptionInfo)
         EX_TRY
         {
             StackSString s;
-            if (pThread && pThread->HasException() != NULL)
-            {
-                GCX_COOP();
-                struct
-                {
-                    OBJECTREF throwable;
-                    STRINGREF originalExceptionMessage;
-                } gc;
-                ZeroMemory(&gc, sizeof(gc));
-                
-                GCPROTECT_BEGIN(gc);
-
-                gc.throwable = pThread->GetThrowable();
-                _ASSERTE(gc.throwable != NULL);
-
-#ifdef FEATURE_CORECLR
-                // On CoreCLR, managed code execution happens in non-default AppDomains and all threads have an AD transition
-                // at their base from DefaultDomain to the target Domain before they start executing managed code. Thus, when 
-                // an exception goes unhandled in a non-default AppDomain on a reverse pinvoke thread, the original exception details are copied 
-                // to the Message property of System.CrossAppDomainMarshaledException instance at the AD transition boundary,
-                // and the exception is then thrown in the calling AppDomain. This is done since CoreCLR does not support marshaling of 
-                // objects across AppDomains.
-                //
-                // On SL, exceptions dont go unhandled to the OS. But in WLC, they can. Thus, when the scenario above happens for WLC,
-                // the OS will invoke CoreCLR's registered UEF and reach here to write the stacktrace from the 
-                // exception object (which will be a CrossAppDomainMarshaledException instance) to the event log. At this point,
-                // we shall be in DefaultDomain. 
-                //
-                // However, the original exception details are in the Message property of CrossAppDomainMarshaledException. So, we should
-                // look that up and if it is not empty, add those details to the EventReporter so that they get written to the
-                // event log as well.
-                //
-                // We can also be here when in non-DefaultDomain an exception goes unhandled on a pure managed thread. In such a case,
-                // we wont have CrossAppDomainMarshaledException instance but the original exception object that will be used to extract
-                //  the stack trace from.
-                if (pThread->GetDomain()->IsDefaultDomain())
-                {
-                    if (IsExceptionOfType(kCrossAppDomainMarshaledException, &(gc.throwable)))
-                    {
-                        // This is a CrossAppDomainMarshaledException instance - check if it has
-                        // something for us in the Message property.
-                        gc.originalExceptionMessage = ((EXCEPTIONREF)gc.throwable)->GetMessage();
-                        if (gc.originalExceptionMessage != NULL)
-                        {
-                            // Ok - so, we have details about the original exception. Add them to the
-                            // EventReporter object so that they get written to the event log.
-                            reporter.AddDescription(gc.originalExceptionMessage->GetBuffer());
-
-                            LOG((LF_EH, LL_INFO100, "DoReportForUnhandledException - Added original exception details to EventReporter from CrossAppDomainMarshaledException object.\n"));
-                        }
-                        else
-                        {
-                            LOG((LF_EH, LL_INFO100, "DoReportForUnhandledException - Original exception details not present in CrossAppDomainMarshaledException object.\n"));
-                        }
-                    }
-                }
-                else
-#endif // FEATURE_CORECLR
-                {
-                    if (IsException(gc.throwable->GetMethodTable()))
-                    {
-                        SmallStackSString wordAt;
-                        if (!wordAt.LoadResource(CCompRC::Optional, IDS_ER_WORDAT))
-                        {
-                            wordAt.Set(W("   at"));
-                        }
-                        else
-                        {
-                            wordAt.Insert(wordAt.Begin(), W("   "));
-                        }
-                        wordAt += W(" ");
-
-                        ReportExceptionStackHelper(gc.throwable, reporter, wordAt, /* recursionLimit = */10);
-                    }
-                    else
-                    {
-                        TypeString::AppendType(s, TypeHandle(gc.throwable->GetMethodTable()), TypeString::FormatNamespace | TypeString::FormatFullInst);
-                        reporter.AddDescription(s);
-                        reporter.BeginStackTrace();
-                        LogCallstackForEventReporterWorker(reporter);
-                    }
-                }
-
-                GCPROTECT_END();
-            }
-            else
-            {
-                InlineSString<80> ssErrorFormat;
-                if(!ssErrorFormat.LoadResource(CCompRC::Optional, IDS_ER_UNHANDLEDEXCEPTIONINFO))
-                    ssErrorFormat.Set(W("exception code %1, exception address %2"));
-                SmallStackSString exceptionCodeString;
-                exceptionCodeString.Printf(W("%x"), pExceptionInfo->ExceptionRecord->ExceptionCode);
-                SmallStackSString addressString;
-                addressString.Printf(W("%p"), (UINT_PTR)pExceptionInfo->ExceptionRecord->ExceptionAddress);
-                s.FormatMessage(FORMAT_MESSAGE_FROM_STRING, (LPCWSTR)ssErrorFormat, 0, 0, exceptionCodeString, addressString);
-                reporter.AddDescription(s);
-                if (pThread)
-                {
-                    LogCallstackForEventReporter(reporter);
-                }
-            }
+        InlineSString<80> ssErrorFormat;
+        if (!ssErrorFormat.LoadResource(CCompRC::Optional, IDS_ER_UNHANDLEDEXCEPTIONINFO))
+            ssErrorFormat.Set(W("exception code %1, exception address %2"));
+        SmallStackSString exceptionCodeString;
+        exceptionCodeString.Printf(W("%x"), pExceptionInfo->ExceptionRecord->ExceptionCode);
+        SmallStackSString addressString;
+        addressString.Printf(W("%p"), (UINT_PTR)pExceptionInfo->ExceptionRecord->ExceptionAddress);
+        s.FormatMessage(FORMAT_MESSAGE_FROM_STRING, (LPCWSTR)ssErrorFormat, 0, 0, exceptionCodeString, addressString);
+        reporter.AddDescription(s);
+        if (pThread)
+        {
+            LogCallstackForEventReporter(reporter);
         }
-        EX_CATCH
+        }
+            EX_CATCH
         {
             // We are reporting an exception.  If we throw while working on this, it is not fatal.
         }
@@ -796,7 +724,6 @@ void DoReportForUnhandledException(PEXCEPTION_POINTERS pExceptionInfo)
     }
 }
 
-#if defined(FEATURE_CORECLR)
 // This function will return the product version of CoreCLR
 // instance we are executing in.
 void EventReporter::GetCoreCLRInstanceProductVersion(DWORD * pdwMajor, DWORD * pdwMinor, DWORD * pdwBuild, DWORD * pdwRevision)
@@ -834,4 +761,3 @@ void EventReporter::GetCoreCLRInstanceProductVersion(DWORD * pdwMajor, DWORD * p
         LOG((LF_CORDB, LL_INFO100, "GetCoreCLRInstanceVersion: Unable to get CoreCLR version.\n"));
     }
 }
-#endif // FEATURE_CORECLR

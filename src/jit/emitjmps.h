@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-
+// clang-format off
 #ifndef JMP_SMALL
 #error Must define JMP_SMALL macro before including this file
 #endif
@@ -21,8 +21,8 @@ JMP_SMALL(jbe   , ja    , jbe    )
 JMP_SMALL(ja    , jbe   , ja     )
 JMP_SMALL(js    , jns   , js     )
 JMP_SMALL(jns   , js    , jns    )
-JMP_SMALL(jpe   , jpo   , jpe    )
-JMP_SMALL(jpo   , jpe   , jpo    )
+JMP_SMALL(jp    , jnp   , jp     )
+JMP_SMALL(jnp   , jp    , jnp    )
 JMP_SMALL(jl    , jge   , jl     )
 JMP_SMALL(jge   , jl    , jge    )
 JMP_SMALL(jle   , jg    , jle    )
@@ -54,3 +54,5 @@ JMP_SMALL(le    , gt    , ble    )  // LE
 /*****************************************************************************/
 #undef JMP_SMALL
 /*****************************************************************************/
+
+// clang-format on

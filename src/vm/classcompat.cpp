@@ -25,26 +25,20 @@
 #include "threads.h"
 #include "stublink.h"
 #include "dllimport.h"
-#include "verifier.hpp"
 #include "jitinterface.h"
 #include "eeconfig.h"
 #include "log.h"
 #include "fieldmarshaler.h"
 #include "cgensys.h"
-#include "gc.h"
-#include "security.h"
+#include "gcheaputilities.h"
 #include "dbginterface.h"
 #include "comdelegate.h"
 #include "sigformat.h"
-#ifdef FEATURE_REMOTING
-#include "remoting.h"
-#endif
 #include "eeprofinterfaces.h"
 #include "dllimportcallback.h"
 #include "listlock.h"
 #include "methodimpl.h"
 #include "guidfromname.h"
-#include "stackprobe.h"
 #include "encee.h"
 #include "encee.h"
 #include "comsynchronizable.h"
@@ -58,7 +52,6 @@
 #include "clrtocomcall.h"
 #include "runtimecallablewrapper.h"
 
-#include "listlock.inl"
 #include "generics.h"
 #include "contractimpl.h"
 
@@ -234,11 +227,8 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
 #endif // _DEBUG
 
     //Get Check Point for the thread-based allocator
-    Thread *pThread = GetThread();
-    CheckPointHolder cph(pThread->m_MarshalAlloc.GetCheckpoint()); //hold checkpoint for autorelease
 
     HRESULT hr = S_OK;
-    BaseDomain *bmtDomain = pThisMT->GetDomain();
     Module *pModule = pThisMT->GetModule();
     mdToken cl = pThisMT->GetCl();
     MethodTable *pParentMethodTable = pThisMT->GetParentMethodTable();
@@ -279,7 +269,6 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
     }
     
     SetBMTData(
-        bmtDomain,
         &bmtError,
         &bmtProp,
         &bmtVT,
@@ -294,7 +283,6 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
     if (pThisMT->IsEnum()) SetEnum();
     if (pThisMT->HasLayout()) SetHasLayout();
     if (pThisMT->IsDelegate()) SetIsDelegate();
-    if (pThisMT->IsContextful()) SetContextful();
 #ifdef FEATURE_COMINTEROP
     if(pThisMT->GetClass()->IsComClassInterface()) SetIsComClassInterface();
 #endif
@@ -343,7 +331,7 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
 
     // resolve unresolved interfaces, determine an upper bound on the size of the interface map,
     // and determine the size of the largest interface (in # slots)
-    BuildInteropVTable_ResolveInterfaces(bmtDomain, pBuildingInterfaceList, &bmtType, &bmtInterface, &bmtVT, &bmtParent, bmtError);
+    BuildInteropVTable_ResolveInterfaces(pBuildingInterfaceList, &bmtType, &bmtInterface, &bmtVT, &bmtParent, bmtError);
 
     // Enumerate this class's members
     EnumerateMethodImpls();
@@ -359,19 +347,19 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
         // The interop data for the VTable for COM Interop backward compatibility
 
         // Allocate space to hold on to the MethodDesc for each entry
-        bmtVT.ppSDVtable = new (&pThread->m_MarshalAlloc) InteropMethodTableSlotData*[bmtVT.dwMaxVtableSize];
+        bmtVT.ppSDVtable = new (GetStackingAllocator()) InteropMethodTableSlotData*[bmtVT.dwMaxVtableSize];
         ZeroMemory(bmtVT.ppSDVtable, bmtVT.dwMaxVtableSize * sizeof(InteropMethodTableSlotData*));
 
         // Allocate space to hold on to the MethodDesc for each entry
-        bmtVT.ppSDNonVtable = new (&pThread->m_MarshalAlloc) InteropMethodTableSlotData*[NumDeclaredMethods()];
+        bmtVT.ppSDNonVtable = new (GetStackingAllocator()) InteropMethodTableSlotData*[NumDeclaredMethods()];
         ZeroMemory(bmtVT.ppSDNonVtable , sizeof(InteropMethodTableSlotData*)*NumDeclaredMethods());
 
 
         DWORD cMaxEntries = (bmtVT.dwMaxVtableSize * 2) + (NumDeclaredMethods() * 2);
-        InteropMethodTableSlotData *pInteropData = new (&pThread->m_MarshalAlloc) InteropMethodTableSlotData[cMaxEntries];
+        InteropMethodTableSlotData *pInteropData = new (GetStackingAllocator()) InteropMethodTableSlotData[cMaxEntries];
         memset(pInteropData, 0, cMaxEntries * sizeof(InteropMethodTableSlotData));
 
-        bmtVT.pInteropData = new (&pThread->m_MarshalAlloc) InteropMethodTableSlotDataMap(pInteropData, cMaxEntries);
+        bmtVT.pInteropData = new (GetStackingAllocator()) InteropMethodTableSlotDataMap(pInteropData, cMaxEntries);
 
         // Initialize the map with parent information
         if (bmtParent.pParentMethodTable != NULL)
@@ -394,7 +382,7 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
     }
 
     // Determine vtable placement for each member in this class
-    BuildInteropVTable_PlaceMembers(bmtDomain,&bmtType, wNumInterfaces, pBuildingInterfaceList, &bmtMethod,
+    BuildInteropVTable_PlaceMembers(&bmtType, wNumInterfaces, pBuildingInterfaceList, &bmtMethod,
                                     &bmtError, &bmtProp, &bmtParent, &bmtInterface, &bmtMethodImpl, &bmtVT);
 
     // First copy what we can leverage from the parent's interface map.
@@ -457,7 +445,6 @@ InteropMethodTableData *MethodTableBuilder::BuildInteropVTable(AllocMemTracker *
             &bmtParent);
 
         BuildInteropVTable_PlaceMethodImpls(
-            bmtDomain,
             &bmtType,
             &bmtMethodImpl,
             &bmtError,
@@ -643,7 +630,7 @@ VOID MethodTableBuilder::BuildInteropVTable_InterfaceList(
         Module *pModule = GetModule();
 
         // Allocate the BuildingInterfaceList table
-        *ppBuildingInterfaceList = new(&pThread->m_MarshalAlloc) BuildingInterfaceInfo_t[cAllInterfaces];
+        *ppBuildingInterfaceList = new(GetStackingAllocator()) BuildingInterfaceInfo_t[cAllInterfaces];
         BuildingInterfaceInfo_t *pInterfaceBuildInfo = *ppBuildingInterfaceList;
 
         while (pMDImport->EnumNext(&hEnumInterfaceImpl, &ii))
@@ -690,7 +677,6 @@ VOID MethodTableBuilder::BuildInteropVTable_InterfaceList(
 #pragma warning(disable:21000) // Suppress PREFast warning about overly large function
 #endif
 VOID MethodTableBuilder::BuildInteropVTable_PlaceMembers(
-    BaseDomain *bmtDomain,
     bmtTypeInfo* bmtType,
                            DWORD numDeclaredInterfaces,
                            BuildingInterfaceInfo_t *pBuildingInterfaceList, 
@@ -848,13 +834,10 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceMembers(
                         slotNum = (WORD) pItfMD->GetSlot();
                         if (bmtInterface->pppInterfaceImplementingMD[j] == NULL)
                         {
-                            Thread *pThread = GetThread();
-                            StackingAllocator * pAlloc = &pThread->m_MarshalAlloc;
-
-                            bmtInterface->pppInterfaceImplementingMD[j] = new (pAlloc) MethodDesc * [pInterface->GetNumVirtuals()];
+                            bmtInterface->pppInterfaceImplementingMD[j] = new (GetStackingAllocator()) MethodDesc * [pInterface->GetNumVirtuals()];
                             memset(bmtInterface->pppInterfaceImplementingMD[j], 0, sizeof(MethodDesc *) * pInterface->GetNumVirtuals());
 
-                            bmtInterface->pppInterfaceDeclaringMD[j] = new (pAlloc) MethodDesc * [pInterface->GetNumVirtuals()];
+                            bmtInterface->pppInterfaceDeclaringMD[j] = new (GetStackingAllocator()) MethodDesc * [pInterface->GetNumVirtuals()];
                             memset(bmtInterface->pppInterfaceDeclaringMD[j], 0, sizeof(MethodDesc *) * pInterface->GetNumVirtuals());
                         }
 
@@ -969,7 +952,6 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceMembers(
                 if(tokMember == bmtMethodImpl->rgMethodImplTokens[m].methodBody)
                 {
                     MethodDesc* desc = NULL;
-                    BOOL fIsMethod;
                     mdToken mdDecl = bmtMethodImpl->rgMethodImplTokens[m].methodDecl;
                     Substitution *pDeclSubst = &bmtMethodImpl->pMethodDeclSubsts[m];
 
@@ -1047,7 +1029,6 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceMembers(
 // Resolve unresolved interfaces, determine an upper bound on the size of the interface map,
 // and determine the size of the largest interface (in # slots)
 VOID MethodTableBuilder::BuildInteropVTable_ResolveInterfaces(
-                                BaseDomain *bmtDomain, 
                                 BuildingInterfaceInfo_t *pBuildingInterfaceList, 
                                 bmtTypeInfo* bmtType, 
                                 bmtInterfaceInfo* bmtInterface, 
@@ -1060,7 +1041,6 @@ VOID MethodTableBuilder::BuildInteropVTable_ResolveInterfaces(
     {
         STANDARD_VM_CHECK;
         PRECONDITION(CheckPointer(this));
-        PRECONDITION(CheckPointer(bmtDomain));
         PRECONDITION(CheckPointer(bmtInterface));
         PRECONDITION(CheckPointer(bmtVT));
         PRECONDITION(CheckPointer(bmtParent));
@@ -1099,7 +1079,7 @@ VOID MethodTableBuilder::BuildInteropVTable_ResolveInterfaces(
     }
 
     // Create a fully expanded map of all interfaces we implement
-    bmtInterface->pInterfaceMap = new (&pThread->m_MarshalAlloc) InterfaceInfo_t[bmtInterface->dwMaxExpandedInterfaces];
+    bmtInterface->pInterfaceMap = new (GetStackingAllocator()) InterfaceInfo_t[bmtInterface->dwMaxExpandedInterfaces];
 
     // # slots of largest interface
     bmtInterface->dwLargestInterfaceSize = 0;
@@ -1115,9 +1095,9 @@ VOID MethodTableBuilder::BuildInteropVTable_ResolveInterfaces(
         // This is needed later - for each interface, we get the MethodDesc pointer for each
         // method.  We need to be able to persist at most one interface at a time, so we
         // need enough memory for the largest interface.
-        bmtInterface->ppInterfaceMethodDescList = new (&pThread->m_MarshalAlloc) MethodDesc*[bmtInterface->dwLargestInterfaceSize];
+        bmtInterface->ppInterfaceMethodDescList = new (GetStackingAllocator()) MethodDesc*[bmtInterface->dwLargestInterfaceSize];
 
-        bmtInterface->ppInterfaceDeclMethodDescList = new (&pThread->m_MarshalAlloc) MethodDesc*[bmtInterface->dwLargestInterfaceSize];
+        bmtInterface->ppInterfaceDeclMethodDescList = new (GetStackingAllocator()) MethodDesc*[bmtInterface->dwLargestInterfaceSize];
     }
 
     EEClass *pParentClass = (IsInterface() || bmtParent->pParentMethodTable == NULL) ? NULL : bmtParent->pParentMethodTable->GetClass();
@@ -1149,10 +1129,10 @@ VOID MethodTableBuilder::BuildInteropVTable_ResolveInterfaces(
 
     bmtVT->wCurrentNonVtableSlot      = 0;
 
-    bmtInterface->pppInterfaceImplementingMD = (MethodDesc ***) pThread->m_MarshalAlloc.Alloc(S_UINT32(sizeof(MethodDesc *)) * S_UINT32(bmtInterface->dwMaxExpandedInterfaces));
+    bmtInterface->pppInterfaceImplementingMD = (MethodDesc ***) GetStackingAllocator()->Alloc(S_UINT32(sizeof(MethodDesc *)) * S_UINT32(bmtInterface->dwMaxExpandedInterfaces));
     memset(bmtInterface->pppInterfaceImplementingMD, 0, sizeof(MethodDesc *) * bmtInterface->dwMaxExpandedInterfaces);
 
-    bmtInterface->pppInterfaceDeclaringMD = (MethodDesc ***) pThread->m_MarshalAlloc.Alloc(S_UINT32(sizeof(MethodDesc *)) * S_UINT32(bmtInterface->dwMaxExpandedInterfaces));
+    bmtInterface->pppInterfaceDeclaringMD = (MethodDesc ***) GetStackingAllocator()->Alloc(S_UINT32(sizeof(MethodDesc *)) * S_UINT32(bmtInterface->dwMaxExpandedInterfaces));
     memset(bmtInterface->pppInterfaceDeclaringMD, 0, sizeof(MethodDesc *) * bmtInterface->dwMaxExpandedInterfaces);
 
     return;
@@ -1311,11 +1291,6 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceVtableMethods(
         InterfaceInfo_t *pCurItfInfo = &(bmtInterface->pInterfaceMap[wCurInterface]);
         // The interface we are attempting to place
         MethodTable *pInterface = pCurItfInfo->m_pMethodTable;
-
-        _ASSERTE(!(pCurItfInfo->IsDeclaredOnClass() &&
-           !pInterface->IsExternallyVisible() &&
-                 pInterface->GetAssembly() != bmtType->pModule->GetAssembly() &&
-           !Security::CanSkipVerification(GetAssembly()->GetDomainAssembly())));
 
         // Did we place this interface already due to the parent class's interface placement?
         if (pCurItfInfo->GetInteropStartSlot() != MethodTable::NO_SLOT)
@@ -1558,7 +1533,6 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceVtableMethods(
 // We should have collected all the method impls. Cycle through them creating the method impl
 // structure that holds the information about which slots are overridden.
 VOID MethodTableBuilder::BuildInteropVTable_PlaceMethodImpls(
-        BaseDomain *bmtDomain,
         bmtTypeInfo* bmtType,
         bmtMethodImplInfo* bmtMethodImpl,
         bmtErrorInfo* bmtError, 
@@ -1576,8 +1550,8 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceMethodImpls(
 
     // Allocate some temporary storage. The number of overrides for a single method impl
     // cannot be greater then the number of vtable slots. 
-    DWORD* slots = (DWORD*) new (&GetThread()->m_MarshalAlloc) DWORD[bmtVT->wCurrentVtableSlot];
-    MethodDesc **replaced = new (&GetThread()->m_MarshalAlloc) MethodDesc*[bmtVT->wCurrentVtableSlot];
+    DWORD* slots = (DWORD*) new (GetStackingAllocator()) DWORD[bmtVT->wCurrentVtableSlot];
+    MethodDesc **replaced = new (GetStackingAllocator()) MethodDesc*[bmtVT->wCurrentVtableSlot];
 
     while(pIndex < bmtMethodImpl->pIndex) {
 
@@ -1782,7 +1756,7 @@ VOID MethodTableBuilder::BuildInteropVTable_PlaceInterfaceDeclaration(
                 if(bmtInterface->pdwOriginalStart == NULL)
                 {
                     Thread *pThread = GetThread();
-                    bmtInterface->pdwOriginalStart = new (&pThread->m_MarshalAlloc) DWORD[bmtInterface->dwMaxExpandedInterfaces];
+                    bmtInterface->pdwOriginalStart = new (GetStackingAllocator()) DWORD[bmtInterface->dwMaxExpandedInterfaces];
                     memset(bmtInterface->pdwOriginalStart, 0, sizeof(DWORD)*bmtInterface->dwMaxExpandedInterfaces);
                 }
 
@@ -2101,7 +2075,7 @@ VOID    MethodTableBuilder::EnumerateMethodImpls()
         //
         // Allocate the structures to keep track of the token pairs
         //
-        bmtMethodImpl->rgMethodImplTokens = new (&GetThread()->m_MarshalAlloc)
+        bmtMethodImpl->rgMethodImplTokens = new (GetStackingAllocator())
             bmtMethodImplInfo::MethodImplTokenPair[bmtMethodImpl->dwNumberMethodImpls];
             
         // Iterate through each MethodImpl declared on this class
@@ -2158,8 +2132,8 @@ VOID    MethodTableBuilder::EnumerateMethodImpls()
         //
         // Allocate the structures to keep track of the impl matches
         //
-        bmtMethodImpl->pMethodDeclSubsts = new (&GetThread()->m_MarshalAlloc) Substitution[bmtMethodImpl->dwNumberMethodImpls]; 
-        bmtMethodImpl->rgEntries = new (&GetThread()->m_MarshalAlloc) bmtMethodImplInfo::Entry[bmtMethodImpl->dwNumberMethodImpls];
+        bmtMethodImpl->pMethodDeclSubsts = new (GetStackingAllocator()) Substitution[bmtMethodImpl->dwNumberMethodImpls]; 
+        bmtMethodImpl->rgEntries = new (GetStackingAllocator()) bmtMethodImplInfo::Entry[bmtMethodImpl->dwNumberMethodImpls];
 
         // These are used for verification
         maxRidMD = pMDInternalImport->GetCountWithTokenKind(mdtMethodDef);
@@ -2330,7 +2304,6 @@ VOID    MethodTableBuilder::EnumerateClassMethods()
 
     HRESULT hr = S_OK;
     DWORD i;
-    Thread *pThread = GetThread();
     IMDInternalImport *pMDInternalImport = bmtType->pMDImport;
     mdToken tok;
     DWORD dwMemberAttrs;
@@ -2367,16 +2340,16 @@ VOID    MethodTableBuilder::EnumerateClassMethods()
     // Allocate an array to contain the method tokens as well as information about the methods.
     bmtMethod->cMethAndGaps = bmtMethod->hEnumMethod.EnumGetCount();
 
-    bmtMethod->rgMethodTokens = new (&pThread->m_MarshalAlloc) mdToken[bmtMethod->cMethAndGaps]; 
-    bmtMethod->rgMethodRVA = new (&pThread->m_MarshalAlloc) ULONG[bmtMethod->cMethAndGaps]; 
-    bmtMethod->rgMethodAttrs = new (&pThread->m_MarshalAlloc) DWORD[bmtMethod->cMethAndGaps]; 
-    bmtMethod->rgMethodImplFlags = new (&pThread->m_MarshalAlloc) DWORD[bmtMethod->cMethAndGaps]; 
-    bmtMethod->rgMethodClassifications = new (&pThread->m_MarshalAlloc) DWORD[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodTokens = new (GetStackingAllocator()) mdToken[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodRVA = new (GetStackingAllocator()) ULONG[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodAttrs = new (GetStackingAllocator()) DWORD[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodImplFlags = new (GetStackingAllocator()) DWORD[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodClassifications = new (GetStackingAllocator()) DWORD[bmtMethod->cMethAndGaps]; 
 
-    bmtMethod->rgszMethodName = new (&pThread->m_MarshalAlloc) LPCSTR[bmtMethod->cMethAndGaps];
+    bmtMethod->rgszMethodName = new (GetStackingAllocator()) LPCSTR[bmtMethod->cMethAndGaps];
 
-    bmtMethod->rgMethodImpl = new (&pThread->m_MarshalAlloc) BYTE[bmtMethod->cMethAndGaps]; 
-    bmtMethod->rgMethodType = new (&pThread->m_MarshalAlloc) BYTE[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodImpl = new (GetStackingAllocator()) BYTE[bmtMethod->cMethAndGaps]; 
+    bmtMethod->rgMethodType = new (GetStackingAllocator()) BYTE[bmtMethod->cMethAndGaps]; 
 
     enum { SeenCtor = 1, SeenInvoke = 2, SeenBeginInvoke = 4, SeenEndInvoke = 8};
     unsigned delegateMethodsSeen = 0;
@@ -2425,12 +2398,6 @@ VOID    MethodTableBuilder::EnumerateClassMethods()
         }
 
         WORD numGenericMethodArgs = (WORD) hEnumTyPars.EnumGetCount();
-
-        // We do not want to support context-bound objects with generic methods.
-        if (IsContextful() && numGenericMethodArgs > 0)
-        {
-            BuildMethodTableThrowException(IDS_CLASSLOAD_CONTEXT_BOUND_GENERIC_METHOD);
-        }
 
         if (numGenericMethodArgs != 0)
         {
@@ -2624,7 +2591,14 @@ VOID    MethodTableBuilder::EnumerateClassMethods()
         }
 
         // Some interface checks.
-        if (IsInterface())
+        // We only need them if default interface method support is disabled or if this is fragile crossgen
+#if !defined(FEATURE_DEFAULT_INTERFACES) || defined(FEATURE_NATIVE_IMAGE_GENERATION)
+        if (fIsClassInterface
+#if defined(FEATURE_DEFAULT_INTERFACES)
+            // Only fragile crossgen wasn't upgraded to deal with default interface methods.
+            && !IsReadyToRunCompilation()
+#endif
+            )
         {
             if (IsMdVirtual(dwMemberAttrs))
             {
@@ -2635,13 +2609,14 @@ VOID    MethodTableBuilder::EnumerateClassMethods()
             }
             else
             {
-                // Instance field/method
+                // Instance method
                 if (!IsMdStatic(dwMemberAttrs))
                 {
                     BuildMethodTableThrowException(BFA_NONVIRT_INST_INT_METHOD);
                 }
             }
         }
+#endif // !defined(FEATURE_DEFAULT_INTERFACES) || defined(FEATURE_NATIVE_IMAGE_GENERATION)
 
         // No synchronized methods in ValueTypes
         if(fIsClassValueType && IsMiSynchronized(dwImplFlags))
@@ -2808,48 +2783,25 @@ VOID    MethodTableBuilder::EnumerateClassMethods()
                 // If the interface is a standard managed interface then allocate space for an FCall method desc.
                 Classification = mcFCall;
             }
-            else
+            else if (IsMdAbstract(dwMemberAttrs))
             {
                 // If COM interop is supported then all other interface MDs may be
                 // accessed via COM interop <TODO> mcComInterop MDs are BIG -
                 // this is very often a waste of space </TODO>
+                // @DIM_TODO - What if default interface method is called through COM interop?
                 Classification = mcComInterop;
             }
-#else // !FEATURE_COMINTEROP
-            // This codepath is used by remoting
-            Classification = mcIL;
+            else
 #endif // !FEATURE_COMINTEROP
+            {
+                // This codepath is used by remoting and default interface methods
+                Classification = mcIL;
+            }
         }
         else
         {
             Classification = mcIL;
         }
-
-
-#ifdef _DEBUG
-        // We don't allow stack based declarative security on ecalls, fcalls and
-        // other special purpose methods implemented by the EE (the interceptor
-        // we use doesn't play well with non-jitted stubs).
-        if ((Classification == mcFCall || Classification == mcEEImpl) &&
-            (IsMdHasSecurity(dwMemberAttrs) || IsTdHasSecurity(GetAttrClass())))
-        {
-            DWORD dwSecFlags;
-            DWORD dwNullDeclFlags;
-
-            if (IsTdHasSecurity(GetAttrClass()) &&
-                SUCCEEDED(Security::GetDeclarationFlags(pMDInternalImport, GetCl(), &dwSecFlags, &dwNullDeclFlags)))
-            {
-                CONSISTENCY_CHECK_MSG(!(dwSecFlags & ~dwNullDeclFlags & DECLSEC_RUNTIME_ACTIONS),
-                                      "Cannot add stack based declarative security to a class containing an ecall/fcall/special method.");
-            }
-            if (IsMdHasSecurity(dwMemberAttrs) &&
-                SUCCEEDED(Security::GetDeclarationFlags(pMDInternalImport, tok, &dwSecFlags, &dwNullDeclFlags)))
-            {
-                CONSISTENCY_CHECK_MSG(!(dwSecFlags & ~dwNullDeclFlags & DECLSEC_RUNTIME_ACTIONS),
-                                      "Cannot add stack based declarative security to an ecall/fcall/special method.");
-            }
-        }
-#endif // _DEBUG
 
         // Generic methods should always be mcInstantiated
         if (!((numGenericMethodArgs == 0) || ((Classification & mdcClassification) == mcInstantiated)))
@@ -2994,7 +2946,6 @@ VOID    MethodTableBuilder::AllocateMethodWorkingMemory()
     {
         STANDARD_VM_CHECK;
         PRECONDITION(CheckPointer(this));
-        PRECONDITION(CheckPointer(bmtDomain));
         PRECONDITION(CheckPointer(bmtMethod));
         PRECONDITION(CheckPointer(bmtVT));
         PRECONDITION(CheckPointer(bmtInterface));
@@ -3004,10 +2955,8 @@ VOID    MethodTableBuilder::AllocateMethodWorkingMemory()
     CONTRACTL_END;
 
     DWORD i;
-    Thread *pThread = GetThread();
-
     // Allocate a MethodDesc* for each method (needed later when doing interfaces), and a FieldDesc* for each field
-    bmtMethod->ppMethodDescList = new (&pThread->m_MarshalAlloc) MethodDesc*[NumDeclaredMethods()];
+    bmtMethod->ppMethodDescList = new (GetStackingAllocator()) MethodDesc*[NumDeclaredMethods()];
     ZeroMemory(bmtMethod->ppMethodDescList, NumDeclaredMethods() * sizeof(MethodDesc *));
 
     // Create a temporary function table (we don't know how large the vtable will be until the very end,
@@ -3022,7 +2971,7 @@ VOID    MethodTableBuilder::AllocateMethodWorkingMemory()
     if (IsValueClass())
     {
         bmtVT->dwMaxVtableSize += NumDeclaredMethods();
-        bmtMethod->ppUnboxMethodDescList = new (&pThread->m_MarshalAlloc) MethodDesc*[NumDeclaredMethods()];
+        bmtMethod->ppUnboxMethodDescList = new (GetStackingAllocator()) MethodDesc*[NumDeclaredMethods()];
         ZeroMemory(bmtMethod->ppUnboxMethodDescList, NumDeclaredMethods() * sizeof(MethodDesc*));
     }
 
@@ -3040,13 +2989,13 @@ VOID    MethodTableBuilder::AllocateMethodWorkingMemory()
     }
 
     // Allocate the temporary vtable
-    bmtVT->pVtable = new (&pThread->m_MarshalAlloc)PCODE [bmtVT->dwMaxVtableSize];
+    bmtVT->pVtable = new (GetStackingAllocator())PCODE [bmtVT->dwMaxVtableSize];
     ZeroMemory(bmtVT->pVtable, bmtVT->dwMaxVtableSize * sizeof(PCODE));
-    bmtVT->pVtableMD = new (&pThread->m_MarshalAlloc) MethodDesc*[bmtVT->dwMaxVtableSize];
+    bmtVT->pVtableMD = new (GetStackingAllocator()) MethodDesc*[bmtVT->dwMaxVtableSize];
     ZeroMemory(bmtVT->pVtableMD, bmtVT->dwMaxVtableSize * sizeof(MethodDesc*));
 
     // Allocate the temporary non-vtable
-    bmtVT->pNonVtableMD = new (&pThread->m_MarshalAlloc) MethodDesc*[NumDeclaredMethods()];
+    bmtVT->pNonVtableMD = new (GetStackingAllocator()) MethodDesc*[NumDeclaredMethods()];
     ZeroMemory(bmtVT->pNonVtableMD, sizeof(MethodDesc*) * NumDeclaredMethods());
 
     if (bmtParent->pParentMethodTable != NULL)
@@ -3109,7 +3058,7 @@ VOID    MethodTableBuilder::AllocateMethodWorkingMemory()
     if (NumDeclaredMethods() > 0)
     {
         bmtParent->ppParentMethodDescBuf = (MethodDesc **)
-            pThread->m_MarshalAlloc.Alloc(S_UINT32(2) * S_UINT32(NumDeclaredMethods()) *
+            GetStackingAllocator()->Alloc(S_UINT32(2) * S_UINT32(NumDeclaredMethods()) *
                                           S_UINT32(sizeof(MethodDesc*)));
 
         bmtParent->ppParentMethodDescBufPtr = bmtParent->ppParentMethodDescBuf;
@@ -3341,7 +3290,7 @@ HRESULT MethodTableBuilder::FindMethodDeclarationForMethodImpl(
         if (TypeFromToken(typeref) == mdtMethodDef)
         {
             mdTypeDef typeDef;
-            hr = pMDInternalImport->GetParentToken(typeref, &typeDef);
+            IfFailRet(pMDInternalImport->GetParentToken(typeref, &typeDef));
 
             // Make sure it is a typedef
             if (TypeFromToken(typeDef) != mdtTypeDef)
@@ -3575,10 +3524,9 @@ MethodNameHash *MethodTableBuilder::CreateMethodChainHash(MethodTable *pMT)
 {
     STANDARD_VM_CONTRACT;
 
-    Thread *pThread = GetThread();
-    MethodNameHash *pHash = new (&pThread->m_MarshalAlloc) MethodNameHash();
+    MethodNameHash *pHash = new (GetStackingAllocator()) MethodNameHash();
 
-    pHash->Init(pMT->GetNumVirtuals(), &(pThread->m_MarshalAlloc));
+    pHash->Init(pMT->GetNumVirtuals(), GetStackingAllocator());
 
     MethodTable::MethodIterator it(pMT);
     for (;it.IsValid(); it.Next())
@@ -3601,7 +3549,6 @@ MethodNameHash *MethodTableBuilder::CreateMethodChainHash(MethodTable *pMT)
 
 //*******************************************************************************
 void MethodTableBuilder::SetBMTData(
-    BaseDomain *bmtDomain,
     bmtErrorInfo *bmtError,
     bmtProperties *bmtProp,
     bmtVtable *bmtVT,
@@ -3612,7 +3559,6 @@ void MethodTableBuilder::SetBMTData(
     bmtMethodImplInfo *bmtMethodImpl)
 {
     LIMITED_METHOD_CONTRACT;
-    this->bmtDomain = bmtDomain;
     this->bmtError = bmtError;
     this->bmtProp = bmtProp;
     this->bmtVT = bmtVT;
@@ -3627,7 +3573,6 @@ void MethodTableBuilder::SetBMTData(
 void MethodTableBuilder::NullBMTData()
 {
     LIMITED_METHOD_CONTRACT;
-    this->bmtDomain = NULL;
     this->bmtError = NULL;
     this->bmtProp = NULL;
     this->bmtVT = NULL;

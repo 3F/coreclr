@@ -12,9 +12,6 @@
 #ifndef _H_UTIL
 #define _H_UTIL
 
-#define MAX_UINT32_HEX_CHAR_LEN 8 // max number of chars representing an unsigned int32, not including terminating null char.
-#define MAX_INT32_DECIMAL_CHAR_LEN 11 // max number of chars representing an int32, including sign, not including terminating null char.
-
 #include "utilcode.h"
 #include "metadata.h"
 #include "holderinst.h"
@@ -44,6 +41,13 @@
 #define UtilMessageBoxNonLocalizedVA __error("Use one of the EEMessageBox APIs (defined in eemessagebox.h) from inside the EE")
 #define WszMessageBox __error("Use one of the EEMessageBox APIs (defined in eemessagebox.h) from inside the EE")
 
+// Hot cache lines need to be aligned to cache line size to improve performance
+#if defined(ARM64)
+#define MAX_CACHE_LINE_SIZE 128
+#else
+#define MAX_CACHE_LINE_SIZE 64
+#endif
+
 //========================================================================
 // More convenient names for integer types of a guaranteed size.
 //========================================================================
@@ -65,27 +69,6 @@ typedef double              R8;
 // using compiler intrinsics so they are as fast as they can possibly be.
 //
 
-//
-// these don't have corresponding compiler intrinsics
-//
-
-#ifdef FEATURE_SINGLE_THREADED
-#define FastInterlockIncrement(a)   (++(*a))
-#define FastInterlockDecrement(a)   (--(*a))
-#define FastInterlockOr(a, b)   (*a |= (DWORD)b)
-#define FastInterlockAnd(a, b)   (*a &= (DWORD)b)
-#define FastInterlockIncrementLong(a)   (++(*a))
-#define FastInterlockDecrementLong(a)   (--(*a))
-#define FastInterlockOrLong(a, b)   (*a |= (UINT64)b)
-#define FastInterlockAndLong(a, b)   (*a &= (UINT64)b)
-#define FastInterlockCompareExchange        InterlockedCompareExchange
-#define FastInterlockCompareExchangePointer InterlockedCompareExchangeT
-
-#else
-
-//
-// these DO have corresponding compiler intrinsics
-//
 #define FastInterlockIncrement              InterlockedIncrement
 #define FastInterlockDecrement              InterlockedDecrement
 #define FastInterlockExchange               InterlockedExchange
@@ -115,8 +98,6 @@ FORCEINLINE void FastInterlockAnd(DWORD RAW_KEYWORD(volatile) *p, const int msk)
 
     InterlockedAnd((LONG *)p, msk);
 }
-
-#endif
 
 #ifndef FEATURE_PAL
 // Copied from malloc.h: don't want to bring in the whole header file.
@@ -318,16 +299,7 @@ class CQuickHeap
 
         // Linked list of big QuickBlock's
         QuickBlock      *m_pFirstBigQuickBlock;
-
 };
-
-//======================================================================
-// String Helpers
-//
-//
-//
-ULONG StringHashValueW(__in LPWSTR wzString);
-ULONG StringHashValueA(LPCSTR szString);
 
 void PrintToStdOutA(const char *pszString);
 void PrintToStdOutW(const WCHAR *pwzString);
@@ -338,69 +310,15 @@ void NPrintToStdOutW(const WCHAR *pwzString, size_t nchars);
 void NPrintToStdErrA(const char *pszString, size_t nbytes);
 void NPrintToStdErrW(const WCHAR *pwzString, size_t nchars);
 
-
-//=====================================================================
-// Function for formatted text output to the debugger
-//
-//
-void __cdecl VMDebugOutputA(__in LPSTR format, ...);
-void __cdecl VMDebugOutputW(__in LPWSTR format, ...);
-
 //=====================================================================
 // VM-safe wrapper for PostError.
 //
 HRESULT VMPostError(                    // Returned error.
     HRESULT     hrRpt,                  // Reported error.
     ...);                               // Error arguments.
-    
-//=====================================================================
-// Displays the messaage box or logs the message, corresponding to the last COM+ error occurred
-void VMDumpCOMErrors(HRESULT hrErr);
-HRESULT LoadMscorsn();
+
 
 #include "nativevaraccessors.h"
-
-#ifndef FEATURE_PAL
-
-HRESULT WszSHGetFolderPath(HWND hwndOwner, int nFolder, HANDLE hToken, DWORD dwFlags, size_t cchPath, __out_ecount(MAX_LONGPATH) LPWSTR pszwPath);
-HRESULT WszShellExecute(HWND hwnd, LPCTSTR lpOperation, LPCTSTR lpFile, LPCTSTR lpParameters, LPCTSTR lpDirectory, INT nShowCmd);
-
-#ifndef DACCESS_COMPILE
-#include "shellapi.h"
-HRESULT WszShellExecuteEx(LPSHELLEXECUTEINFO lpExecInfo);
-#endif // #ifndef DACCESS_COMPILE
-
-#endif // !FEATURE_PAL
-
-BOOL GetUserDir(__out_ecount(bufferCount) WCHAR * buffer, size_t bufferCount, BOOL fRoaming);
-BOOL GetInternetCacheDir(__out_ecount(bufferCount) WCHAR * buffer, size_t bufferCount );
-
-HRESULT GetUserSidString (HANDLE hToken,  __deref_out LPWSTR *wszSid);
-BOOL IsUserProfileLoaded();
-
-//======================================================================
-// Stack friendly registry helpers
-//
-LONG UtilRegEnumKey(HKEY hKey,            // handle to key to query
-                    DWORD dwIndex,        // index of subkey to query
-                    CQuickWSTR* lpName);// buffer for subkey name
-
-LONG UtilRegQueryStringValueEx(HKEY hKey,            // handle to key to query
-                               LPCWSTR lpValueName,  // address of name of value to query
-                               LPDWORD lpReserved,   // reserved
-                               LPDWORD lpType,       // address of buffer for value type
-                               CQuickWSTR* lpData);// data buffer
-
-//======================================================================
-// Event logging
-
-BOOL ReportEventCLR (
-     IN WORD       wType,       // Event type - warning, error, success, etc
-     IN WORD       wCategory,   // Event category
-     IN DWORD      dwEventID,   // Event identifier (defined in shimr\msg.mc)
-     IN PSID       lpUserSid,   // user's security identifier
-     IN SString  * message      // message to log
-    );
 
 // --------------------------------------------------------------------------------
 // GCX macros
@@ -678,16 +596,6 @@ public:
     }
 };
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-#define CLRMEMORYHOSTED                             0x1
-#define CLRTASKHOSTED                               0x2
-#define CLRSYNCHOSTED                               0x4
-#define CLRTHREADPOOLHOSTED                         0x8
-#define CLRIOCOMPLETIONHOSTED                       0x10
-#define CLRASSEMBLYHOSTED                           0x20
-#define CLRGCHOSTED                                 0x40
-#define CLRSECURITYHOSTED                           0x80
-#endif
 #define CLRHOSTED           0x80000000
 
 GVAL_DECL(DWORD, g_fHostConfig);
@@ -700,134 +608,13 @@ inline BOOL CLRHosted()
     return g_fHostConfig;
 }
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-inline BOOL CLRMemoryHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return g_fHostConfig&CLRMEMORYHOSTED;
-}
-
-inline BOOL CLRTaskHosted()
-{
-    // !!! Can not use contract here.
-    // !!! This function is called by Thread::DetachThread after we free TLS memory.
-    // !!! Contract will recreate TLS memory.
-    LIMITED_METHOD_DAC_CONTRACT;
-
-    return g_fHostConfig&CLRTASKHOSTED;
-}
-
-inline BOOL CLRSyncHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return g_fHostConfig&CLRSYNCHOSTED;
-}
-inline BOOL CLRThreadpoolHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return g_fHostConfig&CLRTHREADPOOLHOSTED;
-}
-inline BOOL CLRIoCompletionHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return g_fHostConfig&CLRIOCOMPLETIONHOSTED;
-}
-inline BOOL CLRAssemblyHosted()
-{
-    return g_fHostConfig&CLRASSEMBLYHOSTED;
-}
-
-inline BOOL CLRGCHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return g_fHostConfig&CLRGCHOSTED;
-}
-
-inline BOOL CLRSecurityHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-
-    return g_fHostConfig&CLRSECURITYHOSTED;
-}
-#else // FEATURE_INCLUDE_ALL_INTERFACES
-inline BOOL CLRMemoryHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRTaskHosted()
-{
-    LIMITED_METHOD_DAC_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRSyncHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRThreadpoolHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRIoCompletionHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRAssemblyHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRGCHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-
-inline BOOL CLRSecurityHosted()
-{
-    LIMITED_METHOD_CONTRACT;
-    return FALSE;
-}
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
 #ifndef FEATURE_PAL
-HMODULE CLRGetModuleHandle(LPCWSTR lpModuleFileName);
-
-// Equivalent to CLRGetModuleHandle(NULL) but doesn't have the INJECT_FAULT contract associated
-// with CLRGetModuleHandle.
-HMODULE CLRGetCurrentModuleHandle();
-
 HMODULE CLRLoadLibraryEx(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags);
 #endif // !FEATURE_PAL
 
 HMODULE CLRLoadLibrary(LPCWSTR lpLibFileName);
 
 BOOL CLRFreeLibrary(HMODULE hModule);
-VOID CLRFreeLibraryAndExitThread(HMODULE hModule, DWORD dwExitCode);
-
-LPVOID
-CLRMapViewOfFileEx(
-    IN HANDLE hFileMappingObject,
-    IN DWORD dwDesiredAccess,
-    IN DWORD dwFileOffsetHigh,
-    IN DWORD dwFileOffsetLow,
-    IN SIZE_T dwNumberOfBytesToMap,
-    IN LPVOID lpBaseAddress
-    );
 
 LPVOID
 CLRMapViewOfFile(
@@ -835,9 +622,8 @@ CLRMapViewOfFile(
     IN DWORD dwDesiredAccess,
     IN DWORD dwFileOffsetHigh,
     IN DWORD dwFileOffsetLow,
-    IN SIZE_T dwNumberOfBytesToMap
-    );
-
+    IN SIZE_T dwNumberOfBytesToMap,
+    IN LPVOID lpBaseAddress = NULL);
 
 BOOL
 CLRUnmapViewOfFile(
@@ -854,11 +640,16 @@ typedef Wrapper<void *, DoNothing, VoidCLRUnmapViewOfFile> CLRMapViewHolder;
 typedef Wrapper<void *, DoNothing, DoNothing> CLRMapViewHolder;
 #endif
 
-void GetProcessMemoryLoad(LPMEMORYSTATUSEX pMSEX);
+#ifdef FEATURE_PAL
+#ifndef DACCESS_COMPILE
+FORCEINLINE void VoidPALUnloadPEFile(void *ptr) { PAL_LOADUnloadPEFile(ptr); }
+typedef Wrapper<void *, DoNothing, VoidPALUnloadPEFile> PALPEFileHolder;
+#else
+typedef Wrapper<void *, DoNothing, DoNothing> PALPEFileHolder;
+#endif
+#endif // FEATURE_PAL
 
-void ProcessEventForHost(EClrEvent event, void *data);
-void ProcessSOEventForHost(EXCEPTION_POINTERS *pExceptionInfo, BOOL fInSoTolerant);
-BOOL IsHostRegisteredForEvent(EClrEvent event);
+void GetProcessMemoryLoad(LPMEMORYSTATUSEX pMSEX);
 
 #define SetupThreadForComCall(OOMRetVal)            \
     MAKE_CURRENT_THREAD_AVAILABLE_EX(GetThreadNULLOk()); \
@@ -869,112 +660,25 @@ BOOL IsHostRegisteredForEvent(EClrEvent event);
             return OOMRetVal;                       \
     }                                               \
 
+#define SetupForComCallHR() SetupThreadForComCall(E_OUTOFMEMORY)
+#define SetupForComCallDWORD() SetupThreadForComCall(ERROR_OUTOFMEMORY)
 
-#define InternalSetupForComCall(CannotEnterRetVal, OOMRetVal, SORetVal, CheckCanRunManagedCode) \
-SetupThreadForComCall(OOMRetVal);                       \
-if (CheckCanRunManagedCode && !CanRunManagedCode())     \
-    return CannotEnterRetVal;                           \
-SO_INTOLERANT_CODE_NOTHROW(CURRENT_THREAD, return SORetVal)  \
-
-#define ComCallHostNotificationHR()                                         \
-ReverseEnterRuntimeHolderNoThrow REHolder;                                  \
-if (CLRTaskHosted())                                                        \
-{                                                                           \
-    HRESULT hr = REHolder.AcquireNoThrow();                                 \
-    if (FAILED(hr))                                                         \
-    {                                                                       \
-        return hr;                                                          \
-    }                                                                       \
-}
-
-#define SetupForComCallHRNoHostNotif() InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, true)
-#define SetupForComCallHRNoHostNotifNoCheckCanRunManagedCode() InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, false)
-#define SetupForComCallDWORDNoHostNotif() InternalSetupForComCall(-1, -1, -1, true)
-
-#define SetupForComCallHR()                                                                \
-InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, true)  \
-ComCallHostNotificationHR()
-
-#define SetupForComCallHRNoCheckCanRunManagedCode()                                        \
-InternalSetupForComCall(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, false) \
-ComCallHostNotificationHR()
-
-#ifdef FEATURE_CORRUPTING_EXCEPTIONS
-
-// Since Corrupting exceptions can escape COM interop boundaries,
-// these macros will be used to setup the initial SO-Intolerant transition.
-#define InternalSetupForComCallWithEscapingCorruptingExceptions(CannotEnterRetVal, OOMRetVal, SORetVal, CheckCanRunManagedCode) \
-if (CheckCanRunManagedCode && !CanRunManagedCode())                         \
-    return CannotEnterRetVal;                                               \
-SetupThreadForComCall(OOMRetVal);                                           \
-BEGIN_SO_INTOLERANT_CODE_NOTHROW(CURRENT_THREAD, SORetVal)                  \
-
-#define BeginSetupForComCallHRWithEscapingCorruptingExceptions()            \
-HRESULT __hr = S_OK;                                                        \
-InternalSetupForComCallWithEscapingCorruptingExceptions(HOST_E_CLRNOTAVAILABLE, E_OUTOFMEMORY, COR_E_STACKOVERFLOW, true)              \
-ReverseEnterRuntimeHolderNoThrow REHolder;                                  \
-if (CLRTaskHosted())                                                        \
-{                                                                           \
-    __hr = REHolder.AcquireNoThrow();                                       \
-}                                                                           \
-                                                                            \
-if (SUCCEEDED(__hr))                                                        \
-{                                                                           \
-
-#define EndSetupForComCallHRWithEscapingCorruptingExceptions()              \
-}                                                                           \
-END_SO_INTOLERANT_CODE;                                                     \
-                                                                            \
-if (FAILED(__hr))                                                           \
-{                                                                           \
-    return __hr;                                                            \
-}                                                                           \
-
-#endif // FEATURE_CORRUPTING_EXCEPTIONS
-
-#define SetupForComCallDWORD()                                              \
-InternalSetupForComCall(-1, -1, -1, true)                                   \
-ReverseEnterRuntimeHolderNoThrow REHolder;                                  \
-if (CLRTaskHosted())                                                        \
-{                                                                           \
-    if (FAILED(REHolder.AcquireNoThrow()))                                  \
-    {                                                                       \
-        return -1;                                                          \
-    }                                                                       \
-}
-
-// Special version of SetupForComCallDWORD that doesn't call
-// CanRunManagedCode() to avoid firing LoaderLock MDA
-#define SetupForComCallDWORDNoCheckCanRunManagedCode()                      \
-InternalSetupForComCall(-1, -1, -1, false)                                  \
-ReverseEnterRuntimeHolderNoThrow REHolder;                                  \
-if (CLRTaskHosted())                                                        \
-{                                                                           \
-    if (FAILED(REHolder.AcquireNoThrow()))                                  \
-    {                                                                       \
-        return -1;                                                          \
-    }                                                                       \
-}
-
-#include "unsafe.h"
-
-inline void UnsafeTlsFreeForHolder(DWORD* addr)
+// A holder for NATIVE_LIBRARY_HANDLE.
+FORCEINLINE void VoidFreeNativeLibrary(NATIVE_LIBRARY_HANDLE h)
 {
     WRAPPER_NO_CONTRACT;
 
-    if (addr && *addr != TLS_OUT_OF_INDEXES) {
-        UnsafeTlsFree(*addr);
-        *addr = TLS_OUT_OF_INDEXES;
-    }
+    if (h == NULL)
+        return;
+
+#ifdef FEATURE_PAL
+    PAL_FreeLibraryDirect(h);
+#else
+    FreeLibrary(h);
+#endif
 }
 
-// A holder to make sure tls slot is released and memory for allocated one is set to TLS_OUT_OF_INDEXES
-typedef Holder<DWORD*, DoNothing<DWORD*>, UnsafeTlsFreeForHolder> TlsHolder;
-
-// A holder for HMODULE.
-FORCEINLINE void VoidFreeLibrary(HMODULE h) { WRAPPER_NO_CONTRACT; CLRFreeLibrary(h); }
-
-typedef Wrapper<HMODULE, DoNothing<HMODULE>, VoidFreeLibrary, NULL> ModuleHandleHolder;
+typedef Wrapper<NATIVE_LIBRARY_HANDLE, DoNothing<NATIVE_LIBRARY_HANDLE>, VoidFreeNativeLibrary, NULL> NativeLibraryHandleHolder;
 
 #ifndef FEATURE_PAL
 
@@ -984,8 +688,6 @@ typedef Wrapper<HMODULE, DoNothing<HMODULE>, VoidFreeLibrary, NULL> ModuleHandle
 FORCEINLINE void VoidFreeWinAllocatedBlock(LPVOID pv)
 {
     LIMITED_METHOD_CONTRACT;
-
-    _ASSERTE(!CLRMemoryHosted());
 
 #pragma push_macro("GetProcessHeap")
 #pragma push_macro("HeapFree")
@@ -1031,29 +733,8 @@ inline bool IsInCantStopRegion()
 }
 #endif // _DEBUG
 
-
-// PAL does not support per-thread locales. The holder is no-op for FEATURE_PALs
-class ThreadLocaleHolder
-{
-#ifndef FEATURE_PAL
-public:
-
-    ThreadLocaleHolder()
-    {
-        m_locale = GetThreadLocale();
-    }
-
-    ~ThreadLocaleHolder();
-
-private:
-    LCID m_locale;
-#endif // !FEATURE_PAL
-};
-
-
-
 BOOL IsValidMethodCodeNotification(USHORT Notification);
-    
+
 typedef DPTR(struct JITNotification) PTR_JITNotification;
 struct JITNotification
 {
@@ -1233,15 +914,16 @@ public:
         MODULE_LOAD_NOTIFICATION=1,
         MODULE_UNLOAD_NOTIFICATION=2,
         JIT_NOTIFICATION=3,
-        JIT_DISCARD_NOTIFICATION=4,
+        JIT_PITCHING_NOTIFICATION=4,
         EXCEPTION_NOTIFICATION=5,
         GC_NOTIFICATION= 6,
         CATCH_ENTER_NOTIFICATION = 7,
+        JIT_NOTIFICATION2=8,
     };
     
     // called from the runtime
-    static void DoJITNotification(MethodDesc *MethodDescPtr);
-    static void DoJITDiscardNotification(MethodDesc *MethodDescPtr);    
+    static void DoJITNotification(MethodDesc *MethodDescPtr, TADDR NativeCodeLocation);
+    static void DoJITPitchingNotification(MethodDesc *MethodDescPtr);
     static void DoModuleLoadNotification(Module *Module);
     static void DoModuleUnloadNotification(Module *Module);
     static void DoExceptionNotification(class Thread* ThreadPtr);
@@ -1250,8 +932,8 @@ public:
 
     // called from the DAC
     static int GetType(TADDR Args[]);
-    static BOOL ParseJITNotification(TADDR Args[], TADDR& MethodDescPtr);
-    static BOOL ParseJITDiscardNotification(TADDR Args[], TADDR& MethodDescPtr);
+    static BOOL ParseJITNotification(TADDR Args[], TADDR& MethodDescPtr, TADDR& NativeCodeLocation);
+    static BOOL ParseJITPitchingNotification(TADDR Args[], TADDR& MethodDescPtr);
     static BOOL ParseModuleLoadNotification(TADDR Args[], TADDR& ModulePtr);
     static BOOL ParseModuleUnloadNotification(TADDR Args[], TADDR& ModulePtr);
     static BOOL ParseExceptionNotification(TADDR Args[], TADDR& ThreadPtr);
@@ -1260,19 +942,6 @@ public:
 };
 
 void DACNotifyCompilationFinished(MethodDesc *pMethodDesc);
-    
-#ifdef _DEBUG
-#ifndef FEATURE_PAL
-// NOTE: Windows Vista RTM SDK defines CaptureStackBackTrace as RtlCaptureStackBackTrace (in winbase.h)
-//       Renamed CaptureStackBackTrace to UtilCaptureBackTrace in order to avoid conflicts with the Windows definition
-USHORT UtilCaptureStackBackTrace(
-    ULONG FramesToSkip,
-    ULONG FramesToCapture,
-    PVOID * BackTrace,
-    OUT PULONG BackTraceHash);
-#endif // !FEATURE_PAL
-#endif //_DEBUG
-
 
 // These wrap the SString:L:CompareCaseInsenstive function in a way that makes it
 // easy to fix code that uses _stricmp. _stricmp should be avoided as it uses the current
@@ -1283,77 +952,9 @@ USHORT UtilCaptureStackBackTrace(
 // you've got a problem.
 int __cdecl stricmpUTF8(const char* szStr1, const char* szStr2);
 
-#ifdef _DEBUG
-class DisableDelayLoadCheckForOleaut32
-{
-public:
-    DisableDelayLoadCheckForOleaut32();
-    ~DisableDelayLoadCheckForOleaut32();
-};
-#endif
-
-extern LONG g_OLEAUT32_Loaded;
-
-#ifndef FEATURE_CORECLR
-#define ENSURE_OLEAUT32_LOADED()                                            \
-{                                                                           \
-    /* Should only be used in FCALL */                                      \
-    _ASSERTE (__me != 0);                                                   \
-    if (g_OLEAUT32_Loaded == 0)                                             \
-    {                                                                       \
-        /* CLRLoadLibrary/CLRFreeLibrary claim they trigger, but this */    \
-        /* isn't really true in this case because we're loading oleaut32 */ \
-        /* which we know doesn't contain any managed code in its DLLMain */ \
-        CONTRACT_VIOLATION(GCViolation|SOToleranceViolation);               \
-        HMODULE hMod = CLRLoadLibrary(W("oleaut32"));                         \
-        if (hMod == NULL)                                                   \
-        {                                                                   \
-            __FCThrow(__me, kOutOfMemoryException, 0, 0, 0, 0);             \
-        }                                                                   \
-        else                                                                \
-        {                                                                   \
-            if (FastInterlockExchange(&g_OLEAUT32_Loaded, 1) == 1)          \
-            {                                                               \
-                CLRFreeLibrary(hMod);                                       \
-            }                                                               \
-        }                                                                   \
-    }                                                                       \
-}                                                                           \
-INDEBUG(DisableDelayLoadCheckForOleaut32 _disableOleaut32Check);
-#else // !FEATURE_CORECLR
-#define ENSURE_OLEAUT32_LOADED()
-#endif // !FEATURE_CORECLR
-
 BOOL DbgIsExecutable(LPVOID lpMem, SIZE_T length);
 
-#ifndef DACCESS_COMPILE
-// returns if ARM was already enabled or not.
-BOOL EnableARM();
-#endif // !DACCESS_COMPILE
-
 int GetRandomInt(int maxVal);
-
-class InternalCasingHelper {
-
-    private:
-    // Convert szIn to lower case in the Invariant locale.
-    // TODO: NLS Arrowhead -Called by the two ToLowers)
-    static INT32 InvariantToLowerHelper(__out_bcount_opt(cMaxBytes) LPUTF8 szOut, int cMaxBytes, __in_z LPCUTF8 szIn, BOOL fAllowThrow);
-
-    public:
-    //
-    // Native helper functions to do correct casing operations in
-    // runtime native code.
-    //
-
-    // Convert szIn to lower case in the Invariant locale. (WARNING: May throw.)
-    static INT32 InvariantToLower(__out_bcount_opt(cMaxBytes) LPUTF8 szOut, int cMaxBytes, __in_z LPCUTF8 szIn);
-
-    // Convert szIn to lower case in the Invariant locale. (WARNING: This version
-    // won't throw but it will use stack space as an intermediary (so don't
-    // use for ridiculously long strings.)
-    static INT32 InvariantToLowerNoThrow(__out_bcount_opt(cMaxBytes) LPUTF8 szOut, int cMaxBytes, __in_z LPCUTF8 szIn);
-};
 
 //
 //

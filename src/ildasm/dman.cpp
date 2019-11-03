@@ -10,7 +10,6 @@
 #include "debugmacros.h"
 #include "corpriv.h"
 #include "dasmenum.hpp"
-#include "dasmgui.h"
 #include "formattype.h"
 #include "dis.h"
 
@@ -233,8 +232,9 @@ void DumpAssembly(void* GUICookie, BOOL fFullDump)
             if(IsAfPA_NoPlatform(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("noplatform "));
             if(IsAfPA_MSIL(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("cil "));
             if(IsAfPA_x86(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("x86 "));
-            if(IsAfPA_IA64(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("ia64 "));
             if(IsAfPA_AMD64(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("amd64 "));
+            if(IsAfPA_ARM(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("arm "));
+            if(IsAfPA_ARM64(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("arm64 "));
 
 
             wzName[ulNameLen] = 0;
@@ -356,8 +356,9 @@ void DumpAssemblyRefs(void* GUICookie)
                     if(IsAfContentType_WindowsRuntime(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("windowsruntime "));
                     if(IsAfPA_MSIL(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("cil "));
                     if(IsAfPA_x86(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("x86 "));
-                    if(IsAfPA_IA64(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("ia64 "));
                     if(IsAfPA_AMD64(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("amd64 "));
+                    if(IsAfPA_ARM(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("arm "));
+                    if(IsAfPA_ARM64(dwFlags)) strcat_s(szString,SZSTRING_SIZE,KEYWORD("arm64 "));
 
                     {
                         char* sz = new char[3*ulNameLen+32];
@@ -727,7 +728,7 @@ static void DumpResourceFile(void *GUICookie, BYTE *pRes, DWORD dwOffset, LPCWST
        memcpy(&L,pParam->pRes+pParam->dwOffset,sizeof(DWORD));
        sprintf_s(szString,SZSTRING_SIZE,COMMENT("%s// Offset: 0x%8.8X Length: 0x%8.8X"), g_szAsmCodeIndent,pParam->dwOffset,L);
        printLine(pParam->GUICookie,szString);
-        if ((!(g_Mode & MODE_GUI)) && (g_pFile != NULL)) // embedded resource -- dump as .resources file
+        if (g_pFile != NULL) // embedded resource -- dump as .resources file
         {
             FILE *pF = NULL;
             _wfopen_s(&pF, pParam->wzFileName, W("wb"));
@@ -942,11 +943,6 @@ void DumpManifestResources(void* GUICookie)
     else nManRes=0;
 }
 
-#ifndef FEATURE_CORECLR
-// CLR internal hosting API
-extern ICLRRuntimeHostInternal *g_pCLRRuntimeHostInternal;
-#endif
-
 IMetaDataAssemblyImport* GetAssemblyImport(void* GUICookie)
 {
     struct Param
@@ -996,7 +992,6 @@ IMetaDataAssemblyImport* GetAssemblyImport(void* GUICookie)
             if(pdwSize && *pdwSize)
             {
                 pbManifest += sizeof(DWORD);
-#ifdef FEATURE_CORECLR
                 if (SUCCEEDED(hr = getMetaDataInternalInterface(
                     pbManifest,
                     VAL32(*pdwSize),
@@ -1008,19 +1003,6 @@ IMetaDataAssemblyImport* GetAssemblyImport(void* GUICookie)
                         pParam->pImport,
                         IID_IMetaDataAssemblyImport,
                         (LPVOID *)&pParam->pAssemblyImport)))
-#else
-                if (SUCCEEDED(hr = g_pCLRRuntimeHostInternal->GetMetaDataInternalInterface(
-                                    pbManifest,
-                                    VAL32(*pdwSize),
-                                    ofRead,
-                                    IID_IMDInternalImport,
-                                    (LPVOID *)&pParam->pImport)))
-                {
-                    if (FAILED(hr = g_pCLRRuntimeHostInternal->GetMetaDataPublicInterfaceFromInternal(
-                        pParam->pImport, 
-                        IID_IMetaDataAssemblyImport, 
-                        (LPVOID *)&pParam->pAssemblyImport)))
-#endif
                     {
                         sprintf_s(szString,SZSTRING_SIZE,RstrUTF(IDS_E_MDAFROMMDI),hr);
                         printLine(pParam->GUICookie,COMMENT(szString));

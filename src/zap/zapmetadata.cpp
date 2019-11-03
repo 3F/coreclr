@@ -162,6 +162,15 @@ void ZapILMetaData::CopyRVAFields()
     // Managed C++ binaries depend on the order of RVA fields
     qsort(&fields[0], fields.GetCount(), sizeof(RVAField), RVAFieldCmp);
 
+#ifdef _DEBUG
+    for (COUNT_T i = 0; i < fields.GetCount(); i++)
+    {
+        // Make sure no RVA field node has been placed during compilation. This would mess up the ordering
+        // and can potentially break the Managed C++ scenarios.
+        _ASSERTE(!GetRVAField(fields[i].pData)->IsPlaced());
+    }
+#endif
+
     for (COUNT_T i = 0; i < fields.GetCount(); i++)
     {
         RVAField field = fields[i];
@@ -172,7 +181,7 @@ void ZapILMetaData::CopyRVAFields()
         pRVADataNode->UpdateSizeAndAlignment(field.cbSize, field.cbAlignment);
 
         if (!pRVADataNode->IsPlaced())
-             m_pImage->m_pReadOnlyDataSection->Place(pRVADataNode);
+            m_pImage->m_pReadOnlyDataSection->Place(pRVADataNode);
     }
 }
 
@@ -299,7 +308,7 @@ void ZapILMetaData::CopyMetaData()
 
         // unless we're producing an instrumented version - the IBC logging for meta data doesn't
         // work for the hot/cold split version.
-        if (m_pImage->m_zapper->m_pOpt->m_compilerFlags & CORJIT_FLG_BBINSTR)
+        if (m_pImage->m_zapper->m_pOpt->m_compilerFlags.IsSet(CORJIT_FLAGS::CORJIT_FLAG_BBINSTR))
             IfFailThrow(pIMetaDataCorProfileData->SetCorProfileData(NULL));
         else
             IfFailThrow(pIMetaDataCorProfileData->SetCorProfileData(m_pImage->GetProfileData()));
@@ -308,7 +317,7 @@ void ZapILMetaData::CopyMetaData()
     // If we are ngening with the tuning option, the IBC data that is
     // generated gets reordered and may be  inconsistent with the
     // metadata in the original IL image. Let's just skip that case.
-    if (!(m_pImage->m_zapper->m_pOpt->m_compilerFlags & CORJIT_FLG_BBINSTR))
+    if (!m_pImage->m_zapper->m_pOpt->m_compilerFlags.IsSet(CORJIT_FLAGS::CORJIT_FLAG_BBINSTR))
     {
         // Communicate the reordering option for saving
         NonVMComHolder<IMDInternalMetadataReorderingOptions> pIMDInternalMetadataReorderingOptions;

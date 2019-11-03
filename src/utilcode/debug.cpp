@@ -76,16 +76,6 @@ BOOL ContinueOnAssert()
     return fNoGui.val(CLRConfig::INTERNAL_ContinueOnAssert);
 }
 
-BOOL NoGuiOnAssert()
-{
-    STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_DEBUG_ONLY;
-
-    static ConfigDWORD fNoGui;
-    return fNoGui.val(CLRConfig::INTERNAL_NoGuiOnAssert);
-}
-
 void DoRaiseExceptionOnAssert(DWORD chance)
 {
     STATIC_CONTRACT_NOTHROW;
@@ -190,7 +180,7 @@ VOID TerminateOnAssert()
     STATIC_CONTRACT_DEBUG_ONLY;
 
     ShutdownLogging();
-    TerminateProcess(GetCurrentProcess(), 123456789);
+    RaiseFailFastException(NULL, NULL, 0);
 }
 
 // Whether this thread is already displaying an assert dialog.
@@ -225,7 +215,6 @@ VOID LogAssert(
 {
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_SO_TOLERANT;
     STATIC_CONTRACT_DEBUG_ONLY;
 
     // Log asserts to the stress log. Note that we can't include the szExpr b/c that 
@@ -294,7 +283,7 @@ BOOL LaunchJITDebugger()
         STARTUPINFO StartupInfo;
         memset(&StartupInfo, 0, sizeof(StartupInfo));
         StartupInfo.cb = sizeof(StartupInfo);
-        StartupInfo.lpDesktop = W("Winsta0\\Default");
+        StartupInfo.lpDesktop = const_cast<LPWSTR>(W("Winsta0\\Default"));
 
         PROCESS_INFORMATION ProcessInformation;
         if (WszCreateProcess(NULL, cmdLine, NULL, NULL, TRUE, 0, NULL, NULL, &StartupInfo, &ProcessInformation))
@@ -317,7 +306,7 @@ BOOL LaunchJITDebugger()
 // This function is called in order to ultimately return an out of memory
 // failed hresult.  But this guy will check what environment you are running
 // in and give an assert for running in a debug build environment.  Usually
-// out of memory on a dev machine is a bogus alloction, and this allows you
+// out of memory on a dev machine is a bogus allocation, and this allows you
 // to catch such errors.  But when run in a stress envrionment where you are
 // trying to get out of memory, assert behavior stops the tests.
 //*****************************************************************************
@@ -441,14 +430,14 @@ bool _DbgBreakCheck(
         return false;       // don't stop debugger. No gui.
     }
 
+    if (IsDebuggerPresent() || DebugBreakOnAssert())
+    {
+        return true;       // like a retry
+    }
+
     if (NoGuiOnAssert())
     {
         TerminateOnAssert();
-    }
-
-    if (DebugBreakOnAssert())
-    {
-        return true;       // like a retry
     }
 
     if (IsDisplayingAssertDlg())
@@ -631,12 +620,6 @@ CHAR g_szExprWithStack2[10480];
 #endif
 void *dbgForceToMemory;     // dummy pointer that pessimises enregistration
 
-#ifdef MDA_SUPPORTED
-#ifdef _DEBUG
-BOOL g_bMdaDisableAsserts = FALSE;
-#endif
-#endif
-
 int g_BufferLock = -1;
 
 VOID DbgAssertDialog(const char *szFile, int iLine, const char *szExpr)
@@ -647,13 +630,6 @@ VOID DbgAssertDialog(const char *szFile, int iLine, const char *szExpr)
     STATIC_CONTRACT_SUPPORTS_DAC_HOST_ONLY;
     
     DEBUG_ONLY_FUNCTION;
-
-#ifdef MDA_SUPPORTED
-#ifdef _DEBUG
-    if (g_bMdaDisableAsserts)
-        return;
-#endif
-#endif
 
 #ifdef DACCESS_COMPILE
     // In the DAC case, asserts can mean one of two things.
@@ -697,19 +673,6 @@ VOID DbgAssertDialog(const char *szFile, int iLine, const char *szExpr)
 
     DWORD dwAssertStacktrace = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_AssertStacktrace);
 
-#if !defined(DACCESS_COMPILE) && defined(FEATURE_STACK_PROBE)
-    //global g_fpCheckNStackPagesAvailable is not present when SO infrastructure code is not present
-    // Trying to get a stack trace if there is little stack available can cause a silent process
-    // teardown, so only try to do this there is plenty of stack.
-    if ((dwAssertStacktrace) != 0 && (g_fpCheckNStackPagesAvailable != NULL)) 
-    {
-        if (!g_fpCheckNStackPagesAvailable(12)) 
-        {
-            fConstrained = TRUE;
-        }
-    }   
-#endif
-    
     LONG lAlreadyOwned = InterlockedExchange((LPLONG)&g_BufferLock, 1);
     if (fConstrained || dwAssertStacktrace == 0 || lAlreadyOwned == 1)
     {
@@ -794,6 +757,16 @@ bool GetStackTraceAtContext(SString & s, CONTEXT * pContext)
 #endif // !defined(DACCESS_COMPILE)
 #endif // _DEBUG
 
+BOOL NoGuiOnAssert()
+{
+    STATIC_CONTRACT_NOTHROW;
+    STATIC_CONTRACT_GC_NOTRIGGER;
+    STATIC_CONTRACT_DEBUG_ONLY;
+
+    static ConfigDWORD fNoGui;
+    return fNoGui.val(CLRConfig::INTERNAL_NoGuiOnAssert);
+}
+
 // This helper will throw up a message box without allocating or using stack if possible, and is
 // appropriate for either low memory or low stack situations.
 int LowResourceMessageBoxHelperAnsi(
@@ -870,27 +843,9 @@ void DECLSPEC_NORETURN __FreeBuildAssertFail(const char *szFile, int iLine, cons
 
     _flushall();
 
-    //    TerminateOnAssert();
     ShutdownLogging();
 
-    // Failing here implies an error in the runtime - hence we use
-    // COR_E_EXECUTIONENGINE
-    TerminateProcess(GetCurrentProcess(), COR_E_EXECUTIONENGINE);
+    RaiseFailFastException(NULL, NULL, 0);
 
     UNREACHABLE();
 }
-
-//===================================================================================
-// Used by the ex.h macro: EX_CATCH_HRESULT_AND_NGEN_CLEAN(_hr)
-// which is used by ngen and mscorsvc to catch unexpected HRESULT
-// from one of the RPC calls.
-//===================================================================================
-void RetailAssertIfExpectedClean()
-{
-    static ConfigDWORD g_NGenClean;
-    if (g_NGenClean.val(CLRConfig::EXTERNAL_NGenClean) == 1) 
-    {
-        _ASSERTE_ALL_BUILDS("clr/src/Utilcode/Debug.cpp", !"Error during NGen:  expected no exceptions to be thrown");
-    }
-}
-

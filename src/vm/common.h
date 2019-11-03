@@ -66,6 +66,7 @@
 
 
 #include <stdint.h>
+#include <stddef.h>
 #include <winwrap.h>
 
 
@@ -74,7 +75,6 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include <objbase.h>
-#include <stddef.h>
 #include <float.h>
 #include <math.h>
 #include <time.h>
@@ -90,18 +90,9 @@
 
 #include "volatile.h"
 
-// make all the unsafe redefinitions available
-#include "unsafe.h"
-
 #include <../../debug/inc/dbgtargetcontext.h>
 
 //-----------------------------------------------------------------------------------------------------------
-
-#include "compatibilityflags.h"
-extern BOOL GetCompatibilityFlag(CompatibilityFlag flag);
-#ifndef FEATURE_CORECLR
-extern DWORD* GetGlobalCompatibilityFlags();
-#endif // !FEATURE_CORECLR
 
 #include "strongname.h"
 #include "stdmacros.h"
@@ -120,11 +111,11 @@ extern DWORD* GetGlobalCompatibilityFlags();
 
 typedef VPTR(class LoaderAllocator)     PTR_LoaderAllocator;
 typedef VPTR(class AppDomain)           PTR_AppDomain;
-typedef VPTR(class AppDomainBaseObject) PTR_AppDomainBaseObject;
 typedef DPTR(class ArrayBase)           PTR_ArrayBase;
 typedef DPTR(class ArrayTypeDesc)       PTR_ArrayTypeDesc;
 typedef DPTR(class Assembly)            PTR_Assembly;
 typedef DPTR(class AssemblyBaseObject)  PTR_AssemblyBaseObject;
+typedef DPTR(class AssemblyLoadContextBaseObject) PTR_AssemblyLoadContextBaseObject;
 typedef DPTR(class AssemblyNameBaseObject) PTR_AssemblyNameBaseObject;
 typedef VPTR(class BaseDomain)          PTR_BaseDomain;
 typedef DPTR(class ClassLoader)         PTR_ClassLoader;
@@ -162,6 +153,7 @@ typedef DPTR(class NDirectMethodDesc)   PTR_NDirectMethodDesc;
 typedef VPTR(class Thread)              PTR_Thread;
 typedef DPTR(class Object)              PTR_Object;
 typedef DPTR(PTR_Object)                PTR_PTR_Object;
+typedef DPTR(class DelegateObject)      PTR_DelegateObject;
 typedef DPTR(class ObjHeader)           PTR_ObjHeader;
 typedef DPTR(class Precode)             PTR_Precode;
 typedef VPTR(class ReflectionModule)    PTR_ReflectionModule;
@@ -173,11 +165,13 @@ typedef DPTR(class ReJitManager)        PTR_ReJitManager;
 typedef DPTR(struct ReJitInfo)          PTR_ReJitInfo;
 typedef DPTR(struct SharedReJitInfo)    PTR_SharedReJitInfo;
 typedef DPTR(class StringObject)        PTR_StringObject;
-typedef DPTR(class StringBufferObject)  PTR_StringBufferObject;
+#ifdef FEATURE_UTF8STRING
+typedef DPTR(class Utf8StringObject)    PTR_Utf8StringObject;
+#endif // FEATURE_UTF8STRING
 typedef DPTR(class TypeHandle)          PTR_TypeHandle;
 typedef VPTR(class VirtualCallStubManager) PTR_VirtualCallStubManager;
 typedef VPTR(class VirtualCallStubManagerManager) PTR_VirtualCallStubManagerManager;
-typedef VPTR(class GCHeap)              PTR_GCHeap;
+typedef VPTR(class IGCHeap)             PTR_IGCHeap;
 
 //
 // _UNCHECKED_OBJECTREF is for code that can't deal with DEBUG OBJECTREFs
@@ -271,10 +265,6 @@ FORCEINLINE void* memcpyUnsafe(void *dest, const void *src, size_t len)
     extern "C" void *  __cdecl GCSafeMemCpy(void *, const void *, size_t);
     #define memcpy(dest, src, len) GCSafeMemCpy(dest, src, len)
     #endif // !defined(memcpy)
-
-    #if !defined(CHECK_APP_DOMAIN_LEAKS)
-    #define CHECK_APP_DOMAIN_LEAKS 1
-    #endif
 #else // !_DEBUG && !DACCESS_COMPILE && !CROSSGEN_COMPILE
     FORCEINLINE void* memcpyNoGCRefs(void * dest, const void * src, size_t len) {
             WRAPPER_NO_CONTRACT;
@@ -323,21 +313,17 @@ namespace Loader
 #include "eeconfig.h"
 
 #include "spinlock.h"
-#include "objecthandle.h"
-#include "declsec.h"
 
 #ifdef FEATURE_COMINTEROP 
 #include "stdinterfaces.h"
 #endif
 
 #include "typehandle.h"
-#include "perfcounters.h"
 #include "methodtable.h"
 #include "typectxt.h"
 
 #include "eehash.h"
 
-#include "handletable.h"
 #include "vars.hpp"
 #include "eventstore.hpp"
 
@@ -345,7 +331,6 @@ namespace Loader
 #include "regdisp.h"
 #include "stackframe.h"
 #include "gms.h"
-#include "stackprobe.h"
 #include "fcall.h"
 #include "syncblk.h"
 #include "gcdesc.h"
@@ -366,7 +351,6 @@ namespace Loader
 #include "threads.h"
 #include "clrex.inl"
 #ifdef FEATURE_COMINTEROP
-    // These need to be included *after* threads.h so that they can properly use LeaveRuntimeHolder
     #include "windowsruntime.h"
     #include "windowsstring.h"
 #endif
@@ -387,7 +371,6 @@ namespace Loader
 #include "interoputil.h"
 #include "wrappers.h"
 #include "dynamicmethod.h"
-#include "mixedmode.hpp"
 
 #include "gcstress.h"
 
@@ -399,12 +382,7 @@ inline VOID UnsafeEEEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_CAN_TAKE_LOCK;
 
-#ifndef FEATURE_CORECLR
-    if (CLRTaskHosted()) {
-        Thread::BeginThreadAffinity();
-    }
-#endif // !FEATURE_CORECLR
-    UnsafeEnterCriticalSection(lpCriticalSection);
+    EnterCriticalSection(lpCriticalSection);
     INCTHREADLOCKCOUNT();
 }
 
@@ -413,13 +391,8 @@ inline VOID UnsafeEELeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
 
-    UnsafeLeaveCriticalSection(lpCriticalSection);
+    LeaveCriticalSection(lpCriticalSection);
     DECTHREADLOCKCOUNT();
-#ifndef FEATURE_CORECLR
-    if (CLRTaskHosted()) {
-        Thread::EndThreadAffinity();
-    }
-#endif // !FEATURE_CORECLR
 }
 
 inline BOOL UnsafeEETryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
@@ -428,7 +401,7 @@ inline BOOL UnsafeEETryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_CAN_TAKE_LOCK;
 
-    BOOL fEnteredCriticalSection = UnsafeTryEnterCriticalSection(lpCriticalSection);
+    BOOL fEnteredCriticalSection = TryEnterCriticalSection(lpCriticalSection);
     if(fEnteredCriticalSection)
     {
         INCTHREADLOCKCOUNT();
@@ -487,50 +460,21 @@ extern DummyGlobalContract ___contract;
 #include "object.inl"
 #include "clsload.inl"
 #include "domainfile.inl"
-#include "handletable.inl"
 #include "method.inl"
-#include "stackprobe.inl"
 #include "syncblk.inl"
 #include "threads.inl"
 #include "eehash.inl"
-#include "mscorcfg.h"
 #ifdef FEATURE_COMINTEROP
 #include "WinRTRedirector.h"
 #include "winrtredirector.inl"
 #endif // FEATURE_COMINTEROP
-
-inline HRESULT CreateConfigStreamHelper(LPCWSTR filename, IStream** pOutStream)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        MODE_ANY;
-    }
-    CONTRACTL_END
-
-    HRESULT hr =S_OK;
-
-    EX_TRY
-    {
-        hr = CreateConfigStream( filename, pOutStream);
-    }
-    EX_CATCH_HRESULT(hr);
-
-    return hr;
-}
-
+#include "eventtrace.inl"
 
 #if defined(COMMON_TURNED_FPO_ON)
 #pragma optimize("", on)        // Go back to command line default optimizations
 #undef COMMON_TURNED_FPO_ON
 #undef FPO_ON
 #endif
-
-extern INT64 g_PauseTime;          // Total duration of all pauses in the runtime
-extern Volatile<BOOL> g_IsPaused;   // True if the runtime is Paused for FAS
-extern CLREventStatic g_ClrResumeEvent;  // Event fired when the runtime is resumed after a Pause for FAS
-INT64 AdditionalWait(INT64 sPauseTime, INT64 sTime, INT64 expDuration);
 
 #endif // !_common_h_
 

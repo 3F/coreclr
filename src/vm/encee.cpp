@@ -17,6 +17,10 @@
 #include "excep.h"
 #include "stackwalk.h"
 
+#ifdef DACCESS_COMPILE
+#include "../debug/daccess/gcinterface.dac.h"
+#endif // DACCESS_COMPILE
+
 #ifdef EnC_SUPPORTED
 
 // can't get this on the helper thread at runtime in ResolveField, so make it static and get when add a field.
@@ -149,7 +153,11 @@ HRESULT EditAndContinueModule::ApplyEditAndContinue(
 
     HRESULT hr = S_OK;
     HENUMInternal enumENC;
-    
+
+    BYTE *pLocalILMemory = NULL;
+    IMDInternalImport *pMDImport = NULL;
+    IMDInternalImport *pNewMDImport = NULL;
+
     CONTRACT_VIOLATION(GCViolation);    // SafeComHolder goes to preemptive mode, which will trigger a GC
     SafeComHolder<IMDInternalImportENC> pIMDInternalImportENC;
     SafeComHolder<IMetaDataEmit> pEmitter;
@@ -175,8 +183,7 @@ HRESULT EditAndContinueModule::ApplyEditAndContinue(
     IfFailGo(hr);
 
     // Grab the current importer.
-    IMDInternalImport *pMDImport = GetMDImport();
-    IMDInternalImport *pNewMDImport;
+    pMDImport = GetMDImport();
 
     // Apply the EnC delta to this module's metadata.
     IfFailGo(pMDImport->ApplyEditAndContinue(pDeltaMD, cbDeltaMD, &pNewMDImport));
@@ -195,7 +202,7 @@ HRESULT EditAndContinueModule::ApplyEditAndContinue(
     IfFailGo(GetMetaDataPublicInterfaceFromInternal(pMDImport, IID_IMetaDataEmit, (void **)&pEmitter));
 
     // Copy the deltaIL into our RVAable IL memory
-    BYTE *pLocalILMemory = new BYTE[cbDeltaIL];
+    pLocalILMemory = new BYTE[cbDeltaIL];
     memcpy(pLocalILMemory, pDeltaIL, cbDeltaIL);
 
     // Enumerate all of the EnC delta tokens 
@@ -203,7 +210,6 @@ HRESULT EditAndContinueModule::ApplyEditAndContinue(
     IfFailGo(pIMDInternalImportENC->EnumDeltaTokensInit(&enumENC));
 
     mdToken token;
-    FieldDesc *  pField = NULL;
     while (pIMDInternalImportENC->EnumNext(&enumENC, &token)) 
     {
         STRESS_LOG3(LF_ENC, LL_INFO100, "EACM::AEAC: updated token 0x%x; type 0x%x; rid 0x%x\n", token, TypeFromToken(token), RidFromToken(token));
@@ -248,8 +254,7 @@ HRESULT EditAndContinueModule::ApplyEditAndContinue(
                 // FieldDef token - add a new field
                 LOG((LF_ENC, LL_INFO10000, "EACM::AEAC: Found field 0x%x\n", token));
 
-                pField = LookupFieldDef(token);
-                if (pField) 
+                if (LookupFieldDef(token)) 
                 {
                     // Field already exists - just ignore for now
                     continue;
@@ -678,6 +683,7 @@ HRESULT EditAndContinueModule::ResumeInUpdatedFunction(
     // If we fail for any reason we have already potentially trashed with new locals and we have also unwound any
     // Win32 handlers on the stack so cannot ever return from this function. 
     EEPOLICY_HANDLE_FATAL_ERROR(CORDBG_E_ENC_INTERNAL_ERROR);
+    return hr;
 }
 
 //---------------------------------------------------------------------------------------
@@ -1083,14 +1089,13 @@ EnCAddedField *EnCAddedField::Allocate(OBJECTREF thisPointer, EnCFieldDesc *pFD)
     EnCAddedField *pEntry = new EnCAddedField;
     pEntry->m_pFieldDesc = pFD;
 
-    _ASSERTE(!pFD->GetApproxEnclosingMethodTable()->IsDomainNeutral());
     AppDomain *pDomain = (AppDomain*) pFD->GetApproxEnclosingMethodTable()->GetDomain();
 
     // We need to associate the contents of the new field with the object it is attached to 
     // in a way that mimics the lifetime behavior of a normal field reference.  Specifically,
     // when the object is collected, the field should also be collected (assuming there are no
     // other references), but references to the field shouldn't keep the object alive.
-    // To acheive this, we have introduced the concept of a "dependent handle" which provides
+    // To achieve this, we have introduced the concept of a "dependent handle" which provides
     // the appropriate semantics.  The dependent handle has a weak reference to a "primary object"
     // (the object getting a new field in this case), and a strong reference to a secondary object.
     // When the primary object is collected, the reference to the secondary object is released.
@@ -1138,9 +1143,10 @@ EnCAddedField *EnCAddedField::Allocate(OBJECTREF thisPointer, EnCFieldDesc *pFD)
         FieldDesc *pHelperField = MscorlibBinder::GetField(FIELD__ENC_HELPER__OBJECT_REFERENCE);
 
         // store the empty boxed object into the helper object
-        OBJECTREF pHelperObj = GetDependentHandleSecondary(pEntry->m_FieldData);
+        IGCHandleManager *mgr = GCHandleUtilities::GetGCHandleManager();
+        OBJECTREF pHelperObj = ObjectToOBJECTREF(mgr->GetDependentHandleSecondary(pEntry->m_FieldData));
         OBJECTREF *pHelperRef = (OBJECTREF *)pHelperField->GetAddress( pHelperObj->GetAddress() );
-        SetObjectReference( pHelperRef, obj, pDomain );
+        SetObjectReference( pHelperRef, obj);
 
         GCPROTECT_END ();
     }
@@ -1243,7 +1249,12 @@ PTR_CBYTE EnCSyncBlockInfo::ResolveField(OBJECTREF thisPointer, EnCFieldDesc *pF
 
     // we found a matching entry in the list of EnCAddedFields
     // Get the EnC helper object (see the detailed description in Allocate above)
-    OBJECTREF pHelper = GetDependentHandleSecondary(pEntry->m_FieldData);           
+#ifdef DACCESS_COMPILE
+    OBJECTREF pHelper = GetDependentHandleSecondary(pEntry->m_FieldData);
+#else // DACCESS_COMPILE
+    IGCHandleManager *mgr = GCHandleUtilities::GetGCHandleManager();
+    OBJECTREF pHelper = ObjectToOBJECTREF(mgr->GetDependentHandleSecondary(pEntry->m_FieldData));
+#endif // DACCESS_COMPILE
     _ASSERTE(pHelper != NULL);
 
     FieldDesc *pHelperFieldDesc = NULL;
@@ -1332,7 +1343,8 @@ PTR_CBYTE EnCSyncBlockInfo::ResolveOrAllocateField(OBJECTREF thisPointer, EnCFie
 
     // we found a matching entry in the list of EnCAddedFields
     // Get the EnC helper object (see the detailed description in Allocate above)
-    OBJECTREF pHelper = GetDependentHandleSecondary(pEntry->m_FieldData);           
+    IGCHandleManager *mgr = GCHandleUtilities::GetGCHandleManager();
+    OBJECTREF pHelper = ObjectToOBJECTREF(mgr->GetDependentHandleSecondary(pEntry->m_FieldData));           
     _ASSERTE(pHelper != NULL);
 
     FieldDesc * pHelperField = NULL;
@@ -1355,7 +1367,6 @@ void EnCSyncBlockInfo::Cleanup()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -1386,7 +1397,6 @@ EnCAddedStaticField *EnCAddedStaticField::Allocate(EnCFieldDesc *pFD)
     }
     CONTRACTL_END;
 
-    _ASSERTE(!pFD->GetEnclosingMethodTable()->IsDomainNeutral());
     AppDomain *pDomain = (AppDomain*) pFD->GetApproxEnclosingMethodTable()->GetDomain();
 
     // Compute the size of the fieldData entry
@@ -1415,7 +1425,7 @@ EnCAddedStaticField *EnCAddedStaticField::Allocate(EnCFieldDesc *pFD)
         OBJECTREF **pOR = (OBJECTREF**)&pEntry->m_FieldData;
         *pOR = pDomain->AllocateStaticFieldObjRefPtrs(1);
         OBJECTREF obj = AllocateObject(pFD->GetFieldTypeHandleThrowing().GetMethodTable());
-        SetObjectReference( *pOR, obj, pDomain );
+        SetObjectReference( *pOR, obj);
     } 
     else if (pFD->GetFieldType() == ELEMENT_TYPE_CLASS) 
     {

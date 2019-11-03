@@ -85,7 +85,8 @@ SVAL_IMPL(LONG,ThreadpoolMgr,MaxFreeCPThreads);                   // = MaxFreeCP
 
 Volatile<LONG> ThreadpoolMgr::NumCPInfrastructureThreads = 0;      // number of threads currently busy handling draining cycle
 
-SVAL_IMPL(ThreadpoolMgr::ThreadCounter, ThreadpoolMgr, WorkerCounter);
+// Cacheline aligned, hot variable
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) SVAL_IMPL(ThreadpoolMgr::ThreadCounter, ThreadpoolMgr, WorkerCounter);
 
 SVAL_IMPL(LONG,ThreadpoolMgr,MinLimitTotalWorkerThreads);          // = MaxLimitCPThreadsPerCPU * number of CPUS
 SVAL_IMPL(LONG,ThreadpoolMgr,MaxLimitTotalWorkerThreads);        // = MaxLimitCPThreadsPerCPU * number of CPUS
@@ -95,11 +96,15 @@ LONG    ThreadpoolMgr::cpuUtilizationAverage = 0;
 
 HillClimbing ThreadpoolMgr::HillClimbingInstance;
 
-Volatile<LONG> ThreadpoolMgr::PriorCompletedWorkRequests = 0;
-Volatile<DWORD> ThreadpoolMgr::PriorCompletedWorkRequestsTime;
-Volatile<DWORD> ThreadpoolMgr::NextCompletedWorkRequestsTime;
+// Cacheline aligned, 3 hot variables updated in a group
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) LONG ThreadpoolMgr::PriorCompletedWorkRequests = 0;
+DWORD ThreadpoolMgr::PriorCompletedWorkRequestsTime;
+DWORD ThreadpoolMgr::NextCompletedWorkRequestsTime;
+
 LARGE_INTEGER ThreadpoolMgr::CurrentSampleStartTime;
 
+unsigned int ThreadpoolMgr::WorkerThreadSpinLimit;
+bool ThreadpoolMgr::IsHillClimbingDisabled;
 int ThreadpoolMgr::ThreadAdjustmentInterval;
 
 #define INVALID_HANDLE ((HANDLE) -1)
@@ -111,8 +116,12 @@ int ThreadpoolMgr::ThreadAdjustmentInterval;
 #define SUSPEND_TIME GATE_THREAD_DELAY+100      // milliseconds to suspend during SuspendProcessing
 
 LONG ThreadpoolMgr::Initialization=0;           // indicator of whether the threadpool is initialized.
-Volatile<unsigned int> ThreadpoolMgr::LastDequeueTime; // used to determine if work items are getting thread starved
-int ThreadpoolMgr::offset_counter = 0;
+
+// Cacheline aligned, hot variable
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) unsigned int ThreadpoolMgr::LastDequeueTime; // used to determine if work items are getting thread starved
+
+// Move out of from preceeding variables' cache line
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) int ThreadpoolMgr::offset_counter = 0;
 
 SPTR_IMPL(WorkRequest,ThreadpoolMgr,WorkRequestHead);        // Head of work request queue
 SPTR_IMPL(WorkRequest,ThreadpoolMgr,WorkRequestTail);        // Head of work request queue
@@ -129,21 +138,25 @@ CLREvent * ThreadpoolMgr::RetiredCPWakeupEvent;       // wakeup event for comple
 CrstStatic ThreadpoolMgr::WaitThreadsCriticalSection;
 ThreadpoolMgr::LIST_ENTRY ThreadpoolMgr::WaitThreadsHead;
 
-ThreadpoolMgr::UnfairSemaphore* ThreadpoolMgr::WorkerSemaphore;
-CLRSemaphore* ThreadpoolMgr::RetiredWorkerSemaphore;
+CLRLifoSemaphore* ThreadpoolMgr::WorkerSemaphore;
+CLRLifoSemaphore* ThreadpoolMgr::RetiredWorkerSemaphore;
 
 CrstStatic ThreadpoolMgr::TimerQueueCriticalSection;
 HANDLE ThreadpoolMgr::TimerThread=NULL;
 Thread *ThreadpoolMgr::pTimerThread=NULL;
-DWORD ThreadpoolMgr::LastTickCount;
+
+// Cacheline aligned, hot variable
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) DWORD ThreadpoolMgr::LastTickCount;
 
 #ifdef _DEBUG
 DWORD ThreadpoolMgr::TickCountAdjustment=0;
 #endif
 
-LONG  ThreadpoolMgr::GateThreadStatus=GATE_THREAD_STATUS_NOT_RUNNING;
+// Cacheline aligned, hot variable
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) LONG  ThreadpoolMgr::GateThreadStatus=GATE_THREAD_STATUS_NOT_RUNNING;
 
-ThreadpoolMgr::RecycledListsWrapper ThreadpoolMgr::RecycledLists;
+// Move out of from preceeding variables' cache line
+DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) ThreadpoolMgr::RecycledListsWrapper ThreadpoolMgr::RecycledLists;
 
 ThreadpoolMgr::TimerInfo *ThreadpoolMgr::TimerInfosToBeRecycled = NULL;
 
@@ -332,16 +345,22 @@ BOOL ThreadpoolMgr::Initialize()
     UnManagedPerAppDomainTPCount* pADTPCount;
     pADTPCount = PerAppDomainTPCountList::GetUnmanagedTPCount();
 
+#ifndef FEATURE_PAL
     //ThreadPool_CPUGroup
     CPUGroupInfo::EnsureInitialized();
     if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
         NumberOfProcessors = CPUGroupInfo::GetNumActiveProcessors();
     else
         NumberOfProcessors = GetCurrentProcessCpuCount();
+#else // !FEATURE_PAL
+    NumberOfProcessors = GetCurrentProcessCpuCount();
+#endif // !FEATURE_PAL
     InitPlatformVariables();
 
     EX_TRY
     {
+        WorkerThreadSpinLimit = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_ThreadPool_UnfairSemaphoreSpinLimit);
+        IsHillClimbingDisabled = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_HillClimbing_Disable) != 0;
         ThreadAdjustmentInterval = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_HillClimbing_SampleIntervalLow);
         
         pADTPCount->InitResources();
@@ -359,25 +378,21 @@ BOOL ThreadpoolMgr::Initialize()
         RetiredCPWakeupEvent->CreateAutoEvent(FALSE);
         _ASSERTE(RetiredCPWakeupEvent->IsValid());
 
-        WorkerSemaphore = new UnfairSemaphore(ThreadCounter::MaxPossibleCount);
+        WorkerSemaphore = new CLRLifoSemaphore();
+        WorkerSemaphore->Create(0, ThreadCounter::MaxPossibleCount);
 
-        RetiredWorkerSemaphore = new CLRSemaphore();
+        RetiredWorkerSemaphore = new CLRLifoSemaphore();
         RetiredWorkerSemaphore->Create(0, ThreadCounter::MaxPossibleCount);
 
-    //ThreadPool_CPUGroup
-    if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
+#ifndef FEATURE_PAL
+        //ThreadPool_CPUGroup
+        if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
             RecycledLists.Initialize( CPUGroupInfo::GetNumActiveProcessors() );
         else
-        RecycledLists.Initialize( g_SystemInfo.dwNumberOfProcessors );
-    /*
-        {
-            SYSTEM_INFO sysInfo;
-
-            ::GetSystemInfo( &sysInfo );
-
-            RecycledLists.Initialize( sysInfo.dwNumberOfProcessors );
-        }
-    */
+            RecycledLists.Initialize( g_SystemInfo.dwNumberOfProcessors );
+#else // !FEATURE_PAL
+        RecycledLists.Initialize( PAL_GetTotalCpuCount() );
+#endif // !FEATURE_PAL
     }
     EX_CATCH
     {
@@ -389,7 +404,7 @@ BOOL ThreadpoolMgr::Initialize()
             RetiredCPWakeupEvent = NULL;
         }
 
-        // Note: It is fine to call Destroy on unitialized critical sections
+        // Note: It is fine to call Destroy on uninitialized critical sections
         WorkerCriticalSection.Destroy();
         WaitThreadsCriticalSection.Destroy();
         TimerQueueCriticalSection.Destroy();
@@ -436,21 +451,6 @@ BOOL ThreadpoolMgr::Initialize()
     CPThreadCounter.counts.AsLongLong = counts.AsLongLong;
 
 #ifndef FEATURE_PAL    
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    if (CLRIoCompletionHosted())
-    {
-        HANDLE hPort;
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = CorHost2::GetHostIoCompletionManager()->CreateIoCompletionPort(&hPort);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-            goto end;
-
-        GlobalCompletionPort = hPort;
-    }
-    else
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
     {
         GlobalCompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE,
                                                       NULL,
@@ -520,10 +520,10 @@ BOOL ThreadpoolMgr::SetMaxThreadsHelper(DWORD MaxWorkerThreads,
     CrstHolder csh(&WorkerCriticalSection);
 
     if (MaxWorkerThreads >= (DWORD)MinLimitTotalWorkerThreads &&
-       MaxIOCompletionThreads >= (DWORD)MinLimitTotalCPThreads)
+        MaxIOCompletionThreads >= (DWORD)MinLimitTotalCPThreads &&
+        MaxWorkerThreads != 0 &&
+        MaxIOCompletionThreads != 0)
     {
-        BEGIN_SO_INTOLERANT_CODE(GetThread());
-
         if (GetForceMaxWorkerThreadsValue() == 0)
         {
             MaxLimitTotalWorkerThreads = min(MaxWorkerThreads, (DWORD)ThreadCounter::MaxPossibleCount);
@@ -542,8 +542,6 @@ BOOL ThreadpoolMgr::SetMaxThreadsHelper(DWORD MaxWorkerThreads,
             }
         }
 
-        END_SO_INTOLERANT_CODE;
-
         MaxLimitTotalCPThreads = min(MaxIOCompletionThreads, (DWORD)ThreadCounter::MaxPossibleCount);
 
         result = TRUE;
@@ -554,7 +552,7 @@ BOOL ThreadpoolMgr::SetMaxThreadsHelper(DWORD MaxWorkerThreads,
 
 /************************************************************************/
 BOOL ThreadpoolMgr::SetMaxThreads(DWORD MaxWorkerThreads,
-                                     DWORD MaxIOCompletionThreads)
+                                  DWORD MaxIOCompletionThreads)
 {
     CONTRACTL
     {
@@ -564,96 +562,16 @@ BOOL ThreadpoolMgr::SetMaxThreads(DWORD MaxWorkerThreads,
     }
     CONTRACTL_END;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostThreadpoolManager *threadpoolProvider = CorHost2::GetHostThreadpoolManager();
-    if (threadpoolProvider) {
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = threadpoolProvider->SetMaxThreads(MaxWorkerThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
+    EnsureInitialized();
 
-    IHostIoCompletionManager *ioCompletionProvider = CorHost2::GetHostIoCompletionManager();
-    if (ioCompletionProvider) {
-        HRESULT hr;
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = ioCompletionProvider->SetMaxThreads(MaxIOCompletionThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
-
-    if (threadpoolProvider && ioCompletionProvider) {
-        return TRUE;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-    if (IsInitialized())
-    {
-        return SetMaxThreadsHelper(MaxWorkerThreads, MaxIOCompletionThreads);
-    }
-
-    if (InterlockedCompareExchange(&Initialization, 1, 0) == 0)
-    {
-        Initialize();
-
-        BOOL helper_result = FALSE;
-        helper_result = SetMaxThreadsHelper(MaxWorkerThreads, MaxIOCompletionThreads);
-
-        Initialization = -1;
-        return helper_result;
-    }
-    else // someone else is initializing. Too late, return false
-    {
-        return FALSE;
-    }
-
+    return SetMaxThreadsHelper(MaxWorkerThreads, MaxIOCompletionThreads);
 }
 
 BOOL ThreadpoolMgr::GetMaxThreads(DWORD* MaxWorkerThreads,
-                                     DWORD* MaxIOCompletionThreads)
+                                  DWORD* MaxIOCompletionThreads)
 {
     LIMITED_METHOD_CONTRACT;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HRESULT hr = S_OK;
-
-    IHostThreadpoolManager *threadpoolProvider = CorHost2::GetHostThreadpoolManager();
-    if (threadpoolProvider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = threadpoolProvider->GetMaxThreads(MaxWorkerThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
-
-    IHostIoCompletionManager *ioCompletionProvider = CorHost2::GetHostIoCompletionManager();
-    if (ioCompletionProvider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = ioCompletionProvider->GetMaxThreads(MaxIOCompletionThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
-
-    if (threadpoolProvider && ioCompletionProvider) {
-        return TRUE;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
     if (!MaxWorkerThreads || !MaxIOCompletionThreads)
     {
@@ -661,44 +579,15 @@ BOOL ThreadpoolMgr::GetMaxThreads(DWORD* MaxWorkerThreads,
         return FALSE;
     }
 
-    if (IsInitialized())
-    {
-        *MaxWorkerThreads = (DWORD)MaxLimitTotalWorkerThreads;
-        *MaxIOCompletionThreads = MaxLimitTotalCPThreads;
-    }
-    else
-    {
-        BEGIN_SO_INTOLERANT_CODE_NOTHROW(GetThread(), *MaxWorkerThreads = 1024);
+    EnsureInitialized();
 
-        //ThreadPool_CPUGroup
-        CPUGroupInfo::EnsureInitialized();
-        if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
-            NumberOfProcessors = CPUGroupInfo::GetNumActiveProcessors();
-        else
-            NumberOfProcessors = GetCurrentProcessCpuCount();
-        DWORD min = GetForceMinWorkerThreadsValue();
-        if (min == 0)
-            min = NumberOfProcessors;
-
-        DWORD forceMax = GetForceMaxWorkerThreadsValue();
-        if (forceMax > 0)
-        {
-            *MaxWorkerThreads = forceMax;
-        }
-        else
-        {
-            *MaxWorkerThreads = GetDefaultMaxLimitWorkerThreads(min);
-        }
-
-        END_SO_INTOLERANT_CODE;
-
-        *MaxIOCompletionThreads = MaxLimitTotalCPThreads;
-    }
+    *MaxWorkerThreads = (DWORD)MaxLimitTotalWorkerThreads;
+    *MaxIOCompletionThreads = MaxLimitTotalCPThreads;
     return TRUE;
 }
 
 BOOL ThreadpoolMgr::SetMinThreads(DWORD MinWorkerThreads,
-                                     DWORD MinIOCompletionThreads)
+                                  DWORD MinIOCompletionThreads)
 {
     CONTRACTL
     {
@@ -708,139 +597,60 @@ BOOL ThreadpoolMgr::SetMinThreads(DWORD MinWorkerThreads,
     }
     CONTRACTL_END;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HRESULT hr = S_OK;
+    EnsureInitialized();
 
-    IHostThreadpoolManager *threadpoolProvider = CorHost2::GetHostThreadpoolManager();
-    if (threadpoolProvider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = threadpoolProvider->SetMinThreads(MinWorkerThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
+    // doesn't need to be WorkerCS, but using it to avoid race condition between setting min and max, and didn't want to create a new CS.
+    CrstHolder csh(&WorkerCriticalSection);
 
-    IHostIoCompletionManager *ioCompletionProvider = CorHost2::GetHostIoCompletionManager();
-    if (ioCompletionProvider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = ioCompletionProvider->SetMinThreads(MinIOCompletionThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
-    if (threadpoolProvider && ioCompletionProvider) {
-        return TRUE;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
+    BOOL init_result = FALSE;
 
-    if (!IsInitialized())
+    if (MinWorkerThreads >= 0 && MinIOCompletionThreads >= 0 &&
+        MinWorkerThreads <= (DWORD) MaxLimitTotalWorkerThreads &&
+        MinIOCompletionThreads <= (DWORD) MaxLimitTotalCPThreads)
     {
-        if (InterlockedCompareExchange(&Initialization, 1, 0) == 0)
+        if (GetForceMinWorkerThreadsValue() == 0)
         {
-            Initialize();
-            Initialization = -1;
-        }
-    }
+            MinLimitTotalWorkerThreads = max(1, min(MinWorkerThreads, (DWORD)ThreadCounter::MaxPossibleCount));
 
-    if (IsInitialized())
-    {
-        // doesn't need to be WorkerCS, but using it to avoid race condition between setting min and max, and didn't want to create a new CS.
-        CrstHolder csh(&WorkerCriticalSection);
-
-        BOOL init_result = false;
-
-        if (MinWorkerThreads >= 0 && MinIOCompletionThreads >= 0 &&
-            MinWorkerThreads <= (DWORD) MaxLimitTotalWorkerThreads &&
-            MinIOCompletionThreads <= (DWORD) MaxLimitTotalCPThreads)
-        {
-            BEGIN_SO_INTOLERANT_CODE(GetThread());
-
-            if (GetForceMinWorkerThreadsValue() == 0)
+            ThreadCounter::Counts counts = WorkerCounter.GetCleanCounts();
+            while (counts.MaxWorking < MinLimitTotalWorkerThreads)
             {
-                MinLimitTotalWorkerThreads = min(MinWorkerThreads, (DWORD)ThreadCounter::MaxPossibleCount);
+                ThreadCounter::Counts newCounts = counts;
+                newCounts.MaxWorking = MinLimitTotalWorkerThreads;
 
-                ThreadCounter::Counts counts = WorkerCounter.GetCleanCounts();
-                while (counts.MaxWorking < MinLimitTotalWorkerThreads)
+                ThreadCounter::Counts oldCounts = WorkerCounter.CompareExchangeCounts(newCounts, counts);
+                if (oldCounts == counts)
                 {
-                    ThreadCounter::Counts newCounts = counts;
-                    newCounts.MaxWorking = MinLimitTotalWorkerThreads;
+                    counts = newCounts;
 
-                    ThreadCounter::Counts oldCounts = WorkerCounter.CompareExchangeCounts(newCounts, counts);
-                    if (oldCounts == counts)
+                    // if we increased the limit, and there are pending workitems, we need
+                    // to dispatch a thread to process the work.
+                    if (newCounts.MaxWorking > oldCounts.MaxWorking &&
+                        PerAppDomainTPCountList::AreRequestsPendingInAnyAppDomains())
                     {
-                        counts = newCounts;
-
-                        // if we increased the limit, and there are pending workitems, we need
-                        // to dispatch a thread to process the work.
-                        if (newCounts.MaxWorking > oldCounts.MaxWorking &&
-                            PerAppDomainTPCountList::AreRequestsPendingInAnyAppDomains())
-                        {
-                            MaybeAddWorkingWorker();
-                        }
-                    }
-                    else
-                    {
-                        counts = oldCounts;
+                        MaybeAddWorkingWorker();
                     }
                 }
+                else
+                {
+                    counts = oldCounts;
+                }
             }
-
-            END_SO_INTOLERANT_CODE;
-
-            MinLimitTotalCPThreads = min(MinIOCompletionThreads, (DWORD)ThreadCounter::MaxPossibleCount);
-
-            init_result = TRUE;
         }
 
-        return init_result;
-    }
-    // someone else is initializing. Too late, return false
-    return FALSE;
+        MinLimitTotalCPThreads = max(1, min(MinIOCompletionThreads, (DWORD)ThreadCounter::MaxPossibleCount));
 
+        init_result = TRUE;
+    }
+
+    return init_result;
 }
 
 BOOL ThreadpoolMgr::GetMinThreads(DWORD* MinWorkerThreads,
-                                     DWORD* MinIOCompletionThreads)
+                                  DWORD* MinIOCompletionThreads)
 {
     LIMITED_METHOD_CONTRACT;
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HRESULT hr = S_OK;
-
-    IHostThreadpoolManager *threadpoolProvider = CorHost2::GetHostThreadpoolManager();
-    if (threadpoolProvider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = threadpoolProvider->GetMinThreads(MinWorkerThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
-
-    IHostIoCompletionManager *ioCompletionProvider = CorHost2::GetHostIoCompletionManager();
-    if (ioCompletionProvider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        hr = ioCompletionProvider->GetMinThreads(MinIOCompletionThreads);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-    }
-
-    if (threadpoolProvider && ioCompletionProvider) {
-        return TRUE;
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
     if (!MinWorkerThreads || !MinIOCompletionThreads)
     {
@@ -848,25 +658,10 @@ BOOL ThreadpoolMgr::GetMinThreads(DWORD* MinWorkerThreads,
         return FALSE;
     }
 
-    if (IsInitialized())
-    {
-        *MinWorkerThreads = (DWORD)MinLimitTotalWorkerThreads;
-        *MinIOCompletionThreads = MinLimitTotalCPThreads;
-    }
-    else
-    {
-        CPUGroupInfo::EnsureInitialized();
-        if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
-            NumberOfProcessors = CPUGroupInfo::GetNumActiveProcessors();
-        else
-            NumberOfProcessors = GetCurrentProcessCpuCount();
-        DWORD forceMin;
-        BEGIN_SO_INTOLERANT_CODE_NOTHROW(GetThread(), forceMin=0);
-        forceMin = GetForceMinWorkerThreadsValue();
-        END_SO_INTOLERANT_CODE;
-        *MinWorkerThreads = forceMin > 0 ? forceMin : NumberOfProcessors;
-        *MinIOCompletionThreads = NumberOfProcessors;
-    }
+    EnsureInitialized();
+
+    *MinWorkerThreads = (DWORD)MinLimitTotalWorkerThreads;
+    *MinIOCompletionThreads = MinLimitTotalCPThreads;
     return TRUE;
 }
 
@@ -875,64 +670,39 @@ BOOL ThreadpoolMgr::GetAvailableThreads(DWORD* AvailableWorkerThreads,
 {
     LIMITED_METHOD_CONTRACT;
 
-    if (IsInitialized())
+    if (!AvailableWorkerThreads || !AvailableIOCompletionThreads)
     {
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HRESULT hr = S_OK;
-
-        IHostThreadpoolManager *threadpoolProvider = CorHost2::GetHostThreadpoolManager();
-        if (threadpoolProvider) {
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-            hr = threadpoolProvider->GetAvailableThreads(AvailableWorkerThreads);
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-            if (FAILED(hr))
-            {
-                SetLastHRError(hr);
-                return FALSE;
-            }
-        }
-
-        IHostIoCompletionManager *ioCompletionProvider = CorHost2::GetHostIoCompletionManager();
-        if (ioCompletionProvider) {
-            BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-            hr = ioCompletionProvider->GetAvailableThreads(AvailableIOCompletionThreads);
-            END_SO_TOLERANT_CODE_CALLING_HOST;
-            if (FAILED(hr))
-            {
-                SetLastHRError(hr);
-                return FALSE;
-            }
-        }
-
-        if (threadpoolProvider && ioCompletionProvider) {
-            return TRUE;
-        }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
-
-        if (!AvailableWorkerThreads || !AvailableIOCompletionThreads)
-        {
-            SetLastHRError(ERROR_INVALID_DATA);
-            return FALSE;
-        }
-
-        ThreadCounter::Counts counts = WorkerCounter.GetCleanCounts();
-
-        if (MaxLimitTotalWorkerThreads < counts.NumActive)
-            *AvailableWorkerThreads = 0;
-        else
-            *AvailableWorkerThreads = MaxLimitTotalWorkerThreads - counts.NumWorking;
-
-        counts = CPThreadCounter.GetCleanCounts();
-        if (MaxLimitTotalCPThreads < counts.NumActive)
-            *AvailableIOCompletionThreads = counts.NumActive - counts.NumWorking;
-        else
-            *AvailableIOCompletionThreads = MaxLimitTotalCPThreads - counts.NumWorking;
+        SetLastHRError(ERROR_INVALID_DATA);
+        return FALSE;
     }
+
+    EnsureInitialized();
+
+    ThreadCounter::Counts counts = WorkerCounter.GetCleanCounts();
+
+    if (MaxLimitTotalWorkerThreads < counts.NumActive)
+        *AvailableWorkerThreads = 0;
     else
-    {
-        GetMaxThreads(AvailableWorkerThreads,AvailableIOCompletionThreads);
-    }
+        *AvailableWorkerThreads = MaxLimitTotalWorkerThreads - counts.NumWorking;
+
+    counts = CPThreadCounter.GetCleanCounts();
+    if (MaxLimitTotalCPThreads < counts.NumActive)
+        *AvailableIOCompletionThreads = counts.NumActive - counts.NumWorking;
+    else
+        *AvailableIOCompletionThreads = MaxLimitTotalCPThreads - counts.NumWorking;
     return TRUE;
+}
+
+INT32 ThreadpoolMgr::GetThreadCount()
+{
+    WRAPPER_NO_CONTRACT;
+
+    if (!IsInitialized())
+    {
+        return 0;
+    }
+
+    return WorkerCounter.DangerousGetDirtyCounts().NumActive + CPThreadCounter.DangerousGetDirtyCounts().NumActive;
 }
 
 void QueueUserWorkItemHelp(LPTHREAD_START_ROUTINE Function, PVOID Context)
@@ -955,7 +725,7 @@ void QueueUserWorkItemHelp(LPTHREAD_START_ROUTINE Function, PVOID Context)
     if (pThread) {
         if (pThread->IsAbortRequested())
             pThread->EEResetAbort(Thread::TAR_ALL);
-        pThread->InternalReset(FALSE);
+        pThread->InternalReset();
     }
 }
 
@@ -988,7 +758,6 @@ void ThreadpoolMgr::ReportThreadStatus(bool isWorking)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -1023,7 +792,6 @@ int TakeMaxWorkingThreadCount()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -1064,33 +832,6 @@ BOOL ThreadpoolMgr::QueueUserWorkItem(LPTHREAD_START_ROUTINE Function,
 
     EnsureInitialized();
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    HRESULT hr = S_OK;
-
-    IHostThreadpoolManager *provider = CorHost2::GetHostThreadpoolManager();
-    if (provider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-
-        if(UnmanagedTPRequest)
-        {
-            hr = provider->QueueUserWorkItem(Function, Context, Flags);
-        }
-        else
-        {
-            hr = provider->QueueUserWorkItem(ExecuteHostRequest, Context, Flags);
-        }
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(hr))
-        {
-            SetLastHRError(hr);
-            return FALSE;
-        }
-        else
-        {
-            return TRUE;
-        }
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
     if (Flags == CALL_OR_QUEUE)
     {
@@ -1101,8 +842,6 @@ BOOL ThreadpoolMgr::QueueUserWorkItem(LPTHREAD_START_ROUTINE Function,
         ThreadCounter::Counts counts = CPThreadCounter.GetCleanCounts();
         if ((MaxLimitTotalCPThreads - counts.NumActive) >= MinimumAvailableCPThreads )
         {
-            ThreadLocaleHolder localeHolder;
-
             QueueUserWorkItemHelp(Function, Context);
             return TRUE;
         }
@@ -1127,8 +866,6 @@ BOOL ThreadpoolMgr::QueueUserWorkItem(LPTHREAD_START_ROUTINE Function,
 bool ThreadpoolMgr::ShouldWorkerKeepRunning()
 {
     WRAPPER_NO_CONTRACT;
-    if (CLRThreadpoolHosted())
-        return true;
 
     //
     // Maybe this thread should retire now.  Let's see.
@@ -1183,12 +920,11 @@ void ThreadpoolMgr::AdjustMaxWorkersActive()
     }
     CONTRACTL_END;
 
-    _ASSERTE(!CLRThreadpoolHosted());
     _ASSERTE(ThreadAdjustmentLock.IsHeld());
 
     DWORD currentTicks = GetTickCount();
-    LONG totalNumCompletions = Thread::GetTotalThreadPoolCompletionCount();
-    LONG numCompletions = totalNumCompletions - PriorCompletedWorkRequests;
+    LONG totalNumCompletions = (LONG)Thread::GetTotalWorkerThreadPoolCompletionCount();
+    LONG numCompletions = totalNumCompletions - VolatileLoad(&PriorCompletedWorkRequests);
 
     LARGE_INTEGER startTime = CurrentSampleStartTime;
     LARGE_INTEGER endTime;
@@ -1251,9 +987,10 @@ void ThreadpoolMgr::AdjustMaxWorkersActive()
         }
 
         PriorCompletedWorkRequests = totalNumCompletions;
+        NextCompletedWorkRequestsTime = currentTicks + ThreadAdjustmentInterval;
+        MemoryBarrier(); // flush previous writes (especially NextCompletedWorkRequestsTime)
         PriorCompletedWorkRequestsTime = currentTicks;
-        NextCompletedWorkRequestsTime = PriorCompletedWorkRequestsTime + ThreadAdjustmentInterval;
-        CurrentSampleStartTime = endTime;
+        CurrentSampleStartTime = endTime;;
     }
 }
 
@@ -1268,9 +1005,8 @@ void ThreadpoolMgr::MaybeAddWorkingWorker()
     }
     CONTRACTL_END;
 
-    _ASSERTE(!CLRThreadpoolHosted());
-
-    ThreadCounter::Counts counts = WorkerCounter.GetCleanCounts();
+    // counts volatile read paired with CompareExchangeCounts loop set
+    ThreadCounter::Counts counts = WorkerCounter.DangerousGetDirtyCounts();
     ThreadCounter::Counts newCounts;
     while (true)
     {
@@ -1301,9 +1037,7 @@ void ThreadpoolMgr::MaybeAddWorkingWorker()
 
     if (toUnretire > 0)
     {
-        LONG previousCount;
-        INDEBUG(BOOL success =) RetiredWorkerSemaphore->Release((LONG)toUnretire, &previousCount);            
-        _ASSERTE(success);
+        RetiredWorkerSemaphore->Release(toUnretire);
     }
 
     if (toRelease > 0)
@@ -1324,7 +1058,9 @@ void ThreadpoolMgr::MaybeAddWorkingWorker()
             // Of course, there's no guarantee *that* will work - but hopefully enough time will have passed
             // to allow whoever's using all the memory right now to release some.
             //
-            counts = WorkerCounter.GetCleanCounts();
+
+            // counts volatile read paired with CompareExchangeCounts loop set
+            counts = WorkerCounter.DangerousGetDirtyCounts();
             while (true)
             {
                 //
@@ -1361,27 +1097,6 @@ BOOL ThreadpoolMgr::PostQueuedCompletionStatus(LPOVERLAPPED lpOverlapped,
 
 #ifndef FEATURE_PAL
     EnsureInitialized();
-
-    // if hosted then we need to queue to worker thread, since hosting API doesn't include this method
-    if (CLRIoCompletionHosted())
-    {
-        PostRequestHolder postRequest = MakePostRequest(Function, lpOverlapped);
-        if (postRequest)
-        {
-            // Will execute in the Default AppDomain
-            if (FALSE == QueueUserWorkItem(QUWIPostCompletion, postRequest, QUEUE_ONLY))
-            {
-                return FALSE;
-            }
-            else
-            {
-                postRequest.SuppressRelease();    
-                return TRUE;
-            }
-        }
-        else
-            return FALSE;
-    }
 
     _ASSERTE(GlobalCompletionPort != NULL);
 
@@ -1581,7 +1296,6 @@ ThreadpoolMgr::CallbackForInitiateDrainageOfCompletionPortQueue(
     }
 
     FastInterlockAnd(&g_fCompletionPortDrainNeeded, 0);
-    OverlappedDataObject::FinishCleanup(!fTryNextTime);
 #endif // !FEATURE_PAL
 }
 
@@ -1645,43 +1359,11 @@ BOOL ThreadpoolMgr::DrainCompletionPortQueue()
 }
 
 
-DWORD __stdcall ThreadpoolMgr::QUWIPostCompletion(PVOID pArgs)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-        SO_INTOLERANT;
-    }
-    CONTRACTL_END;
-
-    PostRequest* postRequest = (PostRequest*) pArgs;
-
-    EX_TRY
-    {
-        (postRequest->Function)(postRequest->errorCode, postRequest->numBytesTransferred, postRequest->lpOverlapped);
-    }
-    EX_CATCH
-    {
-        RecycleMemory( postRequest, MEMTYPE_PostRequest );
-        if (!SwallowUnhandledExceptions())
-            EX_RETHROW;
-    }
-    EX_END_CATCH(SwallowAllExceptions);
-    return ERROR_SUCCESS;
-
-}
-
-
 // This is either made by a worker thread or a CP thread
 // indicated by threadTypeStatus
 void ThreadpoolMgr::EnsureGateThreadRunning()
 {
     LIMITED_METHOD_CONTRACT;
-
-    // The gate thread is only needed if the CLR is providing part of the ThreadPool implementation.
-    _ASSERTE(!CLRThreadpoolHosted() || !CLRIoCompletionHosted());
 
     while (true)
     {
@@ -1732,9 +1414,6 @@ bool ThreadpoolMgr::ShouldGateThreadKeepRunning()
 {
     LIMITED_METHOD_CONTRACT;
 
-    // The gate thread is only needed if the CLR is providing part of the ThreadPool implementation.
-    _ASSERTE(!CLRThreadpoolHosted() || !CLRIoCompletionHosted());
-
     _ASSERTE(GateThreadStatus == GATE_THREAD_STATUS_WAITING_FOR_REQUEST ||
              GateThreadStatus == GATE_THREAD_STATUS_REQUESTED);
 
@@ -1762,8 +1441,7 @@ bool ThreadpoolMgr::ShouldGateThreadKeepRunning()
         // Are there any work requests in any worker queue?  If so, we need a gate thread.
         // This imples that whenever a work queue goes from empty to non-empty, we need to call EnsureGateThreadRunning().
         //
-        bool needGateThreadForWorkerThreads = 
-            !CLRThreadpoolHosted() &&
+        bool needGateThreadForWorkerThreads =
             PerAppDomainTPCountList::AreRequestsPendingInAnyAppDomains();
 
         //
@@ -1838,8 +1516,6 @@ DWORD WINAPI ThreadpoolMgr::ExecuteHostRequest(PVOID pArg)
     }
     CONTRACTL_END;
 
-    ThreadLocaleHolder localeHolder;
-
     bool foundWork, wasNotRecalled;
     ExecuteWorkRequest(&foundWork, &wasNotRecalled);
     return ERROR_SUCCESS;
@@ -1864,18 +1540,6 @@ void ThreadpoolMgr::ExecuteWorkRequest(bool* foundWork, bool* wasNotRecalled)
         *foundWork = false;
         *wasNotRecalled = true;
         return;
-    }
-
-    if(IsThreadPoolHosted()) 
-    {
-        //Only managed callBacks go this route under hosts.
-        //Also, since if we came here, atleast one managed requests was 
-        //created, and that means atleast one app domain exists.
-
-        if (index == -1) 
-        {
-            index = 1;
-        }
     }
 
     if (index == -1) 
@@ -1909,7 +1573,6 @@ BOOL ThreadpoolMgr::SetAppDomainRequestsActive(BOOL UnmanagedTP)
         NOTHROW;
         MODE_ANY;
         GC_TRIGGERS;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 
@@ -1941,7 +1604,7 @@ BOOL ThreadpoolMgr::SetAppDomainRequestsActive(BOOL UnmanagedTP)
     return fShouldSignalEvent;
 }
 
-void ThreadpoolMgr::ClearAppDomainRequestsActive(BOOL UnmanagedTP, BOOL AdUnloading, LONG id)
+void ThreadpoolMgr::ClearAppDomainRequestsActive(BOOL UnmanagedTP, LONG id)
 //--------------------------------------------------------------------------
 //This function informs the thread scheduler that the kast request has been
 //dequeued on an appdomain, or it's the last unmanaged TP request. 
@@ -1961,7 +1624,6 @@ void ThreadpoolMgr::ClearAppDomainRequestsActive(BOOL UnmanagedTP, BOOL AdUnload
         NOTHROW;
         MODE_ANY;
         GC_TRIGGERS;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 
@@ -1974,22 +1636,15 @@ void ThreadpoolMgr::ClearAppDomainRequestsActive(BOOL UnmanagedTP, BOOL AdUnload
     } 
     else
     {
-       if (AdUnloading)
-       { 
-           pAdCount = PerAppDomainTPCountList::GetPerAppdomainCount(TPIndex(id));
-       }
-       else
-       {  
-           Thread* pCurThread = GetThread();
-           _ASSERTE( pCurThread);
+       Thread* pCurThread = GetThread();
+       _ASSERTE( pCurThread);
 
-           AppDomain* pAppDomain = pCurThread->GetDomain();
-           _ASSERTE(pAppDomain);
-        
-           TPIndex tpindex = pAppDomain->GetTPIndex();
+       AppDomain* pAppDomain = pCurThread->GetDomain();
+       _ASSERTE(pAppDomain);
+    
+       TPIndex tpindex = pAppDomain->GetTPIndex();
 
-           pAdCount = PerAppDomainTPCountList::GetPerAppdomainCount(tpindex);
-       } 
+       pAdCount = PerAppDomainTPCountList::GetPerAppdomainCount(tpindex);
 
         _ASSERTE(pAdCount);
     }
@@ -2032,9 +1687,6 @@ LPVOID ThreadpoolMgr::GetRecycledMemory(enum MemType memType)
             case MEMTYPE_WorkRequest:
                 result =  new WorkRequest;
                 break;
-            case MEMTYPE_PostRequest:
-                result =  new PostRequest;
-                break;
             default:
                 _ASSERTE(!"Unknown Memtype");
                 result = NULL;
@@ -2052,7 +1704,6 @@ void ThreadpoolMgr::RecycleMemory(LPVOID mem, enum MemType memType)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -2079,9 +1730,6 @@ void ThreadpoolMgr::RecycleMemory(LPVOID mem, enum MemType memType)
         case MEMTYPE_WorkRequest:
             delete (WorkRequest*) mem;
             break;
-        case MEMTYPE_PostRequest:
-            delete (PostRequest*) mem;
-            break;
         default:
             _ASSERTE(!"Unknown Memtype");
 
@@ -2092,13 +1740,12 @@ void ThreadpoolMgr::RecycleMemory(LPVOID mem, enum MemType memType)
 
 // This is to avoid the 64KB/1MB aliasing problem present on Pentium 4 processors,
 // which can significantly impact performance with HyperThreading enabled
-DWORD __stdcall ThreadpoolMgr::intermediateThreadProc(PVOID arg)
+DWORD WINAPI ThreadpoolMgr::intermediateThreadProc(PVOID arg)
 {
     WRAPPER_NO_CONTRACT;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     offset_counter++;
-    if (offset_counter * offset_multiplier > PAGE_SIZE)
+    if (offset_counter * offset_multiplier > (int)GetOsPageSize())
         offset_counter = 0;
 
     (void)_alloca(offset_counter * offset_multiplier);
@@ -2155,15 +1802,14 @@ Thread* ThreadpoolMgr::CreateUnimpersonatedThread(LPTHREAD_START_ROUTINE lpStart
         // CreateNewThread takes care of reverting any impersonation - so dont do anything here.
         bOK = pThread->CreateNewThread(0,               // default stack size
                                        lpStartAddress,
-                                       lpArgs           //arguments
-                                       );
+                                       lpArgs,           //arguments
+                                       W(".NET ThreadPool Worker"));
     }
     else {
 #ifndef FEATURE_PAL
-        ThreadAffinityHolder affinityHolder(FALSE);
         HandleHolder token;
         BOOL bReverted = FALSE;
-        bOK = RevertIfImpersonated(&bReverted, &token, &affinityHolder);
+        bOK = RevertIfImpersonated(&bReverted, &token);
         if (bOK != TRUE)
             return NULL;
 #endif // !FEATURE_PAL 
@@ -2178,6 +1824,9 @@ Thread* ThreadpoolMgr::CreateUnimpersonatedThread(LPTHREAD_START_ROUTINE lpStart
                                         lpThreadArgs,       // arguments
                                         CREATE_SUSPENDED,
                                         &threadId);
+#ifndef FEATURE_PAL
+            SetThreadName(threadHandle, W(".NET ThreadPool Worker"));
+#endif // !FEATURE_PAL
             if (threadHandle != NULL)
                 lpThreadArgs.SuppressRelease();
         }
@@ -2232,7 +1881,7 @@ BOOL ThreadpoolMgr::CreateWorkerThread()
 }
 
 
-DWORD __stdcall ThreadpoolMgr::WorkerThreadStart(LPVOID lpArgs)
+DWORD WINAPI ThreadpoolMgr::WorkerThreadStart(LPVOID lpArgs)
 {
     ClrFlsSetThreadType (ThreadType_Threadpool_Worker);
 
@@ -2241,11 +1890,8 @@ DWORD __stdcall ThreadpoolMgr::WorkerThreadStart(LPVOID lpArgs)
         THROWS;
         GC_TRIGGERS;
         MODE_PREEMPTIVE;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
-
-    _ASSERTE(!CLRThreadpoolHosted());
 
     Thread *pThread = NULL;
     DWORD dwSwitchCount = 0;
@@ -2285,7 +1931,8 @@ Work:
             #ifdef FEATURE_COMINTEROP
             if (pThread->SetApartment(Thread::AS_InMTA, TRUE) != Thread::AS_InMTA)
             {
-                counts = WorkerCounter.GetCleanCounts();
+                // counts volatile read paired with CompareExchangeCounts loop set
+                counts = WorkerCounter.DangerousGetDirtyCounts();
                 while (true)
                 {
                     newCounts = counts;
@@ -2310,7 +1957,8 @@ Work:
 
     // make sure there's really work.  If not, go back to sleep
 
-    counts = WorkerCounter.GetCleanCounts();
+    // counts volatile read paired with CompareExchangeCounts loop set
+    counts = WorkerCounter.DangerousGetDirtyCounts();
     while (true)
     {
         _ASSERTE(counts.NumActive > 0);
@@ -2349,16 +1997,14 @@ Work:
         counts = oldCounts;
     }
 
-    if (GCHeap::IsGCInProgress(TRUE))
+    if (GCHeapUtilities::IsGCInProgress(TRUE))
     {
         // GC is imminent, so wait until GC is complete before executing next request.
         // this reduces in-flight objects allocated right before GC, easing the GC's work
-        GCHeap::WaitForGCCompletion(TRUE);
+        GCHeapUtilities::WaitForGCCompletion(TRUE);
     }
 
     {
-        ThreadLocaleHolder localeHolder;
-
         ThreadpoolMgr::UpdateLastDequeueTime();
         ThreadpoolMgr::ExecuteWorkRequest(&foundWork, &wasNotRecalled);
     }
@@ -2373,7 +2019,7 @@ Work:
         {
             if (pThread->IsAbortRequested())
                 pThread->EEResetAbort(Thread::TAR_ALL);
-            pThread->InternalReset(FALSE);
+            pThread->InternalReset();
         }
     }
 
@@ -2396,12 +2042,10 @@ Retire:
     while (true)
     {
 RetryRetire:
-        DWORD result = RetiredWorkerSemaphore->Wait(AppX::IsAppXProcess() ? WorkerTimeoutAppX : WorkerTimeout, FALSE);
-        _ASSERTE(WAIT_OBJECT_0 == result || WAIT_TIMEOUT == result);
-
-        if (WAIT_OBJECT_0 == result)
+        if (RetiredWorkerSemaphore->Wait(AppX::IsAppXProcess() ? WorkerTimeoutAppX : WorkerTimeout))
         {
             foundWork = true;
+
             counts = WorkerCounter.GetCleanCounts();
             FireEtwThreadPoolWorkerThreadRetirementStop(counts.NumActive, counts.NumRetired, GetClrInstanceId());
             goto Work;
@@ -2434,7 +2078,9 @@ RetryRetire:
             // if we don't hit zero, then there's another retired thread that will pick up this signal.  So it's ok
             // to exit.
             //
-            counts = WorkerCounter.GetCleanCounts();
+
+            // counts volatile read paired with CompareExchangeCounts loop set
+            counts = WorkerCounter.DangerousGetDirtyCounts();
             while (true)
             {
                 if (counts.NumRetired == 0)
@@ -2472,58 +2118,57 @@ WaitForWork:
     FireEtwThreadPoolWorkerThreadWait(counts.NumActive, counts.NumRetired, GetClrInstanceId());
 
 RetryWaitForWork:
-    if (!WorkerSemaphore->Wait(AppX::IsAppXProcess() ? WorkerTimeoutAppX : WorkerTimeout))
+    if (WorkerSemaphore->Wait(AppX::IsAppXProcess() ? WorkerTimeoutAppX : WorkerTimeout, WorkerThreadSpinLimit, NumberOfProcessors))
     {
-        if (!IsIoPending())
+        foundWork = true;
+        goto Work;
+    }
+
+    if (!IsIoPending())
+    {
+        //
+        // We timed out, and are about to exit.  This puts us in a very similar situation to the
+        // retirement case above - someone may think we're still waiting, and go ahead and:
+        //
+        // 1) Increment NumWorking
+        // 2) Signal WorkerSemaphore
+        //
+        // The solution is much like retirement; when we're decrementing NumActive, we need to make
+        // sure it doesn't drop below NumWorking.  If it would, then we need to go back and wait 
+        // again.
+        //
+
+        DangerousNonHostedSpinLockHolder tal(&ThreadAdjustmentLock);
+
+        // counts volatile read paired with CompareExchangeCounts loop set
+        counts = WorkerCounter.DangerousGetDirtyCounts();
+        while (true)
         {
-            //
-            // We timed out, and are about to exit.  This puts us in a very similar situation to the
-            // retirement case above - someone may think we're still waiting, and go ahead and:
-            //
-            // 1) Increment NumWorking
-            // 2) Signal WorkerSemaphore
-            //
-            // The solution is much like retirement; when we're decrementing NumActive, we need to make
-            // sure it doesn't drop below NumWorking.  If it would, then we need to go back and wait 
-            // again.
-            //
-
-            DangerousNonHostedSpinLockHolder tal(&ThreadAdjustmentLock);
-
-            counts = WorkerCounter.GetCleanCounts();
-            while (true)
+            if (counts.NumActive == counts.NumWorking)
             {
-                if (counts.NumActive == counts.NumWorking)
-                {
-                    goto RetryWaitForWork;
-                }
-
-                newCounts = counts;
-                newCounts.NumActive--;
-
-                // if we timed out while active, then Hill Climbing needs to be told that we need fewer threads
-                newCounts.MaxWorking = max(MinLimitTotalWorkerThreads, min(newCounts.NumActive, newCounts.MaxWorking));
-
-                oldCounts = WorkerCounter.CompareExchangeCounts(newCounts, counts);
-
-                if (oldCounts == counts)
-                {
-                    HillClimbingInstance.ForceChange(newCounts.MaxWorking, ThreadTimedOut);
-                    goto Exit;
-                }
-
-                counts = oldCounts;
+                goto RetryWaitForWork;
             }
-        }
-        else
-        {
-            goto RetryWaitForWork;
+
+            newCounts = counts;
+            newCounts.NumActive--;
+
+            // if we timed out while active, then Hill Climbing needs to be told that we need fewer threads
+            newCounts.MaxWorking = max(MinLimitTotalWorkerThreads, min(newCounts.NumActive, newCounts.MaxWorking));
+
+            oldCounts = WorkerCounter.CompareExchangeCounts(newCounts, counts);
+
+            if (oldCounts == counts)
+            {
+                HillClimbingInstance.ForceChange(newCounts.MaxWorking, ThreadTimedOut);
+                goto Exit;
+            }
+
+            counts = oldCounts;
         }
     }
     else
     {
-        foundWork = true;
-        goto Work;
+        goto RetryWaitForWork;
     }
 
 Exit:
@@ -2556,9 +2201,6 @@ Exit:
 }
 
 
-#ifdef _MSC_VER
-#pragma warning(default:4702)
-#endif
 BOOL ThreadpoolMgr::SuspendProcessing()
 {
     CONTRACTL
@@ -2658,7 +2300,6 @@ BOOL ThreadpoolMgr::RegisterWaitForSingleObject(PHANDLE phNewWaitObject,
         waitInfo->refCount = 1;     // safe to do this since no wait has yet been queued, so no other thread could be modifying this
         waitInfo->ExternalCompletionEvent = INVALID_HANDLE;
         waitInfo->ExternalEventSafeHandle = NULL;
-        waitInfo->handleOwningAD = (ADID) 0;
 
         waitInfo->timer.startTime = GetTickCount();
         waitInfo->timer.remainingTime = timeout;
@@ -2668,7 +2309,7 @@ BOOL ThreadpoolMgr::RegisterWaitForSingleObject(PHANDLE phNewWaitObject,
         // We fire the "enqueue" ETW event here, to "mark" the thread that had called the API, rather than the
         // thread that will PostQueuedCompletionStatus (the dedicated WaitThread).
         // This event correlates with ThreadPoolIODequeue in ThreadpoolMgr::AsyncCallbackCompletion
-        if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_Context, ThreadPoolIOEnqueue))
+        if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_DOTNET_Context, ThreadPoolIOEnqueue))
             FireEtwThreadPoolIOEnqueue((LPOVERLAPPED)waitInfo, reinterpret_cast<void*>(Callback), (dwFlag & WAIT_SINGLE_EXECUTION) == 0, GetClrInstanceId());
     
         BOOL status = QueueUserAPC((PAPCFUNC)InsertNewWaitForSelf, threadCB->threadHandle, (size_t) waitInfo);
@@ -2757,7 +2398,7 @@ BOOL ThreadpoolMgr::CreateWaitThread()
     }
 
     threadCB->startEvent.CreateAutoEvent(FALSE);
-    HANDLE threadHandle = Thread::CreateUtilityThread(Thread::StackSize_Small, WaitThreadStart, (LPVOID)threadCB, CREATE_SUSPENDED, &threadId);
+    HANDLE threadHandle = Thread::CreateUtilityThread(Thread::StackSize_Small, WaitThreadStart, (LPVOID)threadCB, W(".NET ThreadPool Wait"), CREATE_SUSPENDED, &threadId);
 
     if (threadHandle == NULL)
     {
@@ -2815,7 +2456,6 @@ BOOL ThreadpoolMgr::CreateWaitThread()
 void ThreadpoolMgr::InsertNewWaitForSelf(WaitInfo* pArgs)
 {
     WRAPPER_NO_CONTRACT;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     WaitInfo* waitInfo = pArgs;
 
@@ -2928,14 +2568,13 @@ DWORD ThreadpoolMgr::MinimumRemainingWait(LIST_ENTRY* waitInfo, unsigned int num
 #pragma warning(disable:22008) // "Prefast integer overflow check on (0 + lval) is bogus.  Tried local disable without luck, doing whole method."
 #endif
 
-DWORD __stdcall ThreadpoolMgr::WaitThreadStart(LPVOID lpArgs)
+DWORD WINAPI ThreadpoolMgr::WaitThreadStart(LPVOID lpArgs)
 {
     CONTRACTL
     {
         THROWS;
         GC_TRIGGERS;
         MODE_PREEMPTIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -2957,7 +2596,6 @@ DWORD __stdcall ThreadpoolMgr::WaitThreadStart(LPVOID lpArgs)
         return 0;
     }
 
-    BEGIN_SO_INTOLERANT_CODE(pThread);  // we probe at the top of the thread so we can safely call anything below here.
     {
         // wait threads never die. (Why?)
         for (;;)
@@ -3118,7 +2756,6 @@ DWORD __stdcall ThreadpoolMgr::WaitThreadStart(LPVOID lpArgs)
             }
         }
     }
-    END_SO_INTOLERANT_CODE;
 
     //This is unreachable...so no return required.
 }
@@ -3195,14 +2832,13 @@ void ThreadpoolMgr::ProcessWaitCompletion(WaitInfo* waitInfo,
 }
 
 
-DWORD __stdcall ThreadpoolMgr::AsyncCallbackCompletion(PVOID pArgs)
+DWORD WINAPI ThreadpoolMgr::AsyncCallbackCompletion(PVOID pArgs)
 {
     CONTRACTL
     {
         THROWS;
         MODE_PREEMPTIVE;
         GC_TRIGGERS;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -3221,7 +2857,6 @@ DWORD __stdcall ThreadpoolMgr::AsyncCallbackCompletion(PVOID pArgs)
         }
     }
 
-    BEGIN_SO_INTOLERANT_CODE_NOTHROW(pThread, return ERROR_STACK_OVERFLOW);
     {
         AsyncCallback * asyncCallback = (AsyncCallback*) pArgs;
 
@@ -3232,7 +2867,7 @@ DWORD __stdcall ThreadpoolMgr::AsyncCallbackCompletion(PVOID pArgs)
 
         // We fire the "dequeue" ETW event here, before executing the user code, to enable correlation with
         // the ThreadPoolIOEnqueue fired in ThreadpoolMgr::RegisterWaitForSingleObject
-        if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_Context, ThreadPoolIODequeue))
+        if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_DOTNET_Context, ThreadPoolIODequeue))
             FireEtwThreadPoolIODequeue(waitInfo, reinterpret_cast<void*>(waitInfo->Callback), GetClrInstanceId());
 
         // the user callback can throw, the host must be prepared to handle it.
@@ -3241,8 +2876,11 @@ DWORD __stdcall ThreadpoolMgr::AsyncCallbackCompletion(PVOID pArgs)
 
         ((WAITORTIMERCALLBACKFUNC) waitInfo->Callback)
                                     ( waitInfo->Context, asyncCallback->waitTimedOut != FALSE);
+
+#ifndef FEATURE_PAL
+        Thread::IncrementIOThreadPoolCompletionCount(pThread);
+#endif
     }
-    END_SO_INTOLERANT_CODE;
 
     return ERROR_SUCCESS;
 }
@@ -3343,7 +2981,7 @@ void ThreadpoolMgr::DeleteWait(WaitInfo* waitInfo)
     }
     else if (waitInfo->ExternalCompletionEvent != INVALID_HANDLE)
     {
-        UnsafeSetEvent(waitInfo->ExternalCompletionEvent);
+        SetEvent(waitInfo->ExternalCompletionEvent);
     }
     else if (waitInfo->ExternalEventSafeHandle != NULL)
     {
@@ -3438,9 +3076,7 @@ BOOL ThreadpoolMgr::UnregisterWaitEx(HANDLE hWaitObject,HANDLE Event)
 
 void ThreadpoolMgr::DeregisterWait(WaitInfo* pArgs)
 {
-
     WRAPPER_NO_CONTRACT;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     WaitInfo* waitInfo = pArgs;
 
@@ -3474,12 +3110,7 @@ void ThreadpoolMgr::DeregisterWait(WaitInfo* pArgs)
 
     if (InterlockedDecrement(&waitInfo->refCount) == 0)
     {
-        // After we suspend EE during shutdown, a thread may be blocked in WaitForEndOfShutdown in alertable state.
-        // We don't allow a thread reenter runtime while processing APC or pumping message.
-        if (!g_fSuspendOnShutdown )
-        {
-            DeleteWait(waitInfo);
-        }
+        DeleteWait(waitInfo);
     }
     return;
 }
@@ -3508,10 +3139,7 @@ BOOL ThreadpoolMgr::CreateGateThread()
 {
     LIMITED_METHOD_CONTRACT;
 
-    // The gate thread is only needed if the CLR is providing part of the ThreadPool implementation.
-    _ASSERTE(!CLRThreadpoolHosted() || !CLRIoCompletionHosted());
-
-    HANDLE threadHandle = Thread::CreateUtilityThread(Thread::StackSize_Small, GateThreadStart, NULL);
+    HANDLE threadHandle = Thread::CreateUtilityThread(Thread::StackSize_Small, GateThreadStart, NULL, W(".NET ThreadPool Gate"));
 
     if (threadHandle)
     {
@@ -3546,23 +3174,6 @@ BOOL ThreadpoolMgr::BindIoCompletionCallback(HANDLE FileHandle,
 
     EnsureInitialized();
 
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-    IHostIoCompletionManager *provider = CorHost2::GetHostIoCompletionManager();
-    if (provider) {
-        BEGIN_SO_TOLERANT_CODE_CALLING_HOST(GetThread());
-        errCode = provider->Bind(GlobalCompletionPort, FileHandle);
-        END_SO_TOLERANT_CODE_CALLING_HOST;
-        if (FAILED(errCode))
-        {
-            SetLastHRError(errCode);
-            return FALSE;
-        }
-        else
-        {
-            return TRUE;
-        }
-    }
-#endif // FEATURE_INCLUDE_ALL_INTERFACES
 
     _ASSERTE(GlobalCompletionPort != NULL);
 
@@ -3628,7 +3239,7 @@ BOOL ThreadpoolMgr::CreateCompletionPortThread(LPVOID lpArgs)
     return FALSE;
 }
 
-DWORD __stdcall ThreadpoolMgr::CompletionPortThreadStart(LPVOID lpArgs)
+DWORD WINAPI ThreadpoolMgr::CompletionPortThreadStart(LPVOID lpArgs)
 {
     ClrFlsSetThreadType (ThreadType_Threadpool_IOCompletion);
 
@@ -3637,11 +3248,8 @@ DWORD __stdcall ThreadpoolMgr::CompletionPortThreadStart(LPVOID lpArgs)
         THROWS;
         if (GetThread()) { MODE_PREEMPTIVE;} else { DISABLED(MODE_ANY);}
         if (GetThread()) { GC_TRIGGERS;} else {DISABLED(GC_NOTRIGGER);}
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
-
-    _ASSERTE (!CLRIoCompletionHosted());
 
     DWORD numBytes=0;
     size_t key=0;
@@ -3657,6 +3265,8 @@ DWORD __stdcall ThreadpoolMgr::CompletionPortThreadStart(LPVOID lpArgs)
 
     BOOL fThreadInit = FALSE;
     Thread *pThread = NULL;
+
+    DWORD cpThreadWait = 0;
 
     if (g_fEEStarted) {
         pThread = SetupThreadNoThrow();
@@ -3692,7 +3302,7 @@ DWORD __stdcall ThreadpoolMgr::CompletionPortThreadStart(LPVOID lpArgs)
     ThreadCounter::Counts oldCounts;
     ThreadCounter::Counts newCounts;
 
-    DWORD cpThreadWait = CP_THREAD_WAIT;
+    cpThreadWait = CP_THREAD_WAIT;
     for (;; )
     {
 Top:
@@ -3785,8 +3395,6 @@ Top:
             {
                 _ASSERTE (context == NULL || context->lpOverlapped == NULL);
 
-                LeaveRuntimeHolder holder((size_t)GetQueuedCompletionStatus);
-
                 BOOL status = GetQueuedCompletionStatus(
                     GlobalCompletionPort,
                     &numBytes,
@@ -3815,13 +3423,15 @@ Top:
         // or in CompletionPortDispatchWorkWithinAppDomain, and passed here through StoreOverlappedInfoInThread)
 
         // For the purposes of activity correlation we only fire ETW events here, if needed OR if not fired at a higher
-        // abstration level (e.g. ThreadpoolMgr::RegisterWaitForSingleObject)
+        // abstraction level (e.g. ThreadpoolMgr::RegisterWaitForSingleObject)
         // Note: we still fire the event for managed async IO, despite the fact we don't have a paired IOEnqueue event
         // for this case. We do this to "mark" the end of the previous workitem. When we provide full support at the higher
         // abstraction level for managed IO we can remove the IODequeues fired here
-        if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_Context, ThreadPoolIODequeue)
+        if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_DOTNET_Context, ThreadPoolIODequeue)
                 && !AreEtwIOQueueEventsSpeciallyHandled((LPOVERLAPPED_COMPLETION_ROUTINE)key) && pOverlapped != NULL)
-            FireEtwThreadPoolIODequeue(pOverlapped, (BYTE*)pOverlapped - offsetof(OverlappedDataObject, Internal), GetClrInstanceId());
+        {
+            FireEtwThreadPoolIODequeue(pOverlapped, OverlappedDataObject::GetOverlappedForTracing(pOverlapped), GetClrInstanceId());
+        }
 
         bool enterRetirement;
 
@@ -3832,7 +3442,9 @@ Top:
             // and the state of the rest of the IOCP threads, we need to figure out whether to de-activate (exit) this thread, retire this thread,
             // or transition to "working."
             //
-            oldCounts = CPThreadCounter.GetCleanCounts();
+
+            // counts volatile read paired with CompareExchangeCounts loop set
+            oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
             newCounts = oldCounts;
             enterRetirement = false;
 
@@ -3915,7 +3527,8 @@ Top:
                             // We can now exit; decrement the retired count.
                             while (true)
                             {
-                                oldCounts = CPThreadCounter.GetCleanCounts();
+                                // counts volatile read paired with CompareExchangeCounts loop set
+                                oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
                                 newCounts = oldCounts;
                                 newCounts.NumRetired--;
                                 if (oldCounts == CPThreadCounter.CompareExchangeCounts(newCounts, oldCounts))
@@ -3929,7 +3542,8 @@ Top:
                         // put back into rotation -- we need a thread
                         while (true)
                         {
-                            oldCounts = CPThreadCounter.GetCleanCounts();
+                            // counts volatile read paired with CompareExchangeCounts loop set
+                            oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
                             newCounts = oldCounts;
                             newCounts.NumRetired--;
                             newCounts.NumActive++;
@@ -3963,14 +3577,15 @@ Top:
 
             if (key != 0)
             {
-                if (GCHeap::IsGCInProgress(TRUE))
+                if (GCHeapUtilities::IsGCInProgress(TRUE))
                 {
                     //Indicate that this thread is free, and waiting on GC, not doing any user work.
                     //This helps in threads not getting injected when some threads have woken up from the
                     //GC event, and some have not.
                     while (true)
                     {
-                        oldCounts = CPThreadCounter.GetCleanCounts();
+                        // counts volatile read paired with CompareExchangeCounts loop set
+                        oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
                         newCounts = oldCounts;
                         newCounts.NumWorking--;
                         if (oldCounts == CPThreadCounter.CompareExchangeCounts(newCounts, oldCounts))
@@ -3979,11 +3594,12 @@ Top:
 
                     // GC is imminent, so wait until GC is complete before executing next request.
                     // this reduces in-flight objects allocated right before GC, easing the GC's work
-                    GCHeap::WaitForGCCompletion(TRUE);
+                    GCHeapUtilities::WaitForGCCompletion(TRUE);
 
                     while (true)
                     {
-                        oldCounts = CPThreadCounter.GetCleanCounts();
+                        // counts volatile read paired with CompareExchangeCounts loop set
+                        oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
                         newCounts = oldCounts;
                         newCounts.NumWorking++;
                         if (oldCounts == CPThreadCounter.CompareExchangeCounts(newCounts, oldCounts))
@@ -4001,9 +3617,13 @@ Top:
                 {
                     CONTRACT_VIOLATION(ThrowsViolation);
 
-                    ThreadLocaleHolder localeHolder;
-
                     ((LPOVERLAPPED_COMPLETION_ROUTINE) key)(errorCode, numBytes, pOverlapped);
+                }
+
+                if ((void *)key != CallbackForInitiateDrainageOfCompletionPortQueue &&
+                    (void *)key != CallbackForContinueDrainageOfCompletionPortQueue)
+                {
+                    Thread::IncrementIOThreadPoolCompletionCount(pThread);
                 }
 
                 if (pThread == NULL) {
@@ -4012,7 +3632,7 @@ Top:
                 if (pThread) {
                     if (pThread->IsAbortRequested())
                         pThread->EEResetAbort(Thread::TAR_ALL);
-                    pThread->InternalReset(FALSE);
+                    pThread->InternalReset();
                 }
             }
             else
@@ -4058,8 +3678,7 @@ LPOVERLAPPED ThreadpoolMgr::CompletionPortDispatchWorkWithinAppDomain(
     Thread* pThread,
     DWORD* pErrorCode, 
     DWORD* pNumBytes,
-    size_t* pKey,
-    DWORD adid)
+    size_t* pKey)
 //
 //This function is called just after dispatching the previous BindIO callback
 //to Managed code. This is a perf optimization to do a quick call to 
@@ -4072,7 +3691,6 @@ LPOVERLAPPED ThreadpoolMgr::CompletionPortDispatchWorkWithinAppDomain(
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_MODE_ANY;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     LPOVERLAPPED lpOverlapped=NULL;
 
@@ -4080,14 +3698,7 @@ LPOVERLAPPED ThreadpoolMgr::CompletionPortDispatchWorkWithinAppDomain(
     OVERLAPPEDDATAREF overlapped=NULL;
     BOOL ManagedCallback=FALSE;
 
-    if (CLRIoCompletionHosted()) 
-    {
-        return NULL;
-    }
-
     *pErrorCode = S_OK;
-
-    LeaveRuntimeHolder holder((size_t)GetQueuedCompletionStatus);
 
 
     //Very Very Important!
@@ -4129,7 +3740,7 @@ LPOVERLAPPED ThreadpoolMgr::CompletionPortDispatchWorkWithinAppDomain(
         overlapped = ObjectToOVERLAPPEDDATAREF(OverlappedDataObject::GetOverlapped(lpOverlapped));
     }  
 
-    if (ManagedCallback && (overlapped->GetAppDomainId() == adid)) 
+    if (ManagedCallback) 
     {           
         _ASSERTE(*pKey != 0);  // should be a valid function address
         
@@ -4138,7 +3749,6 @@ LPOVERLAPPED ThreadpoolMgr::CompletionPortDispatchWorkWithinAppDomain(
             //Application Bug.
             return NULL;
         }
-    
     } 
     else 
     {
@@ -4163,7 +3773,6 @@ void ThreadpoolMgr::StoreOverlappedInfoInThread(Thread* pThread, DWORD dwErrorCo
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_MODE_ANY;
-    STATIC_CONTRACT_SO_TOLERANT;
 
     _ASSERTE(pThread);
 
@@ -4186,16 +3795,15 @@ BOOL ThreadpoolMgr::ShouldGrowCompletionPortThreadpool(ThreadCounter::Counts cou
         GC_NOTRIGGER;
         NOTHROW;
         MODE_ANY;
-        SO_TOLERANT;
     }
     CONTRACTL_END;     
 
     if (counts.NumWorking >= counts.NumActive 
         && NumCPInfrastructureThreads == 0
-        && (counts.NumActive == 0 ||  !GCHeap::IsGCInProgress(TRUE))
+        && (counts.NumActive == 0 ||  !GCHeapUtilities::IsGCInProgress(TRUE))
         )
     {
-        // adjust limit if neeeded
+        // adjust limit if needed
         if (counts.NumRetired == 0)
         {
             if (counts.NumActive + counts.NumRetired < MaxLimitTotalCPThreads &&
@@ -4258,7 +3866,8 @@ void ThreadpoolMgr::GrowCompletionPortThreadpoolIfNeeded()
                         // if thread creation failed, we have to adjust the counts back down.
                         while (true)
                         {
-                            oldCounts = CPThreadCounter.GetCleanCounts();
+                            // counts volatile read paired with CompareExchangeCounts loop set
+                            oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
                             newCounts = oldCounts;
                             newCounts.NumActive--;
                             newCounts.NumWorking--;
@@ -4474,7 +4083,7 @@ public:
 };
 
 
-DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
+DWORD WINAPI ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
 {
     ClrFlsSetThreadType (ThreadType_Gate);
 
@@ -4483,12 +4092,8 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
         NOTHROW;
         GC_TRIGGERS;
         MODE_PREEMPTIVE;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
-
-    // The gate thread is only needed if the CLR is providing part of the ThreadPool implementation.
-    _ASSERTE(!CLRThreadpoolHosted() || !CLRIoCompletionHosted());
 
     _ASSERTE(GateThreadStatus == GATE_THREAD_STATUS_REQUESTED);
 
@@ -4506,9 +4111,10 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
         return 0;
     }
 
+#ifndef FEATURE_PAL
     //GateThread can start before EESetup, so ensure CPU group information is initialized;
     CPUGroupInfo::EnsureInitialized();
-
+#endif // !FEATURE_PAL
     // initialize CPU usage information structure;
     prevCPUInfo.idleTime.QuadPart   = 0;
     prevCPUInfo.kernelTime.QuadPart = 0;
@@ -4579,20 +4185,7 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
             continue;
 #endif // DEBUGGING_SUPPORTED
 
-        if(g_IsPaused)
-        {
-            _ASSERTE(g_ClrResumeEvent.IsValid());
-            EX_TRY {
-                g_ClrResumeEvent.Wait(INFINITE, TRUE);
-            }
-            EX_CATCH {
-                // Assert on debug builds 
-                _ASSERTE(FALSE);
-            }
-            EX_END_CATCH(SwallowAllExceptions);
-        }
-
-        if (!GCHeap::IsGCInProgress(FALSE) )
+        if (!GCHeapUtilities::IsGCInProgress(FALSE) )
         {
             if (IgnoreNextSample)
             {
@@ -4624,8 +4217,6 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
         // don't mess with CP thread pool settings if not initialized yet
         if (InitCompletionPortThreadpool)
         {
-            _ASSERTE (!CLRIoCompletionHosted());
-
             ThreadCounter::Counts oldCounts, newCounts;
             oldCounts = CPThreadCounter.GetCleanCounts();
 
@@ -4634,7 +4225,7 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
                 oldCounts.NumActive < MaxLimitTotalCPThreads &&
                 !g_fCompletionPortDrainNeeded &&
                 NumCPInfrastructureThreads == 0 &&       // infrastructure threads count as "to be free as needed"
-                !GCHeap::IsGCInProgress(TRUE))
+                !GCHeapUtilities::IsGCInProgress(TRUE))
 
             {
                 BOOL status;
@@ -4688,7 +4279,8 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
                     // IOCP threads are created as "active" and "working"
                     while (true)
                     {
-                        oldCounts = CPThreadCounter.GetCleanCounts();
+                        // counts volatile read paired with CompareExchangeCounts loop set
+                        oldCounts = CPThreadCounter.DangerousGetDirtyCounts();
                         newCounts = oldCounts;
                         newCounts.NumActive++;
                         newCounts.NumWorking++;
@@ -4715,8 +4307,7 @@ DWORD __stdcall ThreadpoolMgr::GateThreadStart(LPVOID lpArgs)
         }
 #endif // !FEATURE_PAL
 
-        if (!CLRThreadpoolHosted() &&
-            (0 == CLRConfig::GetConfigValue(CLRConfig::INTERNAL_ThreadPool_DisableStarvationDetection)))
+        if (0 == CLRConfig::GetConfigValue(CLRConfig::INTERNAL_ThreadPool_DisableStarvationDetection))
         {
             if (PerAppDomainTPCountList::AreRequestsPendingInAnyAppDomains() && SufficientDelaySinceLastDequeue())
             {
@@ -4796,7 +4387,7 @@ BOOL ThreadpoolMgr::SufficientDelaySinceLastDequeue()
 
     #define DEQUEUE_DELAY_THRESHOLD (GATE_THREAD_DELAY * 2)
 
-    unsigned delay = GetTickCount() - LastDequeueTime;
+    unsigned delay = GetTickCount() - VolatileLoad(&LastDequeueTime);
     unsigned tooLong;
 
     if(cpuUtilization < CpuUtilizationLow)
@@ -4860,9 +4451,10 @@ BOOL ThreadpoolMgr::CreateTimerQueueTimer(PHANDLE phNewTimer,
         {
             CreateTimerThreadParams params;
             params.event.CreateAutoEvent(FALSE);
+
             params.setupSucceeded = FALSE;
 
-            HANDLE TimerThreadHandle = Thread::CreateUtilityThread(Thread::StackSize_Small, TimerThreadStart, &params);
+            HANDLE TimerThreadHandle = Thread::CreateUtilityThread(Thread::StackSize_Small, TimerThreadStart, &params, W(".NET Timer"));
 
             if (TimerThreadHandle == NULL)
             {
@@ -4911,7 +4503,6 @@ BOOL ThreadpoolMgr::CreateTimerQueueTimer(PHANDLE phNewTimer,
     timerInfo->flag = Flag;
     timerInfo->ExternalCompletionEvent = INVALID_HANDLE;
     timerInfo->ExternalEventSafeHandle = NULL;
-    timerInfo->handleOwningAD = (ADID) 0;
 
     BOOL status = QueueUserAPC((PAPCFUNC)InsertNewTimer,TimerThread,(size_t)timerInfo);
     if (FALSE == status)
@@ -4930,14 +4521,13 @@ BOOL ThreadpoolMgr::CreateTimerQueueTimer(PHANDLE phNewTimer,
 #pragma warning (disable : 4715)
 #endif
 #endif
-DWORD __stdcall ThreadpoolMgr::TimerThreadStart(LPVOID p)
+DWORD WINAPI ThreadpoolMgr::TimerThreadStart(LPVOID p)
 {
     ClrFlsSetThreadType (ThreadType_Timer);
 
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;        // due to SetApartment
     STATIC_CONTRACT_MODE_PREEMPTIVE;
-    STATIC_CONTRACT_SO_INTOLERANT;
     /* cannot use contract because of SEH
     CONTRACTL
     {
@@ -5049,7 +4639,6 @@ void ThreadpoolMgr::InsertNewTimer(TimerInfo* pArg)
         MODE_ANY;
     }
     CONTRACTL_END;
-    STATIC_CONTRACT_SO_INTOLERANT;
 
     _ASSERTE(pArg);
     TimerInfo * timerInfo = pArg;
@@ -5122,15 +4711,30 @@ DWORD ThreadpoolMgr::FireTimers()
                                   timerInfo,
                                   QUEUE_ONLY /* TimerInfo take care of deleting*/);
 
-                timerInfo->FiringTime = currentTime+timerInfo->Period;
+                if (timerInfo->Period != 0 && timerInfo->Period != (ULONG)-1)
+                {
+                    ULONG nextFiringTime = timerInfo->FiringTime + timerInfo->Period;
+                    DWORD firingInterval;
+                    if (TimeExpired(timerInfo->FiringTime, currentTime, nextFiringTime))
+                    {
+                        // Enough time has elapsed to fire the timer yet again. The timer is not able to keep up with the short
+                        // period, have it fire 1 ms from now to avoid spinning without a delay.
+                        timerInfo->FiringTime = currentTime + 1;
+                        firingInterval = 1;
+                    }
+                    else
+                    {
+                        timerInfo->FiringTime = nextFiringTime;
+                        firingInterval = TimeInterval(nextFiringTime, currentTime);
+                    }
 
-                if ((timerInfo->Period != 0) && (timerInfo->Period != (ULONG) -1) && (nextFiringInterval > timerInfo->Period))
-                    nextFiringInterval = timerInfo->Period;
+                    if (firingInterval < nextFiringInterval)
+                        nextFiringInterval = firingInterval;
+                }
             }
-
             else
             {
-                DWORD firingInterval = TimeInterval(timerInfo->FiringTime,currentTime);
+                DWORD firingInterval = TimeInterval(timerInfo->FiringTime, currentTime);
                 if (firingInterval < nextFiringInterval)
                     nextFiringInterval = firingInterval;
             }
@@ -5157,14 +4761,13 @@ DWORD ThreadpoolMgr::FireTimers()
     return nextFiringInterval;
 }
 
-DWORD __stdcall ThreadpoolMgr::AsyncTimerCallbackCompletion(PVOID pArgs)
+DWORD WINAPI ThreadpoolMgr::AsyncTimerCallbackCompletion(PVOID pArgs)
 {
     CONTRACTL
     {
         THROWS;
         GC_TRIGGERS;
         MODE_PREEMPTIVE;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -5183,7 +4786,6 @@ DWORD __stdcall ThreadpoolMgr::AsyncTimerCallbackCompletion(PVOID pArgs)
         }
     }
 
-    BEGIN_SO_INTOLERANT_CODE(pThread);
     {
         TimerInfo* timerInfo = (TimerInfo*) pArgs;
         ((WAITORTIMERCALLBACKFUNC) timerInfo->Function) (timerInfo->Context, TRUE) ;
@@ -5193,7 +4795,6 @@ DWORD __stdcall ThreadpoolMgr::AsyncTimerCallbackCompletion(PVOID pArgs)
             DeleteTimer(timerInfo);
         }
     }
-    END_SO_INTOLERANT_CODE;
 
     return ERROR_SUCCESS;
 }
@@ -5213,7 +4814,7 @@ void ThreadpoolMgr::DeactivateTimer(TimerInfo* timerInfo)
     timerInfo->state = timerInfo->state & ~TIMER_ACTIVE;
 }
 
-DWORD __stdcall ThreadpoolMgr::AsyncDeleteTimer(PVOID pArgs)
+DWORD WINAPI ThreadpoolMgr::AsyncDeleteTimer(PVOID pArgs)
 {
     CONTRACTL
     {
@@ -5270,7 +4871,7 @@ void ThreadpoolMgr::DeleteTimer(TimerInfo* timerInfo)
 
     if (timerInfo->ExternalCompletionEvent != INVALID_HANDLE)
     {
-        UnsafeSetEvent(timerInfo->ExternalCompletionEvent);
+        SetEvent(timerInfo->ExternalCompletionEvent);
         timerInfo->ExternalCompletionEvent = INVALID_HANDLE;
     }
 
@@ -5319,9 +4920,7 @@ void ThreadpoolMgr::DeleteTimer(TimerInfo* timerInfo)
     if (timerInfo->Context != NULL)
     {
         GCX_COOP();
-        DelegateInfo *pDelInfo = (DelegateInfo *)timerInfo->Context;
-        pDelInfo->Release();
-        RecycleMemory( pDelInfo, MEMTYPE_DelegateInfo );
+        delete (ThreadpoolMgr::TimerInfoContext*)timerInfo->Context;
     }
 
     if (timerInfo->ExternalEventSafeHandle != NULL)
@@ -5335,7 +4934,7 @@ void ThreadpoolMgr::DeleteTimer(TimerInfo* timerInfo)
 
 // We add TimerInfos from deleted timers into a linked list.
 // A worker thread will later release the handles held by the TimerInfo
-// and recycle them if possible (See DelegateInfo::MakeDelegateInfo)
+// and recycle them if possible.
 void ThreadpoolMgr::QueueTimerInfoForRelease(TimerInfo *pTimerInfo)
 {
     CONTRACTL
@@ -5405,10 +5004,7 @@ void ThreadpoolMgr::FlushQueueOfTimerInfos()
         GCX_COOP();
         if (pCurrTimerInfo->Context != NULL)
         {
-            DelegateInfo *pCurrDelInfo = (DelegateInfo *) pCurrTimerInfo->Context;
-            pCurrDelInfo->Release();
-
-            RecycleMemory( pCurrDelInfo, MEMTYPE_DelegateInfo );
+            delete (ThreadpoolMgr::TimerInfoContext*)pCurrTimerInfo->Context;
         }
 
         if (pCurrTimerInfo->ExternalEventSafeHandle != NULL)
@@ -5578,7 +5174,6 @@ void ThreadpoolMgr::DeregisterTimer(TimerInfo* pArgs)
         NOTHROW;
         GC_TRIGGERS;
         MODE_PREEMPTIVE;
-        SO_INTOLERANT;
     }
     CONTRACTL_END;
 

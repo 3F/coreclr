@@ -18,12 +18,7 @@
 #include "sigparser.h"
 #include "cor.h"
 #include "corinfo.h"
-
-#ifndef FEATURE_CORECLR
-#include "metahost.h"
-#endif // !FEATURE_CORECLR
-
-const char g_RTMVersion[]= "v1.0.3705";
+#include "volatile.h"
 
 #ifndef DACCESS_COMPILE
 UINT32 g_nClrInstanceId = 0;
@@ -49,8 +44,7 @@ void InitWinRTStatus()
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_CANNOT_TAKE_LOCK;
-    STATIC_CONTRACT_SO_TOLERANT;
-    
+
     WinRTStatusEnum winRTStatus = WINRT_STATUS_UNSUPPORTED;
 
     const WCHAR wszComBaseDll[] = W("\\combase.dll");
@@ -212,6 +206,84 @@ typedef HRESULT __stdcall DLLGETCLASSOBJECT(REFCLSID rclsid,
 EXTERN_C const IID _IID_IClassFactory = 
     {0x00000001, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 
+namespace
+{
+    HRESULT FakeCoCallDllGetClassObject(
+        REFCLSID rclsid,
+        LPCWSTR wszDllPath,
+        REFIID riid,
+        void **ppv,
+        HMODULE *phmodDll)
+    {
+        CONTRACTL
+        {
+            THROWS;
+        }
+        CONTRACTL_END;
+
+        _ASSERTE(ppv != nullptr);
+
+        HRESULT hr = S_OK;
+
+        // Initialize [out] HMODULE (if it was requested)
+        if (phmodDll != nullptr)
+            *phmodDll = nullptr;
+
+        bool fIsDllPathPrefix = (wszDllPath != nullptr) && (wcslen(wszDllPath) > 0) && (wszDllPath[wcslen(wszDllPath) - 1] == W('\\'));
+
+        // - An empty string will be treated as NULL.
+        // - A string ending will a backslash will be treated as a prefix for where to look for the DLL
+        //   if the InProcServer32 value is just a DLL name and not a full path.
+        StackSString ssDllName;
+        if ((wszDllPath == nullptr) || (wszDllPath[0] == W('\0')) || fIsDllPathPrefix)
+        {
+#ifndef FEATURE_PAL
+            IfFailRet(Clr::Util::Com::FindInprocServer32UsingCLSID(rclsid, ssDllName));
+
+            EX_TRY
+            {
+                if (fIsDllPathPrefix)
+                {
+                    SString::Iterator i = ssDllName.Begin();
+                    if (!ssDllName.Find(i, W('\\')))
+                    {   // If the InprocServer32 is just a DLL name (not a fully qualified path), then
+                        // prefix wszFilePath with wszDllPath.
+                        ssDllName.Insert(i, wszDllPath);
+                    }
+                }
+            }
+            EX_CATCH_HRESULT(hr);
+            IfFailRet(hr);
+
+            wszDllPath = ssDllName.GetUnicode();
+#else // !FEATURE_PAL
+            return E_FAIL;
+#endif // !FEATURE_PAL
+        }
+        _ASSERTE(wszDllPath != nullptr);
+
+        // We've got the name of the DLL to load, so load it.
+        HModuleHolder hDll = WszLoadLibraryEx(wszDllPath, nullptr, GetLoadWithAlteredSearchPathFlag());
+        if (hDll == nullptr)
+            return HRESULT_FROM_GetLastError();
+
+        // We've loaded the DLL, so find the DllGetClassObject function.
+        DLLGETCLASSOBJECT *dllGetClassObject = (DLLGETCLASSOBJECT*)GetProcAddress(hDll, "DllGetClassObject");
+        if (dllGetClassObject == nullptr)
+            return HRESULT_FROM_GetLastError();
+
+        // Call the function to get a class object for the rclsid and riid passed in.
+        IfFailRet(dllGetClassObject(rclsid, riid, ppv));
+
+        hDll.SuppressRelease();
+
+        if (phmodDll != nullptr)
+            *phmodDll = hDll.GetValue();
+
+        return hr;
+    }
+}
+
 // ----------------------------------------------------------------------------
 // FakeCoCreateInstanceEx
 // 
@@ -229,8 +301,7 @@ EXTERN_C const IID _IID_IClassFactory =
 //        If the path ends in a backslash, FakeCoCreateInstanceEx will treat this as a prefix
 //        if the InprocServer32 found in the registry is a simple filename (not a full path).
 //        This allows the caller to specify the directory in which the InprocServer32 should
-//        be found. Also, if this path is provided and the InprocServer32 is MSCOREE.DLL, then
-//        the Server value is used instead, if it exists.
+//        be found.
 //    * riid - [in] IID of interface on object to return in ppv
 //    * ppv - [out] Pointer to implementation of requested interface
 //    * phmodDll - [out] HMODULE of DLL that was loaded to instantiate the COM object.
@@ -270,100 +341,6 @@ HRESULT FakeCoCreateInstanceEx(REFCLSID       rclsid,
     // Ask the class factory to create an instance of the
     // necessary object.
     IfFailRet(classFactory->CreateInstance(NULL, riid, ppv));
-
-    hDll.SuppressRelease();
-
-    if (phmodDll != NULL)
-    {
-        *phmodDll = hDll.GetValue();
-    }
-
-    return hr;
-}
-
-HRESULT FakeCoCallDllGetClassObject(REFCLSID       rclsid,
-                               LPCWSTR        wszDllPath,
-                               REFIID riid,
-                               void **        ppv,
-                               HMODULE *      phmodDll)
-{
-    CONTRACTL
-    {
-        THROWS;
-    }
-    CONTRACTL_END;
-
-    _ASSERTE(ppv != NULL);
-    
-    HRESULT hr = S_OK;
-    
-    if (phmodDll != NULL)
-    {   // Initialize [out] HMODULE (if it was requested)
-        *phmodDll = NULL;
-    }
-
-    bool fIsDllPathPrefix = (wszDllPath != NULL) && (wszDllPath[wcslen(wszDllPath) - 1] == W('\\'));
-
-    // - An empty string will be treated as NULL.
-    // - A string ending will a backslash will be treated as a prefix for where to look for the DLL
-    //   if the InProcServer32 value is just a DLL name and not a full path.
-    StackSString ssDllName;
-    if ((wszDllPath == NULL) || (wszDllPath[0] == W('\0')) || fIsDllPathPrefix)
-    {
-#ifndef FEATURE_PAL    
-        IfFailRet(Clr::Util::Com::FindInprocServer32UsingCLSID(rclsid, ssDllName));
-
-        EX_TRY
-        {
-            if (fIsDllPathPrefix)
-            {
-                if (Clr::Util::Com::IsMscoreeInprocServer32(ssDllName))
-                {   // If the InprocServer32 is mscoree.dll, then we skip the shim and look for
-                    // the corresponding server DLL (if it exists) in the directory provided.
-                    hr = Clr::Util::Com::FindServerUsingCLSID(rclsid, ssDllName);
-
-                    if (FAILED(hr))
-                    {   // We don't fail if there is no server object, because in this case we assume that
-                        // the clsid is implemented in the runtime itself (clr.dll) and we do not place 
-                        // entries in the registry for this case.
-                        ssDllName.Set(MAIN_CLR_MODULE_NAME_W);
-                    }
-                }
-
-                SString::Iterator i = ssDllName.Begin();
-                if (!ssDllName.Find(i, W('\\')))
-                {   // If the InprocServer32 is just a DLL name (not a fully qualified path), then
-                    // prefix wszFilePath with wszDllPath.
-                    ssDllName.Insert(i, wszDllPath);
-                }
-            }
-        }
-        EX_CATCH_HRESULT(hr);
-        IfFailRet(hr);
-
-        wszDllPath = ssDllName.GetUnicode();
-#else // !FEATURE_PAL
-        return E_FAIL;
-#endif // !FEATURE_PAL
-    }
-    _ASSERTE(wszDllPath != NULL);
-
-    // We've got the name of the DLL to load, so load it.
-    HModuleHolder hDll = WszLoadLibraryEx(wszDllPath, NULL, GetLoadWithAlteredSearchPathFlag());
-    if (hDll == NULL)
-    {
-        return HRESULT_FROM_GetLastError();
-    }
-
-    // We've loaded the DLL, so find the DllGetClassObject function.
-    DLLGETCLASSOBJECT *dllGetClassObject = (DLLGETCLASSOBJECT*)GetProcAddress(hDll, "DllGetClassObject");
-    if (dllGetClassObject == NULL)
-    {
-        return HRESULT_FROM_GetLastError();
-    }
-
-    // Call the function to get a class object for the rclsid and riid passed in.
-    IfFailRet(dllGetClassObject(rclsid, riid, ppv));
 
     hDll.SuppressRelease();
 
@@ -440,7 +417,7 @@ void InitCodeAllocHint(SIZE_T base, SIZE_T size, int randomPageOffset)
     }
 
     // Randomize the adddress space
-    pStart += PAGE_SIZE * randomPageOffset;
+    pStart += GetOsPageSize() * randomPageOffset;
 
     s_CodeAllocStart = pStart;
     s_CodeAllocHint = pStart;
@@ -554,6 +531,8 @@ LPVOID ClrVirtualAllocAligned(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocatio
 
 #else // !FEATURE_PAL
 
+    if(alignment < GetOsPageSize()) alignment = GetOsPageSize();
+
     // UNIXTODO: Add a specialized function to PAL so that we don't have to waste memory
     dwSize += alignment;
     SIZE_T addr = (SIZE_T)ClrVirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
@@ -561,20 +540,6 @@ LPVOID ClrVirtualAllocAligned(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocatio
 
 #endif // !FEATURE_PAL
 }
-
-// Reserves free memory within the range [pMinAddr..pMaxAddr] using
-// ClrVirtualQuery to find free memory and ClrVirtualAlloc to reserve it.
-//
-// This method only supports the flAllocationType of MEM_RESERVE
-// Callers also should set dwSize to a multiple of sysInfo.dwAllocationGranularity (64k).
-// That way they can reserve a large region and commit smaller sized pages
-// from that region until it fills up.  
-//
-// This functions returns the reserved memory block upon success
-//
-// It returns NULL when it fails to find any memory that satisfies
-// the range.
-//
 
 #ifdef _DEBUG
 static DWORD ShouldInjectFaultInRange()
@@ -586,6 +551,22 @@ static DWORD ShouldInjectFaultInRange()
     return fInjectFaultInRange;
 }
 #endif
+
+// Reserves free memory within the range [pMinAddr..pMaxAddr] using
+// ClrVirtualQuery to find free memory and ClrVirtualAlloc to reserve it.
+//
+// This method only supports the flAllocationType of MEM_RESERVE, and expects that the memory
+// is being reserved for the purpose of eventually storing executable code.
+//
+// Callers also should set dwSize to a multiple of sysInfo.dwAllocationGranularity (64k).
+// That way they can reserve a large region and commit smaller sized pages
+// from that region until it fills up.  
+//
+// This functions returns the reserved memory block upon success
+//
+// It returns NULL when it fails to find any memory that satisfies
+// the range.
+//
 
 BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
                                   const BYTE *pMaxAddr,
@@ -601,7 +582,16 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
     }
     CONTRACTL_END;
 
-    BYTE *pResult = NULL;
+    BYTE *pResult = nullptr;  // our return value;
+
+    static unsigned countOfCalls = 0;  // We log the number of tims we call this method
+    countOfCalls++;                    // increment the call counter
+
+    if (dwSize == 0)
+    {
+        return nullptr;
+    }
+
     //
     // First lets normalize the pMinAddr and pMaxAddr values
     //
@@ -617,120 +607,190 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
         pMaxAddr = (BYTE *) TOP_MEMORY;
     }
 
+    // If pMaxAddr is not greater than pMinAddr we can not make an allocation
+    if (pMaxAddr <= pMinAddr)
+    {
+        return nullptr;
+    }
+
     // If pMinAddr is BOT_MEMORY and pMaxAddr is TOP_MEMORY
     // then we can call ClrVirtualAlloc instead 
     if ((pMinAddr == (BYTE *) BOT_MEMORY) && (pMaxAddr == (BYTE *) TOP_MEMORY))
     {
-        return (BYTE*) ClrVirtualAlloc(NULL, dwSize, flAllocationType, flProtect);
+        return (BYTE*) ClrVirtualAlloc(nullptr, dwSize, flAllocationType, flProtect);
     }
 
-    // If pMaxAddr is not greater than pMinAddr we can not make an allocation
-    if (dwSize == 0 || pMaxAddr <= pMinAddr)
+#ifdef FEATURE_PAL
+    pResult = (BYTE *)PAL_VirtualReserveFromExecutableMemoryAllocatorWithinRange(pMinAddr, pMaxAddr, dwSize);
+    if (pResult != nullptr)
     {
-        return NULL;
+        return pResult;
     }
+#endif // FEATURE_PAL
 
-    // We will do one scan: [pMinAddr .. pMaxAddr]
-    // Align to 64k. See docs for VirtualAllocEx and lpAddress and 64k alignment for reasons.
-    BYTE *tryAddr = (BYTE *)ALIGN_UP((BYTE *)pMinAddr, VIRTUAL_ALLOC_RESERVE_GRANULARITY);
+    // We will do one scan from [pMinAddr .. pMaxAddr]
+    // First align the tryAddr up to next 64k base address. 
+    // See docs for VirtualAllocEx and lpAddress and 64k alignment for reasons.
+    //
+    BYTE *   tryAddr            = (BYTE *)ALIGN_UP((BYTE *)pMinAddr, VIRTUAL_ALLOC_RESERVE_GRANULARITY);
+    bool     virtualQueryFailed = false;
+    bool     faultInjected      = false;
+    unsigned virtualQueryCount  = 0;
 
     // Now scan memory and try to find a free block of the size requested.
     while ((tryAddr + dwSize) <= (BYTE *) pMaxAddr)
     {
         MEMORY_BASIC_INFORMATION mbInfo;
-
+            
         // Use VirtualQuery to find out if this address is MEM_FREE
         //
+        virtualQueryCount++;
         if (!ClrVirtualQuery((LPCVOID)tryAddr, &mbInfo, sizeof(mbInfo)))
+        {
+            // Exit and return nullptr if the VirtualQuery call fails.
+            virtualQueryFailed = true;
             break;
-
+        }
+            
         // Is there enough memory free from this start location?
-        // The PAL version of VirtualQuery sets RegionSize to 0 for free
-        // memory regions, in which case we go just ahead and try
-        // VirtualAlloc without checking the size, and see if it succeeds.
-        if (mbInfo.State == MEM_FREE &&
-            (mbInfo.RegionSize >= (SIZE_T) dwSize || mbInfo.RegionSize == 0))
+        // Note that for most versions of UNIX the mbInfo.RegionSize returned will always be 0
+        if ((mbInfo.State == MEM_FREE) && 
+            (mbInfo.RegionSize >= (SIZE_T) dwSize || mbInfo.RegionSize == 0)) 
         {
             // Try reserving the memory using VirtualAlloc now
-            pResult = (BYTE*) ClrVirtualAlloc(tryAddr, dwSize, MEM_RESERVE, flProtect);
+            pResult = (BYTE*)ClrVirtualAlloc(tryAddr, dwSize, MEM_RESERVE, flProtect);
 
-            if (pResult != NULL) 
+            // Normally this will be successful
+            //
+            if (pResult != nullptr)
             {
-                return pResult;
+                // return pResult
+                break;
             }
-#ifdef _DEBUG 
-            // pResult == NULL
-            else if (ShouldInjectFaultInRange())
+
+#ifdef _DEBUG
+            if (ShouldInjectFaultInRange())
             {
-                return NULL;
+                // return nullptr (failure)
+                faultInjected = true;
+                break;
             }
 #endif // _DEBUG
 
-            // We could fail in a race.  Just move on to next region and continue trying
+            // On UNIX we can also fail if our request size 'dwSize' is larger than 64K and
+            // and our tryAddr is pointing at a small MEM_FREE region (smaller than 'dwSize')
+            // However we can't distinguish between this and the race case.
+
+            // We might fail in a race.  So just move on to next region and continue trying
             tryAddr = tryAddr + VIRTUAL_ALLOC_RESERVE_GRANULARITY;
         }
         else
         {
             // Try another section of memory
             tryAddr = max(tryAddr + VIRTUAL_ALLOC_RESERVE_GRANULARITY,
-                (BYTE*) mbInfo.BaseAddress + mbInfo.RegionSize);
+                          (BYTE*) mbInfo.BaseAddress + mbInfo.RegionSize);
         }
     }
 
-    // Our tryAddr reached pMaxAddr
-    return NULL;
+    STRESS_LOG7(LF_JIT, LL_INFO100,
+                "ClrVirtualAllocWithinRange request #%u for %08x bytes in [ %p .. %p ], query count was %u - returned %s: %p\n",
+                countOfCalls, (DWORD)dwSize, pMinAddr, pMaxAddr,
+                virtualQueryCount, (pResult != nullptr) ? "success" : "failure", pResult);
+
+    // If we failed this call the process will typically be terminated
+    // so we log any additional reason for failing this call.
+    //
+    if (pResult == nullptr)
+    {
+        if ((tryAddr + dwSize) > (BYTE *)pMaxAddr)
+        {
+            // Our tryAddr reached pMaxAddr
+            STRESS_LOG0(LF_JIT, LL_INFO100, "Additional reason: Address space exhausted.\n");
+        }
+
+        if (virtualQueryFailed)
+        {
+            STRESS_LOG0(LF_JIT, LL_INFO100, "Additional reason: VirtualQuery operation failed.\n");
+        }
+
+        if (faultInjected)
+        {
+            STRESS_LOG0(LF_JIT, LL_INFO100, "Additional reason: fault injected.\n");
+        }
+    }
+
+    return pResult;
 }
 
 //******************************************************************************
 // NumaNodeInfo 
 //******************************************************************************
-#if !defined(FEATURE_REDHAWK) && !defined(FEATURE_PAL)
-/*static*/ NumaNodeInfo::PGNHNN NumaNodeInfo::m_pGetNumaHighestNodeNumber = NULL;
-/*static*/ NumaNodeInfo::PVAExN NumaNodeInfo::m_pVirtualAllocExNuma = NULL;
+#if !defined(FEATURE_REDHAWK)
 
 /*static*/ LPVOID NumaNodeInfo::VirtualAllocExNuma(HANDLE hProc, LPVOID lpAddr, SIZE_T dwSize,
-		    		     DWORD allocType, DWORD prot, DWORD node)
+                         DWORD allocType, DWORD prot, DWORD node)
 {
-    return (*m_pVirtualAllocExNuma)(hProc, lpAddr, dwSize, allocType, prot, node);
+    return ::VirtualAllocExNuma(hProc, lpAddr, dwSize, allocType, prot, node);
 }
-/*static*/ NumaNodeInfo::PGNPNEx NumaNodeInfo::m_pGetNumaProcessorNodeEx = NULL;
 
+#ifndef FEATURE_PAL
 /*static*/ BOOL NumaNodeInfo::GetNumaProcessorNodeEx(PPROCESSOR_NUMBER proc_no, PUSHORT node_no)
 {
-    return (*m_pGetNumaProcessorNodeEx)(proc_no, node_no);
+    return ::GetNumaProcessorNodeEx(proc_no, node_no);
 }
+/*static*/ bool NumaNodeInfo::GetNumaInfo(PUSHORT total_nodes, DWORD* max_procs_per_node)
+{
+    if (m_enableGCNumaAware)
+    {
+        DWORD currentProcsOnNode = 0;
+        for (int i = 0; i < m_nNodes; i++)
+        {
+            GROUP_AFFINITY processorMask;
+            if (GetNumaNodeProcessorMaskEx(i, &processorMask))
+            {
+                DWORD procsOnNode = 0;
+                uintptr_t mask = (uintptr_t)processorMask.Mask;
+                while (mask)
+                {
+                    procsOnNode++;
+                    mask &= mask - 1;
+                }
+
+                currentProcsOnNode = max(currentProcsOnNode, procsOnNode);
+            }
+        }
+
+        *max_procs_per_node = currentProcsOnNode;
+        *total_nodes = m_nNodes;
+        return true;
+    }
+
+    return false;
+}
+#else // !FEATURE_PAL
+/*static*/ BOOL NumaNodeInfo::GetNumaProcessorNodeEx(USHORT proc_no, PUSHORT node_no)
+{
+    return PAL_GetNumaProcessorNode(proc_no, node_no);
+}
+#endif // !FEATURE_PAL
 #endif
 
 /*static*/ BOOL NumaNodeInfo::m_enableGCNumaAware = FALSE;
+/*static*/ uint16_t NumaNodeInfo::m_nNodes = 0;
 /*static*/ BOOL NumaNodeInfo::InitNumaNodeInfoAPI()
 {
-#if !defined(FEATURE_REDHAWK) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_REDHAWK)
     //check for numa support if multiple heaps are used
     ULONG highest = 0;
-	
+    
     if (CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_GCNumaAware) == 0)
         return FALSE;
 
-    // check if required APIs are supported
-    HMODULE hMod = GetModuleHandleW(WINDOWS_KERNEL32_DLLNAME_W);
-    if (hMod == NULL)
-        return FALSE;
-
-    m_pGetNumaHighestNodeNumber = (PGNHNN) GetProcAddress(hMod, "GetNumaHighestNodeNumber");
-    if (m_pGetNumaHighestNodeNumber == NULL)
-        return FALSE;
-
     // fail to get the highest numa node number
-    if (!m_pGetNumaHighestNodeNumber(&highest) || (highest == 0))
+    if (!::GetNumaHighestNodeNumber(&highest) || (highest == 0))
         return FALSE;
 
-    m_pGetNumaProcessorNodeEx = (PGNPNEx) GetProcAddress(hMod, "GetNumaProcessorNodeEx");
-    if (m_pGetNumaProcessorNodeEx == NULL)
-        return FALSE;
-
-    m_pVirtualAllocExNuma = (PVAExN) GetProcAddress(hMod, "VirtualAllocExNuma");
-    if (m_pVirtualAllocExNuma == NULL)
-        return FALSE;
+    m_nNodes = (USHORT)(highest + 1);
 
     return TRUE;
 #else
@@ -748,104 +808,86 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
     m_enableGCNumaAware = InitNumaNodeInfoAPI();
 }
 
+#ifndef FEATURE_PAL
+
 //******************************************************************************
-// NumaNodeInfo 
+// CPUGroupInfo 
 //******************************************************************************
-#if !defined(FEATURE_REDHAWK) && !defined(FEATURE_PAL)
-/*static*/ CPUGroupInfo::PGLPIEx CPUGroupInfo::m_pGetLogicalProcessorInformationEx = NULL;
-/*static*/ CPUGroupInfo::PSTGA   CPUGroupInfo::m_pSetThreadGroupAffinity = NULL;
-/*static*/ CPUGroupInfo::PGTGA   CPUGroupInfo::m_pGetThreadGroupAffinity = NULL;
-/*static*/ CPUGroupInfo::PGCPNEx CPUGroupInfo::m_pGetCurrentProcessorNumberEx = NULL;
-/*static*/ CPUGroupInfo::PGST    CPUGroupInfo::m_pGetSystemTimes = NULL;
+#if !defined(FEATURE_REDHAWK)
 /*static*/ //CPUGroupInfo::PNTQSIEx CPUGroupInfo::m_pNtQuerySystemInformationEx = NULL;
 
-/*static*/ BOOL CPUGroupInfo::GetLogicalProcessorInformationEx(DWORD relationship,
+/*static*/ BOOL CPUGroupInfo::GetLogicalProcessorInformationEx(LOGICAL_PROCESSOR_RELATIONSHIP relationship,
                          SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *slpiex, PDWORD count)
 {
     LIMITED_METHOD_CONTRACT;
-    return (*m_pGetLogicalProcessorInformationEx)(relationship, slpiex, count);
+    return ::GetLogicalProcessorInformationEx(relationship, slpiex, count);
 }
 
 /*static*/ BOOL CPUGroupInfo::SetThreadGroupAffinity(HANDLE h, 
                         GROUP_AFFINITY *groupAffinity, GROUP_AFFINITY *previousGroupAffinity)
 {
     LIMITED_METHOD_CONTRACT;
-    return (*m_pSetThreadGroupAffinity)(h, groupAffinity, previousGroupAffinity);
+    return ::SetThreadGroupAffinity(h, groupAffinity, previousGroupAffinity);
 }
 
 /*static*/ BOOL CPUGroupInfo::GetThreadGroupAffinity(HANDLE h, GROUP_AFFINITY *groupAffinity)
 {
     LIMITED_METHOD_CONTRACT;
-    return (*m_pGetThreadGroupAffinity)(h, groupAffinity);
+    return ::GetThreadGroupAffinity(h, groupAffinity);
 }
 
 /*static*/ BOOL CPUGroupInfo::GetSystemTimes(FILETIME *idleTime, FILETIME *kernelTime, FILETIME *userTime)
 {
     LIMITED_METHOD_CONTRACT;
-    return (*m_pGetSystemTimes)(idleTime, kernelTime, userTime);
-}
-#endif
 
-/*static*/ BOOL  CPUGroupInfo::m_enableGCCPUGroups = FALSE;
-/*static*/ BOOL  CPUGroupInfo::m_threadUseAllCpuGroups = FALSE;
-/*static*/ WORD  CPUGroupInfo::m_nGroups = 0;
-/*static*/ WORD  CPUGroupInfo::m_nProcessors = 0;
-/*static*/ WORD  CPUGroupInfo::m_initialGroup = 0;
-/*static*/ CPU_Group_Info *CPUGroupInfo::m_CPUGroupInfoArray = NULL;
-/*static*/ LONG   CPUGroupInfo::m_initialization = 0;
-
-// Check and setup function pointers for >64 LP Support
-/*static*/ BOOL CPUGroupInfo::InitCPUGroupInfoAPI()
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-    }
-    CONTRACTL_END;
-
-#if !defined(FEATURE_REDHAWK) && defined(_TARGET_AMD64_) && !defined(FEATURE_PAL)
-    HMODULE hMod = GetModuleHandleW(WINDOWS_KERNEL32_DLLNAME_W);
-    if (hMod == NULL)
-        return FALSE;
-
-    m_pGetLogicalProcessorInformationEx = (PGLPIEx)GetProcAddress(hMod, "GetLogicalProcessorInformationEx");
-    if (m_pGetLogicalProcessorInformationEx == NULL)
-        return FALSE;
-
-    m_pSetThreadGroupAffinity = (PSTGA)GetProcAddress(hMod, "SetThreadGroupAffinity");
-    if (m_pSetThreadGroupAffinity == NULL)
-        return FALSE;
-
-    m_pGetThreadGroupAffinity = (PGTGA)GetProcAddress(hMod, "GetThreadGroupAffinity");
-    if (m_pGetThreadGroupAffinity == NULL)
-        return FALSE;
-
-    m_pGetCurrentProcessorNumberEx = (PGCPNEx)GetProcAddress(hMod, "GetCurrentProcessorNumberEx");
-    if (m_pGetCurrentProcessorNumberEx == NULL)
-        return FALSE;
-
-    m_pGetSystemTimes = (PGST)GetProcAddress(hMod, "GetSystemTimes");
-    if (m_pGetSystemTimes == NULL)
-        return FALSE;
-
-    return TRUE;
+#ifndef FEATURE_PAL    
+    return ::GetSystemTimes(idleTime, kernelTime, userTime);
 #else
     return FALSE;
 #endif
 }
+#endif
+
+/*static*/ BOOL CPUGroupInfo::m_enableGCCPUGroups = FALSE;
+/*static*/ BOOL CPUGroupInfo::m_threadUseAllCpuGroups = FALSE;
+/*static*/ WORD CPUGroupInfo::m_nGroups = 0;
+/*static*/ WORD CPUGroupInfo::m_nProcessors = 0;
+/*static*/ WORD CPUGroupInfo::m_initialGroup = 0;
+/*static*/ CPU_Group_Info *CPUGroupInfo::m_CPUGroupInfoArray = NULL;
+/*static*/ LONG CPUGroupInfo::m_initialization = 0;
+/*static*/ bool CPUGroupInfo::s_hadSingleProcessorAtStartup = false;
+
+#if !defined(FEATURE_REDHAWK) && (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
+// Calculate greatest common divisor
+DWORD GCD(DWORD u, DWORD v)
+{
+    while (v != 0)
+    {
+        DWORD dwTemp = v;
+        v = u % v;
+        u = dwTemp;
+    }
+
+    return u;
+}
+
+// Calculate least common multiple
+DWORD LCM(DWORD u, DWORD v)
+{
+    return u / GCD(u, v) * v;
+}
+#endif
 
 /*static*/ BOOL CPUGroupInfo::InitCPUGroupInfoArray()
 {
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
         GC_NOTRIGGER;
     }
     CONTRACTL_END;
 
-#if !defined(FEATURE_REDHAWK) && defined(_TARGET_AMD64_) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_REDHAWK) && (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     BYTE *bBuffer = NULL;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *pSLPIEx = NULL;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *pRecord = NULL;
@@ -866,7 +908,7 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
         return FALSE;
 
     pSLPIEx = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)bBuffer;
-    if (!m_pGetLogicalProcessorInformationEx(RelationGroup, pSLPIEx, &cbSLPIEx))
+    if (!::GetLogicalProcessorInformationEx(RelationGroup, pSLPIEx, &cbSLPIEx))
     {
         delete[] bBuffer;
         return FALSE;
@@ -896,11 +938,13 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
         m_CPUGroupInfoArray[i].nr_active   = (WORD)pRecord->Group.GroupInfo[i].ActiveProcessorCount;
         m_CPUGroupInfoArray[i].active_mask = pRecord->Group.GroupInfo[i].ActiveProcessorMask;
         m_nProcessors += m_CPUGroupInfoArray[i].nr_active;
-        dwWeight *= (DWORD)m_CPUGroupInfoArray[i].nr_active;
+        dwWeight = LCM(dwWeight, (DWORD)m_CPUGroupInfoArray[i].nr_active);
     }
 
-    //NOTE: the weight setting should work fine with 4 CPU groups upto 64 LPs each. the minimum number of threads
-    //     per group before the weight overflow is 2^32/(2^6x2^6x2^6) = 2^14 (i.e. 16K threads)
+    // The number of threads per group that can be supported will depend on the number of CPU groups
+    // and the number of LPs within each processor group. For example, when the number of LPs in
+    // CPU groups is the same and is 64, the number of threads per group before weight overflow
+    // would be 2^32/2^6 = 2^26 (64M threads)
     for (DWORD i = 0; i < m_nGroups; i++)
     {
         m_CPUGroupInfoArray[i].groupWeight = dwWeight / (DWORD)m_CPUGroupInfoArray[i].nr_active;
@@ -918,7 +962,7 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
 {
     LIMITED_METHOD_CONTRACT;
 
-#if !defined(FEATURE_REDHAWK) && defined(_TARGET_AMD64_) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_REDHAWK) && (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     WORD begin   = 0;
     WORD nr_proc = 0;
 
@@ -940,19 +984,15 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
         GC_NOTRIGGER;
     }
     CONTRACTL_END;
 
-#if !defined(FEATURE_REDHAWK) && defined(_TARGET_AMD64_) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_REDHAWK) && (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     BOOL enableGCCPUGroups     = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_GCCpuGroup) != 0;
     BOOL threadUseAllCpuGroups = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_Thread_UseAllCpuGroups) != 0;
 
     if (!enableGCCPUGroups)
-        return;
-
-    if (!InitCPUGroupInfoAPI())
         return;
 
     if (!InitCPUGroupInfoArray())
@@ -970,7 +1010,19 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
 	BOOL hasMultipleGroups = m_nGroups > 1;
 	m_enableGCCPUGroups = enableGCCPUGroups && hasMultipleGroups;
 	m_threadUseAllCpuGroups = threadUseAllCpuGroups && hasMultipleGroups;
-#endif // _TARGET_AMD64_
+#endif // _TARGET_AMD64_ || _TARGET_ARM64_
+
+    // Determine if the process is affinitized to a single processor (or if the system has a single processor)
+    DWORD_PTR processAffinityMask, systemAffinityMask;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &processAffinityMask, &systemAffinityMask))
+    {
+        processAffinityMask &= systemAffinityMask;
+        if (processAffinityMask != 0 && // only one CPU group is involved
+            (processAffinityMask & (processAffinityMask - 1)) == 0) // only one bit is set
+        {
+            s_hadSingleProcessorAtStartup = true;
+        }
+    }
 }
 
 /*static*/ BOOL CPUGroupInfo::IsInitialized()
@@ -984,7 +1036,6 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
         GC_NOTRIGGER;
     }
     CONTRACTL_END;
@@ -1028,7 +1079,7 @@ retry:
 {
     LIMITED_METHOD_CONTRACT;
 
-#if !defined(FEATURE_REDHAWK) && defined(_TARGET_AMD64_) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_REDHAWK) && (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     WORD bTemp = 0;
     WORD bDiff = processor_number - bTemp;
 
@@ -1039,6 +1090,7 @@ retry:
         {
             *group_number = i;
             *group_processor_number = bDiff;
+
             break;
         }
         bDiff = processor_number - bTemp;
@@ -1054,12 +1106,11 @@ retry:
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
         GC_NOTRIGGER;
     }
     CONTRACTL_END;
 
-#if !defined(FEATURE_REDHAWK) && defined(_TARGET_AMD64_) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_REDHAWK) && (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     // m_enableGCCPUGroups and m_threadUseAllCpuGroups must be TRUE
     _ASSERTE(m_enableGCCPUGroups && m_threadUseAllCpuGroups);
 
@@ -1067,7 +1118,7 @@ retry:
     proc_no.Group=0;
     proc_no.Number=0;
     proc_no.Reserved=0;
-    (*m_pGetCurrentProcessorNumberEx)(&proc_no);
+    ::GetCurrentProcessorNumberEx(&proc_no);
 
     DWORD fullNumber = 0;
     for (WORD i = 0; i < proc_no.Group; i++)
@@ -1080,7 +1131,25 @@ retry:
 #endif
 }
 
-#if !defined(FEATURE_REDHAWK) && !defined(FEATURE_PAL)
+// There can be different numbers of procs in groups. We take the max.
+/*static*/ bool CPUGroupInfo::GetCPUGroupInfo(PUSHORT total_groups, DWORD* max_procs_per_group)
+{
+    if (m_enableGCCPUGroups)
+    {
+        *total_groups = m_nGroups;
+        DWORD currentProcsInGroup = 0;
+        for (WORD i = 0; i < m_nGroups; i++)
+        {
+            currentProcsInGroup = max(currentProcsInGroup, m_CPUGroupInfoArray[i].nr_active);
+        }
+        *max_procs_per_group = currentProcsInGroup;
+        return true;
+    }
+
+    return false;
+}
+
+#if !defined(FEATURE_REDHAWK)
 //Lock ThreadStore before calling this function, so that updates of weights/counts are consistent
 /*static*/ void CPUGroupInfo::ChooseCPUGroupAffinity(GROUP_AFFINITY *gf)
 {
@@ -1091,7 +1160,7 @@ retry:
     }
     CONTRACTL_END;
 
-#if defined(_TARGET_AMD64_)
+#if (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     WORD i, minGroup = 0;
     DWORD minWeight = 0;
 
@@ -1134,7 +1203,7 @@ found:
 /*static*/ void CPUGroupInfo::ClearCPUGroupAffinity(GROUP_AFFINITY *gf)
 {
     LIMITED_METHOD_CONTRACT;
-#if defined(_TARGET_AMD64_)
+#if (defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_))
     // m_enableGCCPUGroups and m_threadUseAllCpuGroups must be TRUE
     _ASSERTE(m_enableGCCPUGroups && m_threadUseAllCpuGroups);
 
@@ -1142,6 +1211,20 @@ found:
     m_CPUGroupInfoArray[group].activeThreadWeight -= m_CPUGroupInfoArray[group].groupWeight;
 #endif
 }
+
+BOOL CPUGroupInfo::GetCPUGroupRange(WORD group_number, WORD* group_begin, WORD* group_size)
+{
+    if (group_number >= m_nGroups)
+    {
+        return FALSE;
+    }
+
+    *group_begin = m_CPUGroupInfoArray[group_number].begin;
+    *group_size = m_CPUGroupInfoArray[group_number].nr_active;
+
+    return TRUE;
+}
+
 #endif
 
 /*static*/ BOOL CPUGroupInfo::CanEnableGCCPUGroups()
@@ -1155,10 +1238,8 @@ found:
     LIMITED_METHOD_CONTRACT;
     return m_threadUseAllCpuGroups;
 }
+#endif // !FEATURE_PAL
 
-//******************************************************************************
-// Returns the number of processors that a process has been configured to run on
-//******************************************************************************
 //******************************************************************************
 // Returns the number of processors that a process has been configured to run on
 //******************************************************************************
@@ -1167,7 +1248,6 @@ int GetCurrentProcessCpuCount()
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -1177,57 +1257,55 @@ int GetCurrentProcessCpuCount()
     if (cCPUs != 0)
         return cCPUs;
 
-#ifndef FEATURE_PAL
+    unsigned int count = 0;
 
+#ifndef FEATURE_PAL
     DWORD_PTR pmask, smask;
 
     if (!GetProcessAffinityMask(GetCurrentProcess(), &pmask, &smask))
-        return 1;
-
-    if (pmask == 1)
-        return 1;
-
-    pmask &= smask;
-        
-    int count = 0;
-    while (pmask)
     {
-        if (pmask & 1)
-            count++;
-                
-        pmask >>= 1;
+        count = 1;
     }
-        
-    // GetProcessAffinityMask can return pmask=0 and smask=0 on systems with more
-    // than 64 processors, which would leave us with a count of 0.  Since the GC
-    // expects there to be at least one processor to run on (and thus at least one
-    // heap), we'll return 64 here if count is 0, since there are likely a ton of
-    // processors available in that case.  The GC also cannot (currently) handle
-    // the case where there are more than 64 processors, so we will return a
-    // maximum of 64 here.
-    if (count == 0 || count > 64)
-        count = 64;
+    else
+    {
+        pmask &= smask;
 
-    cCPUs = count;
-            
-    return count;
+        while (pmask)
+        {
+            pmask &= (pmask - 1);
+            count++;
+        }
+
+        // GetProcessAffinityMask can return pmask=0 and smask=0 on systems with more
+        // than 64 processors, which would leave us with a count of 0.  Since the GC
+        // expects there to be at least one processor to run on (and thus at least one
+        // heap), we'll return 64 here if count is 0, since there are likely a ton of
+        // processors available in that case.  The GC also cannot (currently) handle
+        // the case where there are more than 64 processors, so we will return a
+        // maximum of 64 here.
+        if (count == 0 || count > 64)
+            count = 64;
+    }
 
 #else // !FEATURE_PAL
+    count = PAL_GetLogicalCpuCountFromOS();
 
-    SYSTEM_INFO sysInfo;
-    ::GetSystemInfo(&sysInfo);
-    cCPUs = sysInfo.dwNumberOfProcessors;
-    return sysInfo.dwNumberOfProcessors;
-
+    uint32_t cpuLimit;
+    if (PAL_GetCpuLimit(&cpuLimit) && cpuLimit < count)
+        count = cpuLimit;
 #endif // !FEATURE_PAL
+
+    cCPUs = count;
+
+    return count;
 }
 
+#ifndef FEATURE_PAL
 DWORD_PTR GetCurrentProcessCpuMask()
 {
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -1242,6 +1320,37 @@ DWORD_PTR GetCurrentProcessCpuMask()
     return pmask;
 #else
     return 0;
+#endif
+}
+#endif // !FEATURE_PAL
+
+uint32_t GetOsPageSizeUncached()
+{
+    SYSTEM_INFO sysInfo;
+    ::GetSystemInfo(&sysInfo);
+    return sysInfo.dwAllocationGranularity ? sysInfo.dwAllocationGranularity : 0x1000;
+}
+
+namespace
+{
+    Volatile<uint32_t> g_pageSize = 0;
+}
+
+uint32_t GetOsPageSize()
+{
+#ifdef FEATURE_PAL
+    size_t result = g_pageSize.LoadWithoutBarrier();
+
+    if(!result)
+    {
+        result = GetOsPageSizeUncached();
+
+        g_pageSize.StoreWithoutBarrier(result);
+    }
+
+    return result;
+#else
+    return 0x1000;
 #endif
 }
 
@@ -1740,7 +1849,6 @@ HRESULT validateOneArg(
     CONTRACTL
     {
         NOTHROW;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     
@@ -1756,7 +1864,6 @@ HRESULT validateOneArg(
     HRESULT     hr = S_OK;              // Value returned.
     BOOL        bRepeat = TRUE;         // MODOPT and MODREQ belong to the arg after them
     
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(return COR_E_STACKOVERFLOW);
     while(bRepeat)
     {
         bRepeat = FALSE;
@@ -1951,8 +2058,6 @@ HRESULT validateOneArg(
         }   // switch (ulElementType)
     } // end while(bRepeat)
 ErrExit:
-    
-    END_SO_INTOLERANT_CODE;
     return hr;
 }   // validateOneArg()
 
@@ -2063,66 +2168,6 @@ HRESULT validateTokenSig(
     return S_OK;
 }   // validateTokenSig()
 
-const CHAR g_VersionBase[] = "v1.";
-const CHAR g_DevelopmentVersion[] = "x86";
-const CHAR g_RetString[] = "retail";
-const CHAR g_ComplusString[] = "COMPLUS";
-
-const WCHAR g_VersionBaseW[] = W("v1.");
-const WCHAR g_DevelopmentVersionW[] = W("x86");
-const WCHAR g_RetStringW[] = W("retail");
-const WCHAR g_ComplusStringW[] = W("COMPLUS");
-
-//*****************************************************************************
-// Determine the version number of the runtime that was used to build the
-// specified image. The pMetadata pointer passed in is the pointer to the
-// metadata contained in the image.
-//*****************************************************************************
-static BOOL IsReallyRTM(LPCWSTR szVersion)
-{
-    LIMITED_METHOD_CONTRACT;
-    if (szVersion==NULL)
-        return FALSE;
-
-    size_t lgth = sizeof(g_VersionBaseW) / sizeof(WCHAR) - 1;
-    size_t foundLgth = wcslen(szVersion);
-
-    // Have normal version, v1.*
-    if ( (foundLgth >= lgth+2) &&
-         !wcsncmp(szVersion, g_VersionBaseW, lgth) ) {
-
-        // v1.0.* means RTM
-        if (szVersion[lgth+1] == W('.')) {
-            if (szVersion[lgth] == W('0'))
-               return TRUE;
-        }
-        
-        // Check for dev version (v1.x86ret, v1.x86fstchk...)
-        else if(!wcsncmp(szVersion+lgth, g_DevelopmentVersionW,
-                         (sizeof(g_DevelopmentVersionW) / sizeof(WCHAR) - 1)))
-            return TRUE;
-    }
-    // Some weird version...
-    else if( (!wcscmp(szVersion, g_RetStringW)) ||
-             (!wcscmp(szVersion, g_ComplusStringW)) )
-        return TRUE;
-    return FALSE;   
-}
-
-void AdjustImageRuntimeVersion(SString* pVersion)
-{
-    CONTRACTL
-    {
-        THROWS;
-    }
-    CONTRACTL_END;
-    
-    if (IsReallyRTM(*pVersion))
-    {
-        pVersion->SetANSI(g_RTMVersion);
-    }
-};
-
 HRESULT GetImageRuntimeVersionString(PVOID pMetaData, LPCSTR* pString)
 {
     CONTRACTL
@@ -2134,7 +2179,7 @@ HRESULT GetImageRuntimeVersionString(PVOID pMetaData, LPCSTR* pString)
     _ASSERTE(pString);
     STORAGESIGNATURE* pSig = (STORAGESIGNATURE*) pMetaData;
 
-    // Verify the signature. 
+    // Verify the signature.
 
     // If signature didn't match, you shouldn't be here.
     if (pSig->GetSignature() != STORAGE_MAGIC_SIG)
@@ -2149,32 +2194,6 @@ HRESULT GetImageRuntimeVersionString(PVOID pMetaData, LPCSTR* pString)
     
     // Header data starts after signature.
     *pString = (LPCSTR) pSig->pVersion;
-    if(*pString) {
-        size_t lgth = sizeof(g_VersionBase) / sizeof(char) - 1;
-        size_t foundLgth = strlen(*pString);
-
-        // Have normal version, v1.*
-        if ( (foundLgth >= lgth+2) &&
-             !strncmp(*pString, g_VersionBase, lgth) ) {
-
-            // v1.0.* means RTM
-            if ((*pString)[lgth+1] == '.') {
-                if ((*pString)[lgth] == '0')
-                    *pString = g_RTMVersion;
-            }
-            
-            // Check for dev version (v1.x86ret, v1.x86fstchk...)
-            else if(!strncmp(&(*pString)[lgth], g_DevelopmentVersion,
-                             (sizeof(g_DevelopmentVersion) / sizeof(char) - 1)))
-                *pString = g_RTMVersion;
-        }
-
-        // Some weird version...
-        else if( (!strcmp(*pString, g_RetString)) ||
-                 (!strcmp(*pString, g_ComplusString)) )
-            *pString = g_RTMVersion;
-    }
-
     return S_OK;
 }
 
@@ -2918,472 +2937,6 @@ LPWSTR *SegmentCommandLine(LPCWSTR lpCmdLine, DWORD *pNumArgs)
 
 Volatile<PVOID> ForbidCallsIntoHostOnThisThread::s_pvOwningFiber = NULL;
 
-#ifdef ENABLE_CONTRACTS_IMPL
-
-enum SOViolationType {
-    SO_Violation_Intolerant = 0,
-    SO_Violation_NotMainline = 1,
-    SO_Violation_Backout = 2,
-};
-
-struct HashedSOViolations {
-    ULONG m_hash;
-    HashedSOViolations* m_pNext;
-    HashedSOViolations(ULONG hash, HashedSOViolations *pNext) : m_hash(hash), m_pNext(pNext) {}
-};
-
-static HashedSOViolations *s_pHashedSOViolations = NULL;
-
-void SOViolation(const char *szFunction, const char *szFile, int lineNum, SOViolationType violation);
-
-
-//
-// SOTolerantViolation is used to report an SO-intolerant function that is not running behind a probe.
-//
-void SOTolerantViolation(const char *szFunction, const char *szFile, int lineNum) 
-{
-    return SOViolation(szFunction, szFile, lineNum, SO_Violation_Intolerant);
-}
-
-//
-// SONotMainlineViolation is used to report any code with SO_NOT_MAINLINE being run in a test environment
-// with COMPlus_NO_SO_NOT_MAINLINE enabled
-//
-void SONotMainlineViolation(const char *szFunction, const char *szFile, int lineNum) 
-{
-    return SOViolation(szFunction, szFile, lineNum, SO_Violation_NotMainline);
-}
-
-//
-// SONotMainlineViolation is used to report any code with SO_NOT_MAINLINE being run in a test environment
-// with COMPlus_NO_SO_NOT_MAINLINE enabled
-//
-void SOBackoutViolation(const char *szFunction, const char *szFile, int lineNum) 
-{
-    return SOViolation(szFunction, szFile, lineNum, SO_Violation_Backout);
-}
-
-//
-// Code common to SO violations
-//
-// The default is to throw up an ASSERT.  But the function can also dump violations to a file and
-// ensure that only unique violations are tracked.
-//
-void SOViolation(const char *szFunction, const char *szFile, int lineNum, SOViolationType violationType)
-{
-    // This function is called from places that don't allow a throw.  But this is debug-only 
-    // code that should eventually never be called once all the violations are gone.
-    CONTRACT_VIOLATION(ThrowsViolation|FaultViolation|TakesLockViolation);
-
-    static BOOL fDumpToFileInitialized = FALSE;
-    static BOOL fDumpToFile = FALSE;
-
-#pragma warning(disable:4640)      // Suppress warning: construction of local static object is not thread-safe 
-    static SString hashFN;
-    static SString fnameFN;
-    static SString detailsFN;
-#pragma warning(default:4640)
-
-    static int dumpLock = -1;
-
-    static CHAR szExprWithStack[10480];
-    static DWORD stackTraceLength = 20;
-
-    if (fDumpToFileInitialized == FALSE)
-    {
-        stackTraceLength = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_SODumpViolationsStackTraceLength, stackTraceLength);  
-        // Limit the length or we'll overflow our buffer
-        if (stackTraceLength > cfrMaxAssertStackLevels)
-        {
-            stackTraceLength = cfrMaxAssertStackLevels;
-        }
-        NewArrayHolder<WCHAR> dumpDir(CLRConfig::GetConfigValue(CLRConfig::INTERNAL_SODumpViolationsDir));  
-        if (dumpDir == NULL)
-        {
-            fDumpToFileInitialized = TRUE;
-        }
-        else
-        {
-            fDumpToFile = TRUE;
-            hashFN.Append(SString(dumpDir.GetValue()));
-            hashFN.Append(W("\\SOViolationHashes.txt"));
-            fnameFN.Append(SString(dumpDir.GetValue()));
-            fnameFN.Append(W("\\SOViolationFunctionNames.txt"));
-            detailsFN.Append(SString(dumpDir.GetValue()));
-            detailsFN.Append(W("\\SOViolationDetails.txt"));
-        }
-    }
-
-    char buff[1024];
-
-    if (violationType == SO_Violation_NotMainline) 
-    {
-        sprintf_s(buff, 
-                _countof(buff),
-                        "CONTRACT VIOLATION by %s at \"%s\" @ %d\n\n" 
-                        "SO-not-mainline function being called with not-mainline checking enabled.\n"
-                        "\nPlease open a bug against the feature owner.\n"
-                        "\nNOTE: You can disable this ASSERT by setting COMPlus_SOEnableDefaultRWValidation=0.\n"
-                        "      or by turning of not-mainline checking by by setting COMPlus_NO_SO_NOT_MAINLINE=0.\n"
-                        "\nFor details about this feature, see, in a CLR enlistment,\n"
-                        "src\\ndp\\clr\\doc\\OtherDevDocs\\untriaged\\clrdev_web\\SO Guide for CLR Developers.doc\n",
-                            szFunction, szFile, lineNum);
-    }
-    else if (violationType == SO_Violation_Backout) 
-    {
-        sprintf_s(buff, 
-                _countof(buff),
-                        "SO Backout Marker overrun.\n\n" 
-                        "A dtor or handler path exceeded the backout code stack consumption limit.\n"
-                        "\nPlease open a bug against the feature owner.\n"
-                        "\nNOTE: You can disable this ASSERT by setting COMPlus_SOEnableBackoutStackValidation=0.\n"
-                        "\nFor details about this feature, see, in a CLR enlistment,\n"
-                        "src\\ndp\\clr\\doc\\OtherDevDocs\\untriaged\\clrdev_web\\SO Guide for CLR Developers.doc\n");
-    }
-    else 
-    {
-        sprintf_s(buff, 
-                _countof(buff),
-                        "CONTRACT VIOLATION by %s at \"%s\" @ %d\n\n" 
-                        "SO-intolerant function called outside an SO probe.\n"
-                        "\nPlease open a bug against the feature owner.\n"
-                        "\nNOTE: You can disable this ASSERT by setting COMPlus_SOEnableDefaultRWValidation=0.\n"
-                        "\nFor details about this feature, see, in a CLR enlistment,\n"
-                        "src\\ndp\\clr\\doc\\OtherDevDocs\\untriaged\\clrdev_web\\SO Guide for CLR Developers.doc\n",
-                            szFunction, szFile, lineNum);
-    }
-                        
-    // At this point, we've checked if we should dump to file or not and so can either
-    // do the assert or fall through and dump to a file.
-    if (! fDumpToFile)
-    {
-        DbgAssertDialog((char *)szFile, lineNum, buff);
-        return;
-    }
-
-    // If we are dumping violations to a file, we want to avoid duplicates so that we can run multiple tests
-    // and find unique violations and not end up with massively long files.
-    // We keep three files: 
-    //    1) a list of the hashed strings for each unique filename/function
-    //    2) a list of the actual filename/function for unique violations and 
-    //    3) a detailed assert dump for the violation itself
-    //
-    // First thing to do is read in the hashes file if this is our first violation.  We read the filenames into a linked
-    // list with their hashes.
-    //
-    // Then we want to search through the list for that violation
-
-    // If it's new, then we insert the violation at the front of our list and append it to the violation files
-    // Otherwise, if we've already seen this violation, we can ignore it.
-
-    
-    HANDLE hashesDumpFileHandle  = INVALID_HANDLE_VALUE;
-
-    StackScratchBuffer buffer;
-    // First see if we've initialized yet
-    if (fDumpToFileInitialized == FALSE)
-    {
-        LONG lAlreadyOwned = InterlockedExchange((LPLONG)&dumpLock, 1);
-        if (lAlreadyOwned == 1)
-        {
-            // somebody else has gotten here first.  So just skip this violation.
-            return;
-        }
-
-        // This is our first time through, so read in the existing file and create a linked list of hashed names from it.
-        hashesDumpFileHandle = CreateFileA(
-                hashFN.GetANSI(buffer), 
-                GENERIC_READ,
-                FILE_SHARE_READ,
-                NULL,
-                OPEN_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH,
-                NULL);
-
-        // If we successfully opened the file, pull out each hash number and add it to a linked list of known violations.
-        // Otherwise, if we couldn't open the file, assume that there were no preexisting violations.  The worse thing
-        // that will happen in this case is that we might report some dups.
-        if (hashesDumpFileHandle != INVALID_HANDLE_VALUE)
-        {
-            DWORD dwFileSize = GetFileSize( hashesDumpFileHandle, NULL );
-
-            NewArrayHolder<char> pBuffer(new char[dwFileSize]);
-            DWORD cbBuffer = dwFileSize;
-            DWORD cbRead;
-            DWORD result = ReadFile( hashesDumpFileHandle, pBuffer.GetValue(), cbBuffer, &cbRead, NULL );
-
-            CloseHandle( hashesDumpFileHandle );
-            hashesDumpFileHandle = INVALID_HANDLE_VALUE;
-
-            // If we couldn't read the file, assume that there were no preexisting violations.  Worse thing
-            // that will happen is we might report some dups.
-            if (result && cbRead == cbBuffer)
-            {
-                char *pBuf = pBuffer.GetValue();
-                COUNT_T count = 0;
-                LOG((LF_EH, LL_INFO100000, "SOTolerantViolation: Reading known violations\n"));
-                while (count < cbRead)
-                {
-                    char *pHashStart = pBuf + count;
-                    char *pHashEnd = strstr(pHashStart, "\r\n");
-                    COUNT_T len = static_cast<COUNT_T>(pHashEnd-pHashStart);
-                    SString hashString(SString::Ascii, pHashStart, len);
-                    ULONG hashValue = wcstoul(hashString.GetUnicode(), NULL, 16);
-                    HashedSOViolations *pHashedSOViolations = new HashedSOViolations(hashValue, s_pHashedSOViolations);
-                    s_pHashedSOViolations = pHashedSOViolations;
-                    count += (len + 2);
-                    LOG((LF_ALWAYS, LL_ALWAYS, "    %8.8x\n", pHashedSOViolations->m_hash));
-                }
-            }
-        }
-        fDumpToFileInitialized = TRUE;
-        dumpLock = -1;
-    }
-
-
-    SString violation;
-    violation.Append(SString(SString::Ascii, szFile));
-    violation.Append(W(" "));
-    violation.Append(SString(SString::Ascii, szFunction));
-    HashedSOViolations *cur = s_pHashedSOViolations;
-
-    // look for the violation in the list
-    while (cur != NULL)
-    {
-        if (cur->m_hash == violation.Hash())
-        {
-            return;
-        }
-        cur = cur->m_pNext;
-    }
-
-    LONG lAlreadyOwned = InterlockedExchange((LPLONG)&dumpLock, 1);
-    if (lAlreadyOwned == 1)
-    {
-        // somebody else has gotten here first.  So just skip this violation. 
-        return;
-    }
-
-    HANDLE functionsDumpFileHandle = INVALID_HANDLE_VALUE;
-    HANDLE detailsDumpFileHandle = INVALID_HANDLE_VALUE;
-
-    // This is a new violation
-    // Append new violations to the output files
-    functionsDumpFileHandle = CreateFileA(
-            fnameFN.GetANSI(buffer), GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH, NULL);
-
-    if (functionsDumpFileHandle != INVALID_HANDLE_VALUE)
-    {
-        // First write it to the filename dump
-        SetFilePointer(functionsDumpFileHandle, NULL, NULL, FILE_END);
-
-        DWORD written;
-        char *szExpr = &szExprWithStack[0];
-        sprintf_s(szExpr, _countof(szExprWithStack), "%s %8.8x\r\n", violation.GetANSI(buffer), violation.Hash());
-        WriteFile(functionsDumpFileHandle, szExpr, static_cast<DWORD>(strlen(szExpr)), &written, NULL);
-        CloseHandle(functionsDumpFileHandle);        
-
-        // Now write it to the hashes dump.  Once we've got it in the filename dump, we don't
-        // care if these others fail.  We can live w/o detailed info or with dups.
-        hashesDumpFileHandle = CreateFileA(
-                hashFN.GetANSI(buffer), GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH, NULL);
-
-        if (hashesDumpFileHandle != INVALID_HANDLE_VALUE)
-        {
-            SetFilePointer(hashesDumpFileHandle, NULL, NULL, FILE_END);
-
-            DWORD written;
-            sprintf_s(szExpr, _countof(szExprWithStack), "%8.8x", violation.Hash());
-            strcat_s(szExpr, _countof(szExprWithStack), "\r\n");
-            WriteFile(hashesDumpFileHandle, szExpr, static_cast<DWORD>(strlen(szExpr)), &written, NULL);
-            CloseHandle(hashesDumpFileHandle);  
-            hashesDumpFileHandle = INVALID_HANDLE_VALUE;
-        }
-
-        // Now write it to the details dump
-        strcpy_s(szExpr, _countof(szExprWithStack), buff);
-        strcat_s(szExpr, _countof(szExprWithStack), "\n\n");
-#ifndef FEATURE_PAL        
-        GetStringFromStackLevels(1, stackTraceLength, szExprWithStack + strlen(szExprWithStack));
-        strcat_s(szExpr, _countof(szExprWithStack), "\n\n");
-#endif // FEATURE_PAL        
-        char exeName[300];
-        GetModuleFileNameA(NULL, exeName, sizeof(exeName)/sizeof(WCHAR));
-        strcat_s(szExpr, _countof(szExprWithStack), exeName);
-        strcat_s(szExpr, _countof(szExprWithStack), "\n\n\n");
-
-        detailsDumpFileHandle = CreateFileA(
-            detailsFN.GetANSI(buffer), GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH, NULL);
-
-        if (detailsDumpFileHandle != INVALID_HANDLE_VALUE)
-        {
-            SetFilePointer(detailsDumpFileHandle, NULL, NULL, FILE_END);
-            WriteFile(detailsDumpFileHandle, szExpr, static_cast<DWORD>(strlen(szExpr)), &written, NULL);
-            CloseHandle(detailsDumpFileHandle);        
-            detailsDumpFileHandle = INVALID_HANDLE_VALUE;
-        }
-
-        // add the new violation to our list
-        HashedSOViolations *pHashedSOViolations = new HashedSOViolations(violation.Hash(), s_pHashedSOViolations);
-        s_pHashedSOViolations = pHashedSOViolations;
-        LOG((LF_ALWAYS, LL_ALWAYS, "SOTolerantViolation: Adding new violation %8.8x %s\n", pHashedSOViolations->m_hash, violation.GetANSI(buffer)));
-        dumpLock = -1;
-    }
-}
-
-void SoTolerantViolationHelper(const char *szFunction,
-                                      const char *szFile,
-                                      int   lineNum)
-{
-    // Keep this function separate to avoid overhead of EH in the normal case where we don't assert
-    // Enter SO-tolerant mode for scope of this call so that we don't get contract asserts
-    // in anything called downstream of CONTRACT_ASSERT.  If we unwind out of here, our dtor
-    // will reset our state to what it was on entry.
-    CONTRACT_VIOLATION(SOToleranceViolation);    
-
-    SOTolerantViolation(szFunction, szFile, lineNum);
-
-}
-
-void CloseSOTolerantViolationFile()
-{
-    // We used to have a file to close.  Now we just cleanup the memory.
-    HashedSOViolations *ptr = s_pHashedSOViolations;
-    while (ptr != NULL)
-    {
-        s_pHashedSOViolations = s_pHashedSOViolations->m_pNext;
-        delete ptr;
-        ptr = s_pHashedSOViolations;
-    }
-}
-#endif //ENABLE_CONTRACTS_IMPL
-
-BOOL FileExists(LPCWSTR filename)
-{
-    WIN32_FIND_DATA data;        
-    HANDLE h = WszFindFirstFile(filename, &data);
-    if (h == INVALID_HANDLE_VALUE)
-    {
-        return FALSE;
-    }
-
-    ::FindClose(h);
-
-    return TRUE;                
-}
-
-#ifndef FEATURE_CORECLR
-// Current users for FileLock are ngen and ngen service
-
-FileLockHolder::FileLockHolder()
-{
-    _hLock = INVALID_HANDLE_VALUE;
-}
-    
-FileLockHolder::~FileLockHolder()
-{
-    Release();
-}
-
-// the amount of time we want to wait
-#define FILE_LOCK_RETRY_TIME 100
-
-void FileLockHolder::Acquire(LPCWSTR lockName, HANDLE hInterrupt, BOOL* pInterrupted)
-{
-    WRAPPER_NO_CONTRACT;
-
-    DWORD dwErr = 0;
-    DWORD dwAccessDeniedRetry = 0;
-    const DWORD MAX_ACCESS_DENIED_RETRIES = 10;
-
-    if (pInterrupted)
-    {
-        *pInterrupted = FALSE;
-    }
-
-    _ASSERTE(_hLock == INVALID_HANDLE_VALUE);
-
-    for (;;) {
-        _hLock = WszCreateFile(lockName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_DELETE_ON_CLOSE, NULL);
-        if (_hLock != INVALID_HANDLE_VALUE) {
-            return; 
-        }
-
-        dwErr = GetLastError();
-        // Logically we should only expect ERROR_SHARING_VIOLATION, but Windows can also return
-        // ERROR_ACCESS_DENIED for underlying NtStatus DELETE_PENDING.  That happens when another process
-        // (gacutil.exe or indexer) have the file opened.  Unfortunately there is no public API that would
-        // allow us to detect this NtStatus and distinguish it from 'real' access denied (candidates are
-        // RtlGetLastNtStatus that is not documented on MSDN and NtCreateFile that is internal and can change
-        // at any time), so we retry on access denied, but only for a limited number of times.
-        if (dwErr == ERROR_SHARING_VIOLATION ||
-            (dwErr == ERROR_ACCESS_DENIED && ++dwAccessDeniedRetry <= MAX_ACCESS_DENIED_RETRIES))
-        {
-            // Somebody is holding the lock. Let's sleep, and come back again.
-            if (hInterrupt)
-            {
-                _ASSERTE(pInterrupted && 
-                    "If you can be interrupted, you better want to know if you actually were interrupted");
-                if (WaitForSingleObject(hInterrupt, FILE_LOCK_RETRY_TIME) == WAIT_OBJECT_0)
-                {
-                      if (pInterrupted)
-                      {
-                        *pInterrupted = TRUE;
-                      }
-
-                      // We've been interrupted, so return without acquiring
-                      return;
-                }
-            }
-            else
-            {
-                ClrSleepEx(FILE_LOCK_RETRY_TIME, FALSE);
-            }
-        }
-        else {
-            ThrowHR(HRESULT_FROM_WIN32(dwErr));
-        }
-    }
-}
-
-
-HRESULT FileLockHolder::AcquireNoThrow(LPCWSTR lockName, HANDLE hInterrupt, BOOL* pInterrupted)
-{
-    HRESULT hr = S_OK;
-    
-    EX_TRY
-    {
-        Acquire(lockName, hInterrupt, pInterrupted);
-    }
-    EX_CATCH_HRESULT(hr);
-
-    return hr;
-}
-
-BOOL FileLockHolder::IsTaken(LPCWSTR lockName)
-{
-    
-    // We don't want to do an acquire the lock to know if its taken, so we want to see if the file
-    // exists. However, in situations like unplugging a machine, a DELETE_ON_CLOSE still leaves the file
-    // around. We try to delete it here. If the lock is acquired, DeleteFile will fail, as the file is
-    // not opened with SHARE_DELETE.
-    WszDeleteFile(lockName);
-
-    return FileExists(lockName);
-}
-
-void FileLockHolder::Release()
-{
-    if (_hLock != INVALID_HANDLE_VALUE) {
-        CloseHandle(_hLock);
-        _hLock = INVALID_HANDLE_VALUE;
-    }
-}
-#endif // FEATURE_CORECLR
-
 //======================================================================
 // This function returns true, if it can determine that the instruction pointer
 // refers to a code address that belongs in the range of the given image.
@@ -3536,135 +3089,6 @@ void EnableTerminationOnHeapCorruption()
     HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
 }
 
-RUNTIMEVERSIONINFO RUNTIMEVERSIONINFO::notDefined;
-
-BOOL IsV2RuntimeLoaded(void)
-{
-#ifndef FEATURE_CORECLR
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        CANNOT_TAKE_LOCK;
-    }
-    CONTRACTL_END;
-
-    ReleaseHolder<ICLRMetaHost>    pMetaHost(NULL);
-    ReleaseHolder<IEnumUnknown>    pEnum(NULL);
-    ReleaseHolder<IUnknown>        pUnk(NULL);
-    ReleaseHolder<ICLRRuntimeInfo> pRuntime(NULL);
-    HRESULT hr;
-
-    HModuleHolder hModule = WszLoadLibrary(MSCOREE_SHIM_W);
-    if (hModule == NULL)
-        return FALSE;
-
-    CLRCreateInstanceFnPtr pfnCLRCreateInstance = (CLRCreateInstanceFnPtr)::GetProcAddress(hModule, "CLRCreateInstance");
-    if (pfnCLRCreateInstance == NULL)
-        return FALSE;
-
-    hr = (*pfnCLRCreateInstance)(CLSID_CLRMetaHost, IID_ICLRMetaHost, (LPVOID *)&pMetaHost);
-    if (FAILED(hr))
-        return FALSE;
-
-    hr = pMetaHost->EnumerateLoadedRuntimes(GetCurrentProcess(), &pEnum);
-    if (FAILED(hr))
-        return FALSE;
-
-    while (pEnum->Next(1, &pUnk, NULL) == S_OK)
-    {
-        hr = pUnk->QueryInterface(IID_ICLRRuntimeInfo, (void **)&pRuntime);
-        if (FAILED(hr))
-            continue;
-
-        WCHAR wszVersion[30];
-        DWORD cchVersion = _countof(wszVersion);
-        hr = pRuntime->GetVersionString(wszVersion, &cchVersion);
-        if (FAILED(hr))
-            continue;
-
-        // Is it a V2 runtime?
-        if ((cchVersion < 3) || 
-            ((wszVersion[0] != W('v')) && (wszVersion[0] != W('V'))) || 
-            (wszVersion[1] != W('2')) || 
-            (wszVersion[2] != W('.')))
-            continue;
-
-        return TRUE;
-    }
-#endif //  FEATURE_CORECLR
-
-    return FALSE;
-}
-
-#ifdef FEATURE_COMINTEROP
-BOOL IsClrHostedLegacyComObject(REFCLSID rclsid)
-{
-    // let's simply check for all CLSIDs that are known to be runtime implemented and capped to 2.0
-    return (
-            rclsid == CLSID_ComCallUnmarshal ||
-#ifdef FEATURE_INCLUDE_ALL_INTERFACES
-            rclsid == CLSID_CorRuntimeHost ||
-            rclsid == CLSID_CLRRuntimeHost ||
-            rclsid == CLSID_CLRProfiling ||
-#endif
-            rclsid == CLSID_CorMetaDataDispenser ||
-            rclsid == CLSID_CorMetaDataDispenserRuntime ||
-            rclsid == CLSID_TypeNameFactory);
-}
-#endif // FEATURE_COMINTEROP
-
-
-
-#if !defined(FEATURE_CORECLR) && !defined(SELF_NO_HOST) && !defined(FEATURE_UTILCODE_NO_DEPENDENCIES)
-
-namespace UtilCode
-{
-
-#pragma warning(push)
-#pragma warning(disable:4996) // For use of deprecated LoadLibraryShim
-
-    // When a NULL version is passed to LoadLibraryShim, this told the shim to bind the already-loaded
-    // runtime or to the latest runtime. In hosted environments, we already know a runtime (or two) is
-    // loaded, and since we are no longer guaranteed that a call to mscoree!LoadLibraryShim with a NULL
-    // version will return the correct runtime, this code uses the ClrCallbacks infrastructure
-    // available to get the ICLRRuntimeInfo for the runtime in which this code is hosted, and then
-    // calls ICLRRuntimeInfo::LoadLibrary to make sure that the load occurs within the context of the
-    // correct runtime.
-    HRESULT LoadLibraryShim(LPCWSTR szDllName, LPCWSTR szVersion, LPVOID pvReserved, HMODULE *phModDll)
-    {
-        HRESULT hr = S_OK;
-
-        if (szVersion != NULL)
-        {   // If a version is provided, then we just fall back to the legacy function to allow
-            // it to construct the explicit path and load from that location.
-            //@TODO: Can we verify that all callers of LoadLibraryShim in hosted environments always pass null and eliminate this code?
-            return ::LoadLibraryShim(szDllName, szVersion, pvReserved, phModDll);
-        }
-
-        //
-        // szVersion is NULL, which means we should load the DLL from the hosted environment's directory.
-        //
-
-        typedef ICLRRuntimeInfo *GetCLRRuntime_t();
-        GetCLRRuntime_t *pfnGetCLRRuntime =
-            reinterpret_cast<GetCLRRuntime_t *>((*GetClrCallbacks().m_pfnGetCLRFunction)("GetCLRRuntime"));
-        if (pfnGetCLRRuntime == NULL)
-            return E_UNEXPECTED;
-
-        ICLRRuntimeInfo* pRI = (*pfnGetCLRRuntime)();
-        if (pRI == NULL)
-            return E_UNEXPECTED;
-
-        return pRI->LoadLibrary(szDllName, phModDll);
-    }
-
-#pragma warning(pop)
-
-}
-
-#endif //!FEATURE_CORECLR && !SELF_NO_HOST && !FEATURE_UTILCODE_NO_DEPENDENCIES
-
 namespace Clr
 {
 namespace Util
@@ -3758,6 +3182,101 @@ namespace Util
     }
 
 #ifndef FEATURE_PAL
+    // Struct used to scope suspension of client impersonation for the current thread.
+    // https://docs.microsoft.com/en-us/windows/desktop/secauthz/client-impersonation
+    class SuspendImpersonation
+    {
+    public:
+        SuspendImpersonation()
+            : _token(nullptr)
+        {
+            // The approach used here matches what is used elsewhere in CLR (RevertIfImpersonated).
+            // In general, OpenThreadToken fails with ERROR_NO_TOKEN if impersonation is not active,
+            // fails with ERROR_CANT_OPEN_ANONYMOUS if anonymous impersonation is active, and otherwise
+            // succeeds and returns the active impersonation token.
+            BOOL res = ::OpenThreadToken(::GetCurrentThread(), TOKEN_IMPERSONATE, /* OpenAsSelf */ TRUE, &_token);
+            if (res != FALSE)
+            {
+                ::RevertToSelf();
+            }
+            else
+            {
+                _token = nullptr;
+            }
+        }
+
+        ~SuspendImpersonation()
+        {
+            if (_token != nullptr)
+                ::SetThreadToken(nullptr, _token);
+        }
+
+    private:
+        HandleHolder _token;
+    };
+
+    struct ProcessIntegrityResult
+    {
+        BOOL Success;
+        DWORD Integrity;
+        HRESULT LastError;
+
+        HRESULT RecordAndReturnError(HRESULT hr)
+        {
+            LastError = hr;
+            return hr;
+        }
+    };
+
+    // The system calls in this code can fail if run with reduced privileges.
+    // It is the caller's responsibility to choose an appropriate default in the event
+    // that this function fails to retrieve the current process integrity.
+    HRESULT GetCurrentProcessIntegrity(DWORD *integrity)
+    {
+        static ProcessIntegrityResult s_Result = { FALSE, 0, S_FALSE };
+
+        if (FALSE != InterlockedCompareExchangeT(&s_Result.Success, FALSE, FALSE))
+        {
+            *integrity = s_Result.Integrity;
+            return S_OK;
+        }
+
+        // Temporarily suspend impersonation (if possible) while computing the integrity level.
+        // If impersonation is active, the OpenProcessToken call below will check the impersonation
+        // token against the process token ACL, and will generally fail with ERROR_ACCESS_DENIED if
+        // the impersonation token is less privileged than this process's primary token.
+        Clr::Util::SuspendImpersonation si;
+
+        HandleHolder hToken;
+        if(!OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &hToken))
+            return s_Result.RecordAndReturnError(HRESULT_FROM_GetLastError());
+
+        DWORD dwSize = 0;
+        DWORD err = ERROR_SUCCESS;
+        if(!GetTokenInformation(hToken, (TOKEN_INFORMATION_CLASS)TokenIntegrityLevel, nullptr, 0, &dwSize))
+            err = GetLastError();
+
+        // We need to make sure that GetTokenInformation failed in a predictable manner so we know that
+        // dwSize has the correct buffer size in it.
+        if (err != ERROR_INSUFFICIENT_BUFFER || dwSize == 0)
+            return s_Result.RecordAndReturnError((err == ERROR_SUCCESS) ? E_FAIL : HRESULT_FROM_WIN32(err));
+
+        NewArrayHolder<BYTE> pLabel = new (nothrow) BYTE[dwSize];
+        if (pLabel == NULL)
+            return s_Result.RecordAndReturnError(E_OUTOFMEMORY);
+
+        if(!GetTokenInformation(hToken, (TOKEN_INFORMATION_CLASS)TokenIntegrityLevel, pLabel, dwSize, &dwSize))
+            return s_Result.RecordAndReturnError(HRESULT_FROM_GetLastError());
+
+        TOKEN_MANDATORY_LABEL *ptml = (TOKEN_MANDATORY_LABEL *)(void*)pLabel;
+        PSID psidIntegrityLevelLabel = ptml->Label.Sid;
+
+        s_Result.Integrity = *GetSidSubAuthority(psidIntegrityLevelLabel, (*GetSidSubAuthorityCount(psidIntegrityLevelLabel) - 1));
+        *integrity = s_Result.Integrity;
+        InterlockedExchangeT(&s_Result.Success, TRUE);
+        return S_OK;
+    }
+
 namespace Reg
 {
     HRESULT ReadStringValue(HKEY hKey, LPCWSTR wszSubKeyName, LPCWSTR wszValueName, SString & ssValue)
@@ -3853,8 +3372,6 @@ namespace Com
         {
             STANDARD_VM_CONTRACT;
 
-            HRESULT hr = S_OK;
-
             WCHAR wszClsid[39];
             if (GuidToLPWSTR(rclsid, wszClsid, NumItems(wszClsid)) == 0)
                 return E_UNEXPECTED;
@@ -3865,49 +3382,38 @@ namespace Com
             ssKeyName.Append(SL(W("\\")));
             ssKeyName.Append(wszSubKeyName);
 
-            return Clr::Util::Reg::ReadStringValue(HKEY_CLASSES_ROOT, ssKeyName.GetUnicode(), NULL, ssValue);
-        }
+            // Query HKCR first to retain backwards compat with previous implementation where HKCR was only queried.
+            // This is being done due to registry caching. This value will be used if the process integrity is medium or less.
+            HRESULT hkcrResult = Clr::Util::Reg::ReadStringValue(HKEY_CLASSES_ROOT, ssKeyName.GetUnicode(), nullptr, ssValue);
 
-        __success(return == S_OK)
-        static
-        HRESULT FindSubKeyDefaultValueForCLSID(REFCLSID rclsid, LPCWSTR wszSubKeyName, __deref_out __deref_out_z LPWSTR* pwszValue)
-        {
-            CONTRACTL {
-                NOTHROW;
-                GC_NOTRIGGER;
-            } CONTRACTL_END;
-
-            HRESULT hr = S_OK;
-            EX_TRY
+            // HKCR is a virtualized registry hive that weaves together HKCU\Software\Classes and HKLM\Software\Classes
+            // Processes with high integrity or greater should only read from HKLM to avoid being hijacked by medium
+            // integrity processes writing to HKCU.
+            DWORD integrity = SECURITY_MANDATORY_PROTECTED_PROCESS_RID;
+            HRESULT hr = Clr::Util::GetCurrentProcessIntegrity(&integrity);
+            if (hr != S_OK)
             {
-                StackSString ssValue;
-                if (SUCCEEDED(hr = FindSubKeyDefaultValueForCLSID(rclsid, wszSubKeyName, ssValue)))
-                {
-                    *pwszValue = new WCHAR[ssValue.GetCount() + 1];
-                    wcscpy_s(*pwszValue, ssValue.GetCount() + 1, ssValue.GetUnicode());
-                }
+                // In the event that we are unable to get the current process integrity,
+                // we assume that this process is running in an elevated state.
+                // GetCurrentProcessIntegrity may fail if the process has insufficient rights to get the integrity level
+                integrity = SECURITY_MANDATORY_PROTECTED_PROCESS_RID;
             }
-            EX_CATCH_HRESULT(hr);
-            return hr;
+
+            if (integrity > SECURITY_MANDATORY_MEDIUM_RID)
+            {
+                Clr::Util::SuspendImpersonation si;
+
+                // Clear the previous HKCR queried value
+                ssValue.Clear();
+
+                // Force to use HKLM
+                StackSString ssHklmKeyName(SL(W("SOFTWARE\\Classes\\")));
+                ssHklmKeyName.Append(ssKeyName);
+                return Clr::Util::Reg::ReadStringValue(HKEY_LOCAL_MACHINE, ssHklmKeyName.GetUnicode(), nullptr, ssValue);
+            }
+
+            return hkcrResult;
         }
-    }
-
-    HRESULT FindServerUsingCLSID(REFCLSID rclsid, __deref_out __deref_out_z LPWSTR* pwszServerName)
-    {
-        WRAPPER_NO_CONTRACT;
-        return __imp::FindSubKeyDefaultValueForCLSID(rclsid, W("Server"), pwszServerName);
-    }
-
-    HRESULT FindServerUsingCLSID(REFCLSID rclsid, SString & ssServerName)
-    {
-        WRAPPER_NO_CONTRACT;
-        return __imp::FindSubKeyDefaultValueForCLSID(rclsid, W("Server"), ssServerName);
-    }
-
-    HRESULT FindInprocServer32UsingCLSID(REFCLSID rclsid, __deref_out __deref_out_z LPWSTR* pwszInprocServer32Name)
-    {
-        WRAPPER_NO_CONTRACT;
-        return __imp::FindSubKeyDefaultValueForCLSID(rclsid, W("InprocServer32"), pwszInprocServer32Name);
     }
 
     HRESULT FindInprocServer32UsingCLSID(REFCLSID rclsid, SString & ssInprocServer32Name)
@@ -3915,24 +3421,6 @@ namespace Com
         WRAPPER_NO_CONTRACT;
         return __imp::FindSubKeyDefaultValueForCLSID(rclsid, W("InprocServer32"), ssInprocServer32Name);
     }
-
-    BOOL IsMscoreeInprocServer32(const SString & ssInprocServer32Name)
-    {
-        WRAPPER_NO_CONTRACT;
-
-        return (ssInprocServer32Name.EqualsCaseInsensitive(SL(MSCOREE_SHIM_W)) ||
-                ssInprocServer32Name.EndsWithCaseInsensitive(SL(W("\\") MSCOREE_SHIM_W)));
-    }
-
-    BOOL CLSIDHasMscoreeAsInprocServer32(REFCLSID rclsid)
-    {
-        WRAPPER_NO_CONTRACT;
-
-        StackSString ssInprocServer32;
-        FindInprocServer32UsingCLSID(rclsid, ssInprocServer32);
-        return IsMscoreeInprocServer32(ssInprocServer32);
-    }
-
 } // namespace Com
 #endif //  FEATURE_PAL
 
@@ -4015,7 +3503,6 @@ namespace Win32
         // Overly defensive? Perhaps.
         if (!(dwLengthWritten < dwLengthRequired))
             ThrowHR(E_UNEXPECTED);
-
     }
 } // namespace Win32
 

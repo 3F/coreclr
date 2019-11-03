@@ -21,25 +21,9 @@ typedef DelegateInfo* DelegateInfoPtr;
 
 struct DelegateInfo
 {
-    ADID            m_appDomainId;
     OBJECTHANDLE    m_stateHandle;
     OBJECTHANDLE    m_eventHandle;
     OBJECTHANDLE    m_registeredWaitHandle;
-    DWORD           m_overridesCount;
-    BOOL            m_hasSecurityInfo;
-
-    void SetThreadSecurityInfo( Thread* thread, StackCrawlMark* stackMark )
-    {
-        CONTRACTL {
-            THROWS;
-            GC_TRIGGERS;
-            MODE_COOPERATIVE; 
-            INJECT_FAULT(COMPlusThrowOM());
-        }
-        CONTRACTL_END;
-
-
-    }
 
 #ifndef DACCESS_COMPILE
     void Release()
@@ -58,22 +42,16 @@ struct DelegateInfo
         CONTRACTL_END;
 
 
-        AppDomainFromIDHolder ad(m_appDomainId, FALSE);
-        if (!ad.IsUnloaded())
-        {
-            if (m_stateHandle)
-                DestroyHandle(m_stateHandle);
-            if (m_eventHandle)
-            	 DestroyHandle(m_eventHandle);
-            if (m_registeredWaitHandle)
-               DestroyHandle(m_registeredWaitHandle);
-        }
-
+        if (m_stateHandle)
+            DestroyHandle(m_stateHandle);
+        if (m_eventHandle)
+                DestroyHandle(m_eventHandle);
+        if (m_registeredWaitHandle)
+            DestroyHandle(m_registeredWaitHandle);
     }
 #endif
 
-    static DelegateInfo  *MakeDelegateInfo(AppDomain *pAppDomain,
-                                           OBJECTREF *state,
+    static DelegateInfo  *MakeDelegateInfo(OBJECTREF *state,
                                            OBJECTREF *waitEvent,
                                            OBJECTREF *registeredWaitObject);
 };

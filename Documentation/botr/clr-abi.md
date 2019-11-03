@@ -1,18 +1,20 @@
 # CLR ABI
 
-This document describes the .NET Common Language Runtime (CLR) software conventions (or ABI, "Application Binary Interface"). It focusses on the ABI for the x64 (aka, AMD64), ARM (aka, ARM32 or Thumb-2), and ARM64 processor architectures. This document currently does not describe the x86 ABI.
+This document describes the .NET Common Language Runtime (CLR) software conventions (or ABI, "Application Binary Interface"). It focusses on the ABI for the x64 (aka, AMD64), ARM (aka, ARM32 or Thumb-2), and ARM64 processor architectures. Documentation for the x86 ABI is somewhat scant.
 
 It describes requirements that the Just-In-Time (JIT) compiler imposes on the VM and vice-versa.
 
 A note on the JIT codebases: JIT32 refers to the original JIT codebase that originally generated x86 code and was later ported to generate ARM code. Later, it was ported and re-architected to generate AMD64 code (making its name something of a confusing misnomer). This work is referred to as RyuJIT. RyuJIT is being ported to generate ARM64 code. JIT64 refers to the legacy codebase that supports AMD64.
 
+CoreRT refers to https://github.com/dotnet/corert runtime that is optimized for AOT. The CoreRT ABI differs in a few details for simplicity and consistency across platforms.
+
 # Getting started
 
 Read everything in the documented Windows ABI.
 
-AMD64: See "x64 Software Conventions" on MSDN: https://msdn.microsoft.com/en-us/library/7kcdt6fy.aspx.
+AMD64: See [x64 Software Conventions](https://docs.microsoft.com/en-us/cpp/build/x64-software-conventions).
 
-ARM: See "Overview of ARM ABI Conventions" on MSDN: https://msdn.microsoft.com/en-us/library/dn736986.aspx.
+ARM: See [Overview of ARM ABI Conventions"](https://docs.microsoft.com/en-us/cpp/build/overview-of-arm-abi-conventions).
 
 The CLR follows those basic conventions. This document only describes things that are CLR-specific, or exceptions from those documents.
 
@@ -48,7 +50,7 @@ Managed varargs are not supported in .NET Core.
 
 ## Generics
 
-*Shared generics*. In cases where the code address does not uniquely identify a generic instantiation of a method, then a 'generic instantiation parameter' is required. Often the "this" pointer can serve dual-purpose as the instantiation parameter. When the "this" pointer is not the generic parameter, the generic parameter is passed as the next argument (after the optional return buffer and the optional "this" pointer, but before any user arguments). For generic methods (where there is a type parameter directly on the method, as compared to the type), the generic parameter currently is a MethodDesc pointer (I believe an InstantiatedMethodDesc). For static methods (where there is no "this" pointer) the generic parameter is a MethodTable pointer/TypeHandle.
+*Shared generics*. In cases where the code address does not uniquely identify a generic instantiation of a method, then a 'generic instantiation parameter' is required. Often the "this" pointer can serve dual-purpose as the instantiation parameter. When the "this" pointer is not the generic parameter, the generic parameter is passed as an additional argument. On ARM, ARM64 and AMD64, it is passed after the optional return buffer and the optional "this" pointer, but before any user arguments. On x86, if all arguments of the function including "this" pointer fit into argument registers (ECX and EDX) and we still have argument registers available, we store the hidden argument in the next available argument register. Otherwise it is passed as the last stack argument. For generic methods (where there is a type parameter directly on the method, as compared to the type), the generic parameter currently is a MethodDesc pointer (I believe an InstantiatedMethodDesc). For static methods (where there is no "this" pointer) the generic parameter is a MethodTable pointer/TypeHandle.
 
 Sometimes the VM asks the JIT to report and keep alive the generics parameter. In this case, it must be saved on the stack someplace and kept alive via normal GC reporting (if it was the "this" pointer, as compared to a MethodDesc or MethodTable) for the entire method except the prolog and epilog. Also note that the code to home it, must be in the range of code reported as the prolog in the GC info (which probably isn't the same as the range of code reported as the prolog in the unwind info).
 
@@ -73,7 +75,7 @@ NOTE: This optimization is now disabled for all platforms (`IsStructRequiringSta
 
 ## Hidden parameters
 
-*Stub dispatch* - when a virtual call uses a VSD stub, rather than back-patching the calling code (or disassembling it), the JIT must place the address of the stub used to load the call target, the "stub indirection cell", in (x86) `EAX` / (AMD64) `R11` / (ARM) `R4` / (ARM64) `R11`. In the JIT, this is `REG_VIRTUAL_STUB_PARAM`.
+*Stub dispatch* - when a virtual call uses a VSD stub, rather than back-patching the calling code (or disassembling it), the JIT must place the address of the stub used to load the call target, the "stub indirection cell", in (x86) `EAX` / (AMD64) `R11` / (AMD64 CoreRT ABI) `R10` / (ARM) `R4` / (ARM CoreRT ABI) `R12` / (ARM64) `R11`. In the JIT, this is encapsulated in the `VirtualStubParamInfo` class.
 
 AMD64-only: Fast Pinvoke - The VM wants a conservative estimate of the size of the stack arguments placed in `R11`. (This is consumed by callout stubs used in SQL hosting).
 
@@ -117,7 +119,7 @@ For IL stubs only, the per-frame initialization includes setting `Thread->m_pFra
 2. For JIT64/AMD64 only: Next for non-IL stubs, the InlinedCallFrame is 'pushed' by setting `Thread->m_pFrame` to point to the InlinedCallFrame (recall that the per-frame initialization already set `InlinedCallFrame->m_pNext` to point to the previous top). For IL stubs this step is accomplished in the per-frame initialization.
 3. The Frame is made active by setting `InlinedCallFrame->m_pCallerReturnAddress`.
 4. The code then toggles the GC mode by setting `Thread->m_fPreemptiveGCDisabled = 0`.
-5. Starting now, no GC pointers may be live in registers.
+5. Starting now, no GC pointers may be live in registers. RyuJit LSRA meets this requirement by adding special refPositon `RefTypeKillGCRefs` before unmanaged calls and special helpers.
 6. Then comes the actual call/PInvoke.
 7. The GC mode is set back by setting `Thread->m_fPreemptiveGCDisabled = 1`.
 8. Then we check to see if `g_TrapReturningThreads` is set (non-zero). If it is, we call `CORINFO_HELP_STOP_FOR_GC`.
@@ -131,17 +133,25 @@ Saving/restoring all the non-volatile registers helps by preventing any register
 
 For IL stubs, the Frame chain isn't popped at the call site, so instead it must be popped right before the epilog and right before any jmp calls. It looks like we do not support tail calls from PInvoke IL stubs?
 
-# Exception handling and funclets
+# Exception handling
 
-All managed exception handling (EH) handlers (finally, fault, filter, filter-handler, and catch) are extracted into their own 'funclets'. To the OS they are treated just like first class functions (separate PDATA and XDATA (`RUNTIME_FUNCTION` entry), etc.). The CLR currently treats them just like part of the parent function in many ways. The main function and all funclets must be allocated in a single code allocation (see hot cold splitting). They 'share' GC info. Only the main function prolog can be hot patched.
+This section describes the conventions the JIT needs to follow when generating code to implement managed exception handling (EH). The JIT and VM must agree on these conventions for a correct implementation.
 
-The only way to enter a handler funclet is via a call. In the case of an exception, the call is from the VM's EH subsystem as part of exception dispatch/unwind. In the non-exceptional case, this is called local unwind or a non-local exit. In C# this is accomplished by simply falling-through/out of a try body or an explicit goto. In IL this is always accomplished via a leave opcode, within a try body, targeting an IL offset outside the try body. In such cases the call is from the JITed code of the parent function.
+## Funclets
+
+For all platforms except Windows/x86, all managed EH handlers (finally, fault, filter, filter-handler, and catch) are extracted into their own 'funclets'. To the OS they are treated just like first class functions (separate PDATA and XDATA (`RUNTIME_FUNCTION` entry), etc.). The CLR currently treats them just like part of the parent function in many ways. The main function and all funclets must be allocated in a single code allocation (see hot cold splitting). They 'share' GC info. Only the main function prolog can be hot patched.
+
+The only way to enter a handler funclet is via a call. In the case of an exception, the call is from the VM's EH subsystem as part of exception dispatch/unwind. In the non-exceptional case, this is called local unwind or a non-local exit. In C# this is accomplished by simply falling-through/out of a try body or an explicit goto. In IL this is always accomplished via a LEAVE opcode, within a try body, targeting an IL offset outside the try body. In such cases the call is from the JITed code of the parent function.
+
+For Windows/x86, all handlers are generated within the method body, typically in lexical order. A nested try/catch is generated completely within the EH region in which it is nested. These handlers are essentially "in-line funclets", but they do not look like normal functions: they do not have a normal prolog or epilog, although they do have special entry/exit and register conventions. Also, nested handlers are not un-nested as for funclets: the code for a nested handler is generated within the handler in which it is nested. 
 
 ## Cloned finallys
 
 JIT64 attempts to speed the normal control flow by 'inlining' a called finally along the 'normal' control flow (i.e., leaving a try body in a non-exceptional manner via C# fall-through). Because the VM semantics for non-rude Thread.Abort dictate that handlers will not be aborted, the JIT must mark these 'inlined' finally bodies. These show up as special entries at the end of the EH tables and are marked with `COR_ILEXCEPTION_CLAUSE_FINALLY | COR_ILEXCEPTION_CLAUSE_DUPLICATED`, and the try_start, try_end, and handler_start are all the same: the start of the cloned finally.
 
-JIT32 and RyuJIT currently do not implement finally cloning.
+RyuJit also implements finally cloning, for all supported architectures. However, the implementation does not yet handle the thread abort case; cloned finally bodies are not guaranteed to remain intact and are not reported to the runtime. Because of this, finally cloning is disabled for VMs that support thread abort (desktop clr).
+
+JIT32 does not implement finally cloning.
 
 ## Invoking Finallys/Non-local exits
 
@@ -263,7 +273,11 @@ Note that JIT64 does not implement this properly. The C# compiler used to always
 
 ## The PSPSym and funclet parameters
 
-The name *PSPSym* stands for Previous Stack Pointer Symbol. It is how a funclet accesses locals from the main function body.
+The *PSPSym* (which stands for Previous Stack Pointer Symbol) is a pointer-sized local variable used to access locals from the main function body.
+
+CoreRT does not use PSPSym. For filter funclets the VM sets the frame register to be the same as the parent function. For second pass funclets the VM restores all non-volatile registers. The same convention is used across all platforms.
+
+CoreCLR uses PSPSym for all platforms except x86: the frame pointer on x86 is always preserved when the handlers are invoked.
 
 First, two definitions.
 
@@ -271,11 +285,11 @@ First, two definitions.
 
 *Initial-SP* is the initial value of the stack pointer after the fixed-size portion of the frame has been allocated. That is, before any "alloca"-type allocations.
 
-The PSPSym is a pointer-sized local variable in the frame of the main function and of each funclet. The value stored in PSPSym is the value of Initial-SP for AMD64 or Caller-SP for other platforms, for the main function. The stack offset of the PSPSym is reported to the VM in the GC information header. The value reported in the GC information is the offset of the PSPSym from Initial-SP for AMD64 or Caller-SP for other platforms. (Note that both the value stored, and the way the value is reported to the VM, differs between architectures. In particular, note that most things in the GC information header are reported as offsets relative to Caller-SP, but PSPSym on AMD64 is one exception, and maybe the only exception.)
+The value stored in PSPSym is the value of Initial-SP for AMD64 or Caller-SP for other platforms, for the main function. The stack offset of the PSPSym is reported to the VM in the GC information header. The value reported in the GC information is the offset of the PSPSym from Initial-SP for AMD64 or Caller-SP for other platforms. (Note that both the value stored, and the way the value is reported to the VM, differs between architectures. In particular, note that most things in the GC information header are reported as offsets relative to Caller-SP, but PSPSym on AMD64 is one exception, and maybe the only exception.)
 
 The VM uses the PSPSym to find other locals it cares about (such as the generics context in a funclet frame). The JIT uses it to re-establish the frame pointer register, so that the frame pointer is the same value in a funclet as it is in the main function body.
 
-When a funclet is called, it is passed the *Establisher Frame Pointer*. For AMD64 this is true for all funclets and it is passed as the first argument in RCX, but for ARM and ARM64 this is only true for first pass funclets (currently just filters) and it is passed as the second argument in R1. The Establisher Frame Pointer is a stack pointer of an interesting "parent" frame in the exception processing system. For the CLR, it points either to the main function frame or a dynamically enclosing funclet frame from the same function, for the funclet being invoked. The value of the Establisher Frame Pointer is Initial-SP on AMD64, Caller-SP on ARM and ARM64.
+When a funclet is called, it is passed the *Establisher Frame Pointer*. For AMD64 this is true for all funclets and it is passed as the first argument in RCX, but for ARM and ARM64 this is only true for first pass funclets (currently just filters) and it is passed as the second argument in R1. The Establisher Frame Pointer is a stack pointer of an interesting "parent" frame in the exception processing system. For the CLR, it points either to the main function frame or a dynamically enclosing funclet frame from the same function, for the funclet being invoked. The value of the Establisher Frame Pointer is Initial-SP on AMD64, Caller-SP on x86, ARM, and ARM64.
 
 Using the establisher frame, the funclet wants to load the value of the PSPSym. Since we don't know if the Establisher Frame is from the main function or a funclet, we design the main function and funclet frame layouts to place the PSPSym at an identical, small, constant offset from the Establisher Frame in each case. (This is also required because we only report a single offset to the PSPSym in the GC information, and that offset must be valid for the main function and all of its funclets). Then, the funclet uses this known offset to compute the PSPSym address and read its value. From this, it can compute the value of the frame pointer (which is a constant offset from the PSPSym value) and set the frame register to be the same as the parent function. Also, the funclet writes the value of the PSPSym to its own frame's PSPSym. This "copying" of the PSPSym happens for every funclet invocation, in particular, for every nested funclet invocation.
 
@@ -287,10 +301,9 @@ Catch, Filter, and Filter-handlers also get an Exception object (GC ref) as an a
 
 ## Funclet Return Values
 
-The filter funclet returns a simple boolean value in the normal return register (AMD64: `RAX`, ARM/ARM64: `R0`). Non-zero indicates to the VM/EH subsystem that the corresponding filter-handler will handle the exception (i.e. begin the second pass). Zero indicates to the VM/EH subsystem that the exception is **not** handled, and it should continue looking for another filter or catch.
+The filter funclet returns a simple boolean value in the normal return register (x86: `EAX`, AMD64: `RAX`, ARM/ARM64: `R0`). Non-zero indicates to the VM/EH subsystem that the corresponding filter-handler will handle the exception (i.e. begin the second pass). Zero indicates to the VM/EH subsystem that the exception is **not** handled, and it should continue looking for another filter or catch.
 
-The catch and filter-handler funclets return a code address in the normal return register that indicates where the VM should resume execution after unwinding the stack and cleaning up from the exception. This address should be somewhere in the parent funclet (or main function if the catch or filter-handler is not nested within any other funclet). Because an IL 'leave' opcode can exit out of arbitrary nesting of funclets and try bodies, the JIT is often required to inject step blocks. These are intermediate branch target(s) that then branch to the next outermost target until the real target can be directly reached via the native ABI constraints. These step blocks can also invoke finallys (see 
-*Invoking Finallys/Non-local exits*).
+The catch and filter-handler funclets return a code address in the normal return register that indicates where the VM should resume execution after unwinding the stack and cleaning up from the exception. This address should be somewhere in the parent funclet (or main function if the catch or filter-handler is not nested within any other funclet). Because an IL 'leave' opcode can exit out of arbitrary nesting of funclets and try bodies, the JIT is often required to inject step blocks. These are intermediate branch target(s) that then branch to the next outermost target until the real target can be directly reached via the native ABI constraints. These step blocks can also invoke finallys (see *Invoking Finallys/Non-local exits*).
 
 Finally and fault funclets do not have a return value.
 
@@ -321,6 +334,100 @@ On x86: TBD.
 When a funclet finishes execution, and the VM returns execution to the function (or an enclosing funclet, if there is EH clause nesting), the non-volatile registers are restored to the values they held at the exception point. Note that the volatile registers have been trashed.
 
 Any register value changes made in the funclet are lost. If a funclet wants to make a variable change known to the main function (or the funclet that contains the "try" region), that variable change needs to be made to the shared main function stack frame.
+
+## Windows/x86 EH considerations
+
+The Windows/x86 model is somewhat different than non-Windows/x86 model. Windows/X86-specific concerns are mentioned here.
+
+### catch / filter-handler regions
+
+When leaving a `catch` or `filter-handler` region, the JIT calls the helper `CORINFO_JIT_ENDCATCH` (implemented in the VM by the `JIT_EndCatch` function) before transferring control to the target location. The code to call to `CORINFO_JIT_ENDCATCH` is within the catch region itself.
+
+### finally / fault regions
+
+"finally" clauses are invoked in the non-exceptional code by the generated JIT code, and in the exceptional case by the VM. "fault" clauses are only executed in exceptional cases by the VM.
+
+On entry to the finally or fault, the top of the stack is the address that should be jumped to on exit from the finally, using a "pop eax; jmp eax" sequence. A simple 'ret' could be used, but we avoid it to avoid potentially creating an unbalanced processor call/ret buffer stack, and messing up call/ret prediction.
+
+There are no register or other stack arguments to a 'finally' or 'fault'.
+
+### ShadowSP slots
+
+X86 exception handlers (e.g., catch, finally) do not establish their own frames. They don't (really) have prologs and epilogs. However, they do use the stack, and need to restore the stack pointer of the enclosing exception handling region when the handler completes executing.
+
+To implement this requirement, for any function with EH, we create a frame-local variable to store a stack of "Shadow SP" values, or ShadowSP slots. In the JIT, the local var is called lvaShadowSPslotsVar, and in dumps it is called "EHSlots". The variable is created in lvaMarkLocalVars() and is sized as follows:
+1. 1 slot is reserved for the VM (for ICodeManager::FixContext(ppEndRegion)).
+2. 1 slot for each handler nesting level (total: ehMaxHndNestingCount).
+3. 1 slot for a filter (we do this even if there aren't any filters; size optimization opportunity to not do this if there are no filters?)
+4. 1 slot for zero termination
+
+Note that the since a slot on x86 is 4 bytes, the minimum size is 16 bytes. The idea is to have 1 slot for each handler that could be possibly be invoked at the same time. For example, for:
+
+```
+	try {
+		...
+	} catch {
+		try {
+			...
+		} catch {
+			...
+		}
+	}
+```
+
+When the inner 'catch' is running, the outer 'catch' is also conceptually "on the stack", or in the middle of execution. So the maximum handler nesting count would be 2.
+
+The ShadowSP slots are filled in from the highest address downwards to the lowest address. The highest slot is reserved. The first address with a zero is a zero terminator. So, we always zero terminate by setting the second-to-highest slot to zero in the function prolog (if we didn't zero initialize all locals anyway).
+
+When calling a finally, we set the appropriate level to 0xFC (aka "finally call") and zero terminate the next-lower address.
+
+Thus, calling a finally from JIT generated code looks like:
+
+```
+	mov      dword ptr [L_02+0x4 ebp-10H], 0 // This must happen before the 0xFC is written
+	mov      dword ptr [L_02+0x8 ebp-0CH], 252 // 0xFC
+	push     G_M52300_IG07
+	jmp      SHORT G_M52300_IG04
+```
+
+In this case, `G_M52300_IG07` is not the address after the 'jmp', so a simple 'call' wouldn't work.
+
+The code this finally returns to looks like this:
+
+```
+	mov      dword ptr [L_02+0x8 ebp-0CH], 0
+	jmp      SHORT G_M52300_IG05
+```
+
+In this case, it zeros out the ShadowSP slot that it previously set to 0xFC, then jumps to the address that is the actual target of the leave from the finally.
+
+The JIT does this "end finally restore" by creating a GT_END_LFIN tree node, with the appropriate stack level as an operand, that generates this code.
+
+In the case of an exceptional 'finally' invocation, the VM sets up the 'return address' to whatever address it wants the JIT to return to.
+
+For catch handlers, the VM is completely in control of filling and reading the ShadowSP slots; the JIT just makes sure there is enough space.
+
+### ShadowSP slots frame location
+
+The ShadowSP slots are required to live in a very particular location, reported via the GC info header. Note that the GC info header does not contain an actual pointer or offset to the ShadowSP slots variable. Instead, the VM calculates the location from other data that does exist in the GC info header, as a negative offset from the EBP frame pointer (which must be established in functions with EH) using the function `GetFirstBaseSPslotPtr()` / `GetStartShadowSPSlotsOffset()`. The VM thus assumes the following frame layout:
+
+1. callee-saved registers <= EBP points to the top of this range
+2. GS cookie
+3. 1 slot if localloc is used (Saved localloc SP?)
+4. 1 slot for CORINFO_GENERICS_CTXT_FROM_PARAMTYPEARG -- assumed for any function with EH, to avoid adding a flag to the GC info about whether it exists or not.
+5. ShadowSP slots
+
+(note, these don't have to be in this order for this calculation, but they possibly do need to be in this order for other calculations.) See also `GetEndShadowSPSlotsOffset()`. 
+
+The VM walks the ShadowSP slots in the function `GetHandlerFrameInfo()`, and sets it in various functions such as `EECodeManager::FixContext()`.
+
+### JIT implementation: finally
+
+An aside on the JIT implementation for x86.
+
+The JIT creates BBJ_CALLFINALLY/BBJ_ALWAYS pairs for calling the 'finally' clause. The BBJ_CALLFINALLY block will have a series of CORINFO_JIT_ENDCATCH calls appended at the end, if we need to "leave" a series of nested catches before calling the finally handler (due to a single 'leave' opcode attempting to leave multiple levels of different types of handlers). Then, a GT_END_LFIN statement with the finally clause handler nesting level as an argument is added to the step block where the finally returns to. This is used to generate code to zero out the appropriate level of the ShadowSP slot array after the finally has been executed. The BBJ_CALLFINALLY block itself generates the code to insert the 0xFC value into the ShadowSP slot array. If the 'finally' is invoked by the VM, in exceptional cases, then the VM itself updates the ShadowSP slot array before invoking the 'finally'.
+
+At the end of a finally or filter, a GT_RETFILT is inserted. For a finally, this is a TYP_VOID which is just a placeholder. For a filter, it takes an argument which evaluates to the return value from the filter. On legacy JIT, this tree triggers the generation of both the return value load (for filters) and the "funclet" exit sequence, which is either a "pop eax; jmp eax" for a finally, or a "ret" for a filter. When processing the BBJ_EHFINALLYRET or BBJ_EHFILTERRET block itself (at the end of code generation for the block), nothing is generated. In RyuJIT, the GT_RETFILT only loads up the return value (for filters) and does nothing for finally, and the block type processing after all the tree processing triggers the exit sequence to be generated. There is no real difference between these, except to centralize all "exit sequence" generation in the same place.
 
 # EH Info, GC Info, and Hot & Cold Splitting
 
@@ -363,11 +470,13 @@ When the inner "throw new UserException4" is executed, the exception handling fi
 
 ## Filter GC semantics
 
-Filters are invoked in the 1st pass of EH processing and as such execution might resume back at the faulting address, or in the filter-handler, or someplace else. Because the VM must allow GC's to occur during and after a filter invocation, but before the EH subsystem knows where it will resume, we need to keep everything alive at both the faulting address **and** within the filter. This is accomplished by 3 means: (1) the VM's stackwalker and GCInfoDecoder report as live both the filter frame and its corresponding parent frame, (2) the JIT encodes all stack slots that are live within the filter as being pinned, and (3) the JIT reports as live (and possible zero-initializes) anything live-out of the filter. Because of (1) it is likely that a stack variable that is live within the filter and the try body will be double reported. During the mark phase of the GC double reporting is not a problem. The problem only arises if the object is relocated: if the same location is reported twice, the GC will try to relocate the address stored at that location twice. Thus we prevent the object from being relocated by pinning it, which leads us to why we must do (2). (3) is done so that after the filter returns, we can still safely incur a GC before executing the filter-handler or any outer handler within the same frame.
+Filters are invoked in the 1st pass of EH processing and as such execution might resume back at the faulting address, or in the filter-handler, or someplace else. Because the VM must allow GC's to occur during and after a filter invocation, but before the EH subsystem knows where it will resume, we need to keep everything alive at both the faulting address **and** within the filter. This is accomplished by 3 means: (1) the VM's stackwalker and GCInfoDecoder report as live both the filter frame and its corresponding parent frame, (2) the JIT encodes all stack slots that are live within the filter as being pinned, and (3) the JIT reports as live (and possible zero-initializes) anything live-out of the filter. Because of (1) it is likely that a stack variable that is live within the filter and the try body will be double reported. During the mark phase of the GC double reporting is not a problem. The problem only arises if the object is relocated: if the same location is reported twice, the GC will try to relocate the address stored at that location twice. Thus we prevent the object from being relocated by pinning it, which leads us to why we must do (2). (3) is done so that after the filter returns, we can still safely incur a GC before executing the filter-handler or any outer handler within the same frame. For the same reason, control must exit a filter region via its final block (in other words, a filter region must terminate with the instruction that leaves the filter region, and the program may not exit the filter region via other paths).
 
 ## Duplicated Clauses
 
 Duplicated clauses are a special set of entries in the EH tables to assist the VM. Specifically, if handler 'A' is also protected by an outer EH clause 'B', then the JIT must emit a duplicated clause, a duplicate of 'B', that marks the whole handler 'A' (which is now lexically disjoint for the range of code for the corresponding try body 'A') as being protected by the handler for 'B'.
+
+Duplicated clauses are not needed for x86 and for CoreRT ABI.
 
 During exception dispatch the VM uses these duplicated clauses to know when to skip any frames between the handler and its parent function. After skipping to the parent function, due to a duplicated clause, the VM searches for a regular/non-duplicate clause in the parent function. The order of duplicated clauses is important. They should appear after all of the main function clauses. They should still follow the normal sorting rules (inner-to-outer, top-to-bottom), but because the try-start/try-end will all be the same for a given handler, they should maintain the ordering, regarding inner-to-outer, as the corresponding original clause.
 
@@ -476,9 +585,9 @@ The CLR unwinder assumes any non-leaf frame was unwound as a result of a call. T
 
 If the JIT gets passed `CORJIT_FLG_PROF_ENTERLEAVE`, then the JIT might need to insert native entry/exit/tail call probes. To determine for sure, the JIT must call GetProfilingHandle. This API returns as out parameters, the true dynamic boolean indicating if the JIT should actually insert the probes and a parameter to pass to the callbacks (typed as void*), with an optional indirection (used for NGEN). This parameter is always the first argument to all of the call-outs (thus placed in the usual first argument register `RCX` (AMD64) or `R0` (ARM, ARM64)).
 
-Outside of the prolog (in a GC interruptible location), the JIT injects a call to `CORINFO_HELP_PROF_FCN_ENTER`. For AMD64, all argument registers will be homed into their caller-allocated stack locations (similar to varargs). For ARM and ARM64, all arguments are prespilled (again similar to varargs).
+Outside of the prolog (in a GC interruptible location), the JIT injects a call to `CORINFO_HELP_PROF_FCN_ENTER`. For AMD64,  on Windows all argument registers will be homed into their caller-allocated stack locations (similar to varargs), on Unix all argument registers will be stored in the inner structure. For ARM and ARM64, all arguments are prespilled (again similar to varargs).
 
-After computing the return value and storing it in the correct register, but before any epilog code (including before a possible GS cookie check), the JIT injects a call to `CORINFO_HELP_PROF_FCN_LEAVE`. For AMD64 this call must preserve the return register: `RAX` or `XMM0`. For ARM, the return value will be moved from `R0` to `R2` (if it was in `R0`), `R1`, `R2`, and `S0/D0` must be preserved by the callee (longs will be `R2`, `R1` - note the unusual ordering of the registers, floats in `S0`, doubles in `D0`, smaller integrals in `R2`).
+After computing the return value and storing it in the correct register, but before any epilog code (including before a possible GS cookie check), the JIT injects a call to `CORINFO_HELP_PROF_FCN_LEAVE`. For AMD64 this call must preserve the return register: `RAX` or `XMM0` on Windows and `RAX` and `RDX` or `XMM0` and `XMM1` on Unix. For ARM, the return value will be moved from `R0` to `R2` (if it was in `R0`), `R1`, `R2`, and `S0/D0` must be preserved by the callee (longs will be `R2`, `R1` - note the unusual ordering of the registers, floats in `S0`, doubles in `D0`, smaller integrals in `R2`).
 
 TODO: describe ARM64 profile leave conventions.
 
@@ -490,11 +599,13 @@ For AMD64, all probes receive a second parameter (passed in `RDX` according to t
 
 TODO: describe ARM64 tail call convention.
 
+On Linux/x86 the profiling hooks are declared with the ```__cdecl``` attribute.  In cdecl (which stands for C declaration), subroutine arguments are passed on the stack. Integer values and memory addresses are returned in the EAX register, floating point values in the ST0 x87 register. Registers EAX, ECX, and EDX are caller-saved, and the rest are callee-saved. The x87 floating point registers ST0 to ST7 must be empty (popped or freed) when calling a new function, and ST1 to ST7 must be empty on exiting a function. ST0 must also be empty when not used for returning a value. Returned values of managed-code are formed before the leave/tailcall profiling hooks, so they should be saved in these hooks and restored on returning from them. The instruction ```ret``` for assembler implementations of profiling hooks should be without a parameter.
+
 JIT32 only generates one epilog (and causes all returns to branch to it) when there are profiler hooks.
 
 # Synchronized Methods
 
-JIT32/RyuJIT only generates one epilog (and causes all returns to branch to it) when a method is synchronized. See `Compiler::fgAddSyncMethodEnterExit()`. The user code is wrapped in a try/finally. Outside/before the try body, the code initializes a boolean to false. `CORINFO_HELP_MON_ENTER` or `CORINFO_HELP_MON_ENTER_STATIC` are called, passing the lock object (the "this" pointer for instance methods or the Type object for static methods) and the address of the boolean. If the lock is acquired, the boolean is set to true (as an 'atomic' operation in the sense that a Thread.Abort/EH/GC/etc. cannot interrupt the Thread when the boolean does not match the arquired state of the lock). JIT32/RyuJIT follows the exact same logic and arguments for placing the call to `CORINFO_HELP_MON_EXIT` /  `CORINFO_HELP_MON_EXIT_STATIC` in the finally.
+JIT32/RyuJIT only generates one epilog (and causes all returns to branch to it) when a method is synchronized. See `Compiler::fgAddSyncMethodEnterExit()`. The user code is wrapped in a try/finally. Outside/before the try body, the code initializes a boolean to false. `CORINFO_HELP_MON_ENTER` or `CORINFO_HELP_MON_ENTER_STATIC` are called, passing the lock object (the "this" pointer for instance methods or the Type object for static methods) and the address of the boolean. If the lock is acquired, the boolean is set to true (as an 'atomic' operation in the sense that a Thread.Abort/EH/GC/etc. cannot interrupt the Thread when the boolean does not match the acquired state of the lock). JIT32/RyuJIT follows the exact same logic and arguments for placing the call to `CORINFO_HELP_MON_EXIT` /  `CORINFO_HELP_MON_EXIT_STATIC` in the finally.
 
 # Rejit
 
@@ -558,3 +669,35 @@ The general rules outlined in the System V x86_64 ABI (described at http://www.x
 3. The JIT proactively generates frame register frames (with `RBP` as a frame register) in order to aid the native OS tooling for stack unwinding and the like.
 4. All the other internal VM contracts for PInvoke, EH, and generic support remains in place. Please see the relevant sections above for more details. Note, however, that the registers used are different on System V due to the different calling convention. For example, the integer argument registers are, in order, RDI, RSI, RDX, RCX, R8, and R9. Thus, where the first argument (typically, the "this" pointer) on Windows AMD64 goes in RCX, on System V it goes in RDI, and so forth.   
 5. Structs with explicit layout are always passed by value on the stack.
+6. The following table describes register usage according to the System V x86_64 ABI
+
+```
+| Register     | Usage                                   | Preserved across  |
+|              |                                         | function calls    |
+|--------------|-----------------------------------------|-------------------|
+| %rax         | temporary register; with variable argu- | No                |
+|              | ments passes information about the      |                   |
+|              | number of SSE registers used;           |                   |
+|              | 1st return argument                     |                   |
+| %rbx         | callee-saved register; optionally used  | Yes               |
+|              | as base pointer                         |                   |
+| %rcx         | used to pass 4st integer argument to    | No                |
+|              | to functions                            |                   |
+| %rdx         | used to pass 3rd argument to functions  | No                |
+|              | 2nd return register                     |                   |
+| %rsp         | stack pointer                           | Yes               |
+| %rbp         | callee-saved register; optionally used  | Yes               |
+|              | as frame pointer                        |                   |
+| %rsi         | used to pass 2nd argument to functions  | No                |
+| %rdi         | used to pass 1st argument to functions  | No                |
+| %r8          | used to pass 5th argument to functions  | No                |
+| %r9          | used to pass 6th argument to functions  | No                |
+| %r10         | temporary register, used for passing a  | No                |
+|              | function's static chain pointer         |                   |
+| %r11         | temporary register                      | No                |
+| %r12-%r15    | callee-saved registers                  | Yes               |
+| %xmm0-%xmm1  | used to pass and return floating point  | No                |
+|              | arguments                               |                   |
+| %xmm2-%xmm7  | used to pass floating point arguments   | No                |
+| %xmm8-%xmm15 | temporary registers                     | No                |
+```

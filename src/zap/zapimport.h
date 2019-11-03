@@ -88,12 +88,12 @@ public:
 
     virtual DWORD GetSize()
     {
-        return sizeof(TADDR);
+        return TARGET_POINTER_SIZE;
     }
 
     virtual UINT GetAlignment()
     {
-        return sizeof(TADDR);
+        return TARGET_POINTER_SIZE;
     }
 
     virtual void Save(ZapWriter * pZapWriter);
@@ -143,7 +143,7 @@ public:
 //
 // There is a single instance of it per image.
 //
-class ZapImportTable : public ZapNode
+class ZapImportTable
 {
     //
     // Hashtable key of the import
@@ -190,7 +190,7 @@ class ZapImportTable : public ZapNode
             return (count_t)(size_t)k.m_handle ^ ((count_t)(size_t)k.m_handle2 << 1) ^ k.m_type;
         }
 
-        static const element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
+        static element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
         static bool IsNull(const element_t &e) { LIMITED_METHOD_CONTRACT; return e == NULL; }
     };
 
@@ -203,9 +203,6 @@ class ZapImportTable : public ZapNode
     {
         CORINFO_MODULE_HANDLE m_module;
         DWORD m_index;
-
-        USHORT m_wAssemblyRid;
-        USHORT m_wModuleRid;
     };
 
     class ModuleReferenceTraits : public NoRemoveSHashTraits< DefaultSHashTraits<ModuleReferenceEntry *> >
@@ -229,7 +226,7 @@ class ZapImportTable : public ZapNode
             return (count_t)(size_t)k;
         }
 
-        static const element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
+        static element_t Null() { LIMITED_METHOD_CONTRACT; return NULL; }
         static bool IsNull(const element_t &e) { LIMITED_METHOD_CONTRACT; return e == NULL; }
     };
 
@@ -301,13 +298,12 @@ class ZapImportTable : public ZapNode
 
     ModuleReferenceEntry * GetModuleReference(CORINFO_MODULE_HANDLE handle);
 
-    static DWORD __stdcall EncodeModuleHelper(LPVOID referencingModule, CORINFO_MODULE_HANDLE referencedModule);
+    static DWORD EncodeModuleHelper(LPVOID referencingModule, CORINFO_MODULE_HANDLE referencedModule);
 
     ImportTable m_imports;          // Interned ZapImport *
     SHash< NoRemoveSHashTraits < ZapBlob::SHashTraits > > m_blobs; // Interned ZapBlos for signatures and fixups
 
     ModuleReferenceTable m_moduleReferences;
-    SArray<ModuleReferenceEntry *> m_modules;   // Secondary table of ModuleReferences to allow fast index based lookup
 
     SHash< NoRemoveSHashTraits < ZapBlob::SHashTraits > > m_genericSignatures;
 
@@ -339,7 +335,7 @@ public:
     void EncodeClass(CORCOMPILE_FIXUP_BLOB_KIND kind, CORINFO_CLASS_HANDLE handle, SigBuilder * pSigBuilder);
     void EncodeClassInContext(CORINFO_MODULE_HANDLE context, CORINFO_CLASS_HANDLE handle, SigBuilder * pSigBuilder);
     void EncodeField(CORCOMPILE_FIXUP_BLOB_KIND kind, CORINFO_FIELD_HANDLE handle, SigBuilder * pSigBuilder,
-            CORINFO_RESOLVED_TOKEN * pResolvedToken = NULL);
+            CORINFO_RESOLVED_TOKEN * pResolvedToken = NULL, BOOL fEncodeUsingResolvedTokenSpecStreams = FALSE);
     void EncodeMethod(CORCOMPILE_FIXUP_BLOB_KIND kind, CORINFO_METHOD_HANDLE handle, SigBuilder * pSigBuilder, 
             CORINFO_RESOLVED_TOKEN * pResolvedToken = NULL, CORINFO_RESOLVED_TOKEN * pConstrainedResolvedToken = NULL,
             BOOL fEncodeUsingResolvedTokenSpecStreams = FALSE);
@@ -446,23 +442,6 @@ public:
     ZapImport * GetPlacedHelperImport(ReadyToRunHelper helperNum);
     ZapImport * GetHelperImport(ReadyToRunHelper helperNum);
 #endif
-
-    virtual DWORD GetSize()
-    {
-        return m_modules.GetCount() * sizeof(CORCOMPILE_IMPORT_TABLE_ENTRY);
-    }
-
-    virtual UINT GetAlignment()
-    {
-        return sizeof(DWORD);
-    }
-
-    virtual ZapNodeType GetType()
-    {
-        return ZapNodeType_ImportTable;
-    }
-
-    virtual void Save(ZapWriter * pZapWriter);
 };
 
 //
@@ -554,7 +533,7 @@ public:
     {
     }
 
-    void Append(CORINFO_METHOD_HANDLE handle);
+    void Append(CORINFO_METHOD_HANDLE handle, bool isDispatchCell = false);
 
     virtual DWORD GetSize();
 

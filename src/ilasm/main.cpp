@@ -113,7 +113,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 {
     int         i, NumFiles = 0, NumDeltaFiles = 0;
     bool        IsDLL = false, IsOBJ = false;
-    char        szOpt[128];
     Assembler   *pAsm;
     MappedFileStream *pIn;
     AsmParse    *pParser;
@@ -183,7 +182,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
       printf("\n/CLOCK                  Measure and report compilation times");
 //      printf("\n/ERROR          Try to create .exe or .dll file despite errors reported");
 //      printf("\n       Warning! Results are unpredictable, use this option at your own risk!");
-      printf("\n/RESOURCE=<res_file>    Link the specified resource file (*.res) \n\t\t\tinto resulting .exe or .dll");
       printf("\n/CVRES=<path_to_file>   Set path to cvtres tool: /CVR=cvtres.exe /CVR=tool\\cvtres.cmd /CVR=D:\\tool\\");
       printf("\n/OUTPUT=<targetfile>    Compile to file with specified name \n\t\t\t(user must provide extension, if any)");
       printf("\n/KEY=<keyfile>          Compile with strong signature \n\t\t\t(<keyfile> contains private key)");
@@ -207,12 +205,12 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
       printf("\n/32BITPREFERRED         Create a 32BitPreferred image (PE32)");
       printf("\n/ENC=<file>             Create Edit-and-Continue deltas from specified source file");
       
-      printf("\n\nKey may be '-' or '/'\nOptions are recognized by first 3 characters\nDefault source file extension is .il\n");
+      printf("\n\nKey may be '-' or '/'\nOptions are recognized by first 3 characters (except ARM/ARM64)\nDefault source file extension is .il\n");
 
       printf("\nTarget defaults:");
-      printf("\n/PE64      => /PE64 /ITANIUM");
-      printf("\n/ITANIUM   => /PE64 /ITANIUM");
+      printf("\n/PE64      => /PE64 /X64");
       printf("\n/X64       => /PE64 /X64");
+      printf("\n/ARM64     => /PE64 /ARM64");
 
       printf("\n\n");
       exit(exitcode);
@@ -236,14 +234,13 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 if((argv[i][0] == L'/') || (argv[i][0] == L'-'))
 #endif
                 {
-                    memset(szOpt,0,sizeof(szOpt));
-                    WszWideCharToMultiByte(uCodePage,0,&argv[i][1],-1,szOpt,sizeof(szOpt),NULL,NULL);
-                    szOpt[3] = 0;
-                    if (!_stricmp(szOpt,"NOA"))
+                    char szOpt[3 + 1] = { 0 };
+                    WszWideCharToMultiByte(uCodePage, 0, &argv[i][1], 3, szOpt, sizeof(szOpt), NULL, NULL);
+                    if (!_stricmp(szOpt, "NOA"))
                     {
                         pAsm->m_fAutoInheritFromObject = FALSE;
                     }
-                    else if (!_stricmp(szOpt,"QUI"))
+                    else if (!_stricmp(szOpt, "QUI"))
                     {
                         pAsm->m_fReportProgress = FALSE;
                         bReportProgress = FALSE;
@@ -260,12 +257,8 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     else if (!_stricmp(szOpt, "DEB"))
                     {
                       pAsm->m_dwIncludeDebugInfo = 0x101;
-#ifdef FEATURE_CORECLR
                       // PDB is ignored under 'DEB' option for ilasm on CoreCLR.
                       // https://github.com/dotnet/coreclr/issues/2982
-#else
-                      pAsm->m_fGeneratePDB = TRUE;
-#endif
                       bNoDebug = FALSE;
 
                       WCHAR *pStr = EqualOrColon(argv[i]);
@@ -293,12 +286,8 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     }
                     else if (!_stricmp(szOpt, "PDB"))
                     {
-#ifdef FEATURE_CORECLR
                       // 'PDB' option is ignored for ilasm on CoreCLR.
                       // https://github.com/dotnet/coreclr/issues/2982
-#else
-                      pAsm->m_fGeneratePDB = TRUE;
-#endif
                       bNoDebug = FALSE;
                     }
                     else if (!_stricmp(szOpt, "CLO"))
@@ -336,11 +325,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     {
                       pAsm->m_fOptimize = TRUE;
                     }
-                    else if (!_stricmp(szOpt, "ITA"))
-                    {
-                      pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_MACHINE_MASK;
-                      pAsm->m_dwCeeFileFlags |= ICEE_CREATE_MACHINE_IA64;
-                    }
                     else if (!_stricmp(szOpt, "X64"))
                     {
                       pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_MACHINE_MASK;        
@@ -348,8 +332,25 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     }
                     else if (!_stricmp(szOpt, "ARM"))
                     {
-                      pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_MACHINE_MASK;        
-                      pAsm->m_dwCeeFileFlags |= ICEE_CREATE_MACHINE_ARM;
+                        // szOpt is only 3 characters long.  That is not enough to distinguish "ARM" and "ARM64".
+                        // We could change it to be longer, but that would affect the existing usability (ARM64 was
+                        // added much later). Thus, just distinguish the two here.
+                        char szOpt2[5 + 1] = { 0 };
+                        WszWideCharToMultiByte(uCodePage, 0, &argv[i][1], 5, szOpt2, sizeof(szOpt2), NULL, NULL);
+                        if (!_stricmp(szOpt2, "ARM"))
+                        {
+                            pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_MACHINE_MASK;        
+                            pAsm->m_dwCeeFileFlags |= ICEE_CREATE_MACHINE_ARM;
+                        }
+                        else if (!_stricmp(szOpt2, "ARM64"))
+                        {
+                            pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_MACHINE_MASK;        
+                            pAsm->m_dwCeeFileFlags |= ICEE_CREATE_MACHINE_ARM64;
+                        }
+                        else
+                        {
+                            goto InvalidOption;
+                        }
                     }
                     else if (!_stricmp(szOpt, "32B"))
                     {
@@ -574,22 +575,22 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 if((pAsm->m_dwCeeFileFlags & ICEE_CREATE_MACHINE_I386)
                    ||(pAsm->m_dwCeeFileFlags & ICEE_CREATE_MACHINE_ARM))
                 {
-                    printf("\nMachine type /ITANIUM or /X64 must be specified for 64 bit targets.");
+                    printf("\nMachine type /ARM64 or /X64 must be specified for 64 bit targets.");
                     if(!pAsm->OnErrGo)
                     {
                         pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_MACHINE_MASK;
-                        pAsm->m_dwCeeFileFlags |= ICEE_CREATE_MACHINE_IA64;
-                        printf(" Type set to ITANIUM.");
+                        pAsm->m_dwCeeFileFlags |= ICEE_CREATE_MACHINE_AMD64;
+                        printf(" Type set to X64.");
                     }
                     printf("\n");
                 }
             }
             else
             {
-                if((pAsm->m_dwCeeFileFlags & ICEE_CREATE_MACHINE_IA64)
+                if((pAsm->m_dwCeeFileFlags & ICEE_CREATE_MACHINE_ARM64)
                   ||(pAsm->m_dwCeeFileFlags & ICEE_CREATE_MACHINE_AMD64))
                 {
-                    printf("\n64 bit target must be specified for machine type /ITANIUM or /X64.");
+                    printf("\n64 bit target must be specified for machine type /ARM64 or /X64.");
                     if(!pAsm->OnErrGo)
                     {
                         pAsm->m_dwCeeFileFlags &= ~ICEE_CREATE_FILE_PE32;
@@ -598,10 +599,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     }
                     printf("\n");
                 }
-            }
-            if((pAsm->m_dwCeeFileFlags & ICEE_CREATE_MACHINE_IA64))
-            {
-                pAsm->m_dwComImageFlags &= ~COMIMAGE_FLAGS_ILONLY;
             }
             if(pAsm->m_dwCeeFileFlags & ICEE_CREATE_FILE_PE32)
             {
@@ -769,21 +766,8 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                     exitval = 1;
                                     pParser->msg("Failed to write output file, error code=0x%08X\n",hr);
                                 }
-#ifndef FEATURE_CORECLR
-                                else if (pAsm->m_pManifest->m_sStrongName.m_fFullSign)
-                                {
-                                    // Strong name sign the resultant assembly.
-                                    if(pAsm->m_fReportProgress) pParser->msg("Signing file with strong name\n");
-                                    if (FAILED(hr=pAsm->StrongNameSign()))
-                                    {
-                                        exitval = 1;
-                                        pParser->msg("Failed to strong name sign output file, error code=0x%08X\n",hr);
-                                    }
-                                }
-#endif
                                 if(bClock) cw.cEnd = GetTickCount();
 #define ENC_ENABLED
-#ifdef ENC_ENABLED
                                 if(exitval==0)
                                 {
                                     pAsm->m_fENCMode = TRUE;
@@ -791,7 +775,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                     for(iFile = 0; iFile < NumDeltaFiles; iFile++)
                                     {
                                         wcscpy_s(wzNewOutputFilename,MAX_FILENAME_LENGTH+16,wzOutputFilename);
-                                        exitval = (int)StringCchPrintfW(&wzNewOutputFilename[wcslen(wzNewOutputFilename)], 32,
+                                        exitval = _snwprintf_s(&wzNewOutputFilename[wcslen(wzNewOutputFilename)], 32, _TRUNCATE,
                                                  W(".%d"),iFile+1);
                                         MakeProperSourceFileName(pwzDeltaFiles[iFile], uCodePage, wzInputFilename, szInputFilename);
                                         if(pAsm->m_fReportProgress)
@@ -880,7 +864,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                         }
                                     } // end for(iFile)
                                 } // end if(exitval==0)
-#endif
                             }
 
                         }
@@ -945,12 +928,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 #pragma warning(pop)
 #endif
 
-#ifndef FEATURE_CORECLR
-HINSTANCE GetModuleInst()
-{
-    return (NULL);
-}
-#endif // !FEATURE_CORECLR
 
 #ifdef FEATURE_PAL
 int main(int argc, char* str[])

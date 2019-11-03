@@ -40,7 +40,7 @@ typedef PTR_VOID HashDatum;
 
 typedef Pair< Module*, mdToken > RidMapLogData;
 
-#if defined(FEATURE_PREJIT) && !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 #define IBCLOGGER_ENABLED
 #endif
 
@@ -191,7 +191,7 @@ public:
 #endif // POINTER_BITS
     }
 
-    static const element_t Null() 
+    static element_t Null()
 {
         WRAPPER_NO_CONTRACT;
         return NULL;
@@ -203,7 +203,7 @@ public:
         return e == NULL;
     }
 
-    static const element_t Deleted()
+    static element_t Deleted()
     {
         WRAPPER_NO_CONTRACT;
         return (element_t)-1;
@@ -422,7 +422,7 @@ public:                                                 \
     }                                                   \
                                                         \
 private:                                                \
-    __declspec(noinline) static void Log##name##AccessStatic(const void * p) \
+    NOINLINE static void Log##name##AccessStatic(const void * p) \
     {                                                   \
         WRAPPER_NO_CONTRACT;                               \
         /* To make the logging callsite as small as */  \
@@ -445,7 +445,7 @@ private:
 
     void DelayedCallbackPtr(pfnIBCAccessCallback callback, const void * pValue1, const void * pValue2 = NULL);
 
-#else // FEATURE_PREJIT && !DACCESS_COMPILE
+#else // IBCLOGGER_ENABLED
 
 #define LOGACCESS_PTR(name,type)                        \
 public:                                                 \
@@ -455,15 +455,35 @@ public:                                                 \
 public:                                                 \
     void Log##name##Access(type p) { SUPPORTS_DAC; }    \
 
-#endif // FEATURE_PREJIT && !DACCESS_COMPILE
-
-    // Log access to method desc (which adds the method desc to the required list)
-    // Implemented by : code:IBCLogger.LogMethodDescAccessHelper
-    LOGACCESS_PTR(MethodDesc, const MethodDesc)
+#endif // IBCLOGGER_ENABLED
 
     // Log access to method code or method header
     // Implemented by : code:IBCLogger.LogMethodCodeAccessHelper
     LOGACCESS_PTR(MethodCode, MethodDesc)
+
+    // Log access to gc info
+    // Implemented by : code:IBCLogger.LogMethodGCInfoAccessHelper
+    LOGACCESS_PTR(MethodGCInfo, MethodDesc)
+
+// The accesses to individual datastructures matter for fragile NGen only
+#ifndef FEATURE_PREJIT
+
+#undef LOGACCESS_PTR
+#undef LOGACCESS_VALUE
+
+#define LOGACCESS_PTR(name,type)                        \
+public:                                                 \
+    void Log##name##Access(type* p) { SUPPORTS_DAC; }   \
+
+#define LOGACCESS_VALUE(name, type)                     \
+public:                                                 \
+    void Log##name##Access(type p) { SUPPORTS_DAC; }    \
+
+#endif // FEATURE_PREJIT
+
+    // Log access to method desc (which adds the method desc to the required list)
+    // Implemented by : code:IBCLogger.LogMethodDescAccessHelper
+    LOGACCESS_PTR(MethodDesc, const MethodDesc)
 
     // Log access to the NDirect data stored for a MethodDesc
     // also implies that the IL_STUB for the NDirect method is executed
@@ -481,10 +501,6 @@ public:                                                 \
     // Log access to method desc (which addes the method desc to the required list)
     // Implemented by : code:IBCLogger.LogMethodPrecodeWriteAccessHelper
     LOGACCESS_PTR(MethodPrecodeWrite,MethodDesc)
-
-    // Log access to gc info
-    // Implemented by : code:IBCLogger.LogMethodGCInfoAccessHelper
-    LOGACCESS_PTR(MethodGCInfo, MethodDesc)
 
     // Log access to method table
     // Implemented by : code:IBCLogger.LogMethodTableAccessHelper
@@ -599,7 +615,7 @@ public:
         return (dwInstrEnabled != 0);
     }
 
-    Crst * GetSync();
+    static CrstStatic * GetSync();
 
 private:
     void LogMethodAccessHelper(const MethodDesc* pMD, ULONG flagNum);
@@ -614,7 +630,7 @@ private:
 private:
     DWORD dwInstrEnabled;
     
-    Volatile<Crst*> m_sync;
+    static CrstStatic m_sync;
 #endif // DACCESS_COMPILE
 };
 

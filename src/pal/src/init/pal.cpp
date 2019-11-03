@@ -18,6 +18,9 @@ Abstract:
 
 --*/
 
+#include "pal/dbgmsg.h"
+SET_DEFAULT_DEBUG_CHANNEL(PAL); // some headers have code with asserts, so do this first
+
 #include "pal/thread.hpp"
 #include "pal/synchobjects.hpp"
 #include "pal/procobj.hpp"
@@ -27,7 +30,6 @@ Abstract:
 #include "../objmgr/shmobjectmanager.hpp"
 #include "pal/seh.hpp"
 #include "pal/palinternal.h"
-#include "pal/dbgmsg.h"
 #include "pal/sharedmemory.h"
 #include "pal/shmemory.h"
 #include "pal/process.h"
@@ -40,7 +42,9 @@ Abstract:
 #include "pal/debug.h"
 #include "pal/locale.h"
 #include "pal/init.h"
+#include "pal/numa.h"
 #include "pal/stackstring.hpp"
+#include "pal/cgroup.h"
 
 #if HAVE_MACH_EXCEPTIONS
 #include "../exception/machexception.h"
@@ -80,6 +84,8 @@ int CacheLineSize;
 #include <kvm.h>
 #endif
 
+#include <algorithm>
+
 using namespace CorUnix;
 
 //
@@ -89,23 +95,29 @@ using namespace CorUnix;
 
 extern "C" BOOL CRTInitStdStreams( void );
 
-
-SET_DEFAULT_DEBUG_CHANNEL(PAL);
-
 Volatile<INT> init_count = 0;
 Volatile<BOOL> shutdown_intent = 0;
 Volatile<LONG> g_coreclrInitialized = 0;
 static BOOL g_fThreadDataAvailable = FALSE;
 static pthread_mutex_t init_critsec_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// The default minimum stack size
+SIZE_T g_defaultStackSize = 0;
+
+// The default value of parameter, whether to mmap images at default base address or not
+BOOL g_useDefaultBaseAddr = FALSE;
+
 /* critical section to protect access to init_count. This is allocated on the
    very first PAL_Initialize call, and is freed afterward. */
 static PCRITICAL_SECTION init_critsec = NULL;
 
+static DWORD g_initializeDLLFlags = PAL_INITIALIZE_DLL;
+
 static int Initialize(int argc, const char *const argv[], DWORD flags);
 static BOOL INIT_IncreaseDescriptorLimit(void);
 static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv);
-static LPWSTR INIT_FindEXEPath(LPCSTR exe_name);
+static LPWSTR INIT_ConvertEXEPath(LPCSTR exe_name);
+static BOOL INIT_SharedFilesPath(void);
 
 #ifdef _DEBUG
 extern void PROCDumpThreadList(void);
@@ -144,9 +156,33 @@ int
 PALAPI
 PAL_Initialize(
     int argc,
-    const char *const argv[])
+    char *const argv[])
 {
     return Initialize(argc, argv, PAL_INITIALIZE);
+}
+
+/*++
+Function:
+  PAL_InitializeWithFlags
+
+Abstract:
+  This function is the first function of the PAL to be called.
+  Internal structure initialization is done here. It could be called
+  several time by the same process, a reference count is kept.
+
+Return:
+  0 if successful
+  -1 if it failed
+
+--*/
+int
+PALAPI
+PAL_InitializeWithFlags(
+    int argc,
+    const char *const argv[],
+    DWORD flags)
+{
+    return Initialize(argc, argv, flags);
 }
 
 /*++
@@ -165,7 +201,89 @@ int
 PALAPI
 PAL_InitializeDLL()
 {
-    return Initialize(0, NULL, PAL_INITIALIZE_DLL);
+    return Initialize(0, NULL, g_initializeDLLFlags);
+}
+
+/*++
+Function:
+  PAL_SetInitializeDLLFlags
+
+Abstract:
+  This sets the global PAL_INITIALIZE flags that PAL_InitializeDLL
+  will use. It needs to be called before any PAL_InitializeDLL call
+  is made so typical it is used in a __attribute__((constructor))
+  function to make sure. 
+
+Return:
+  none
+
+--*/
+void
+PALAPI
+PAL_SetInitializeDLLFlags(
+    DWORD flags)
+{
+    g_initializeDLLFlags = flags;
+}
+
+#ifdef ENSURE_PRIMARY_STACK_SIZE
+/*++
+Function:
+  EnsureStackSize
+
+Abstract:
+  This fixes a problem on MUSL where the initial stack size reported by the
+  pthread_attr_getstack is about 128kB, but this limit is not fixed and
+  the stack can grow dynamically. The problem is that it makes the 
+  functions ReflectionInvocation::[Try]EnsureSufficientExecutionStack 
+  to fail for real life scenarios like e.g. compilation of corefx.
+  Since there is no real fixed limit for the stack, the code below
+  ensures moving the stack limit to a value that makes reasonable
+  real life scenarios work.
+
+--*/
+__attribute__((noinline,NOOPT_ATTRIBUTE))
+void
+EnsureStackSize(SIZE_T stackSize)
+{
+    volatile uint8_t *s = (uint8_t *)_alloca(stackSize);
+    *s = 0;
+}
+#endif // ENSURE_PRIMARY_STACK_SIZE
+
+/*++
+Function:
+  InitializeDefaultStackSize
+
+Abstract:
+  Initializes the default stack size. 
+
+--*/
+void
+InitializeDefaultStackSize()
+{
+    char* defaultStackSizeStr = getenv("COMPlus_DefaultStackSize");
+    if (defaultStackSizeStr != NULL)
+    {
+        errno = 0;
+        // Like all numeric values specific by the COMPlus_xxx variables, it is a 
+        // hexadecimal string without any prefix.
+        long int size = strtol(defaultStackSizeStr, NULL, 16);
+
+        if (errno == 0)
+        {
+            g_defaultStackSize = std::max(size, (long int)PTHREAD_STACK_MIN);
+        }
+    }
+
+#ifdef ENSURE_PRIMARY_STACK_SIZE
+    if (g_defaultStackSize == 0)
+    {
+        // Set the default minimum stack size for MUSL to the same value as we
+        // use on Windows.
+        g_defaultStackSize = 1536 * 1024;
+    }
+#endif // ENSURE_PRIMARY_STACK_SIZE
 }
 
 /*++
@@ -242,13 +360,54 @@ Initialize(
         gPID = getpid();
         gSID = getsid(gPID);
 
+        // The gSharedFilesPath is allocated dynamically so its destructor does not get 
+        // called unexpectedly during cleanup
+        gSharedFilesPath = InternalNew<PathCharString>();
+        if (gSharedFilesPath == nullptr)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            goto done;
+        }
+
+        if (INIT_SharedFilesPath() == FALSE)
+        {
+            goto done;
+        }
+
         fFirstTimeInit = true;
+
+        InitializeDefaultStackSize();
+
+#ifdef ENSURE_PRIMARY_STACK_SIZE
+        if (flags & PAL_INITIALIZE_ENSURE_STACK_SIZE)
+        {
+            EnsureStackSize(g_defaultStackSize);
+        }
+#endif // ENSURE_PRIMARY_STACK_SIZE
+
+#ifdef FEATURE_ENABLE_NO_ADDRESS_SPACE_RANDOMIZATION
+        char* useDefaultBaseAddr = getenv("COMPlus_UseDefaultBaseAddr");
+        if (useDefaultBaseAddr != NULL)
+        {
+            errno = 0;
+            // Like all numeric values specific by the COMPlus_xxx variables, it is a
+            // hexadecimal string without any prefix.
+            long int flag = strtol(useDefaultBaseAddr, NULL, 16);
+
+            if (errno == 0)
+            {
+                g_useDefaultBaseAddr = (BOOL) flag;
+            }
+        }
+#endif // FEATURE_ENABLE_NO_ADDRESS_SPACE_RANDOMIZATION
 
         // Initialize the TLS lookaside cache
         if (FALSE == TLSInitialize())
         {
             goto done;
         }
+
+        InitializeCGroup();
 
         // Initialize the environment.
         if (FALSE == EnvironInitialize())
@@ -264,17 +423,6 @@ Initialize(
             goto CLEANUP0;
         }
 
-#if _DEBUG
-        // Verify that our page size is what we think it is. If it's
-        // different, we can't run.
-        if (VIRTUAL_PAGE_SIZE != getpagesize())
-        {
-            ASSERT("VIRTUAL_PAGE_SIZE is incorrect for this system!\n"
-                "Change include/pal/virtual.h and clr/src/inc/stdmacros.h "
-                "to reflect the correct page size of %d.\n", getpagesize());
-        }
-#endif  // _DEBUG
-
         if (!INIT_IncreaseDescriptorLimit())
         {
             ERROR("Unable to increase the file descriptor limit!\n");
@@ -282,7 +430,11 @@ Initialize(
             // we use large numbers of threads or have many open files.
         }
 
-        SharedMemoryManager::StaticInitialize();
+        if (!SharedMemoryManager::StaticInitialize())
+        {
+            ERROR("Shared memory static initialization failed!\n");
+            goto CLEANUP0;
+        }
 
         /* initialize the shared memory infrastructure */
         if (!SHMInitialize())
@@ -312,17 +464,6 @@ Initialize(
             goto CLEANUP1;
         }
 #endif // HAVE_MACH_EXCEPTIONS
-
-        //
-        // Initialize global thread data
-        //
-
-        palError = InitializeGlobalThreadData();
-        if (NO_ERROR != palError)
-        {
-            ERROR("Unable to initialize thread data\n");
-            goto CLEANUP1;
-        }
 
         //
         // Allocate the initial thread data
@@ -417,7 +558,7 @@ Initialize(
         }
 
         /* find out the application's full path */
-        exe_path = INIT_FindEXEPath(argv[0]);
+        exe_path = INIT_ConvertEXEPath(argv[0]);
         if (NULL == exe_path)
         {
             ERROR("Unable to find exe path\n");
@@ -475,27 +616,7 @@ Initialize(
             goto CLEANUP2;
         }
 
-        if (flags & PAL_INITIALIZE_SYNC_THREAD)
-        {
-            //
-            // Tell the synchronization manager to start its worker thread
-            //
-            palError = CPalSynchMgrController::StartWorker(pThread);
-            if (NO_ERROR != palError)
-            {
-                ERROR("Synch manager failed to start worker thread\n");
-                goto CLEANUP5;
-            }
-        }
-
         palError = ERROR_GEN_FAILURE;
-
-        /* initialize structured exception handling stuff (signals, etc) */
-        if (FALSE == SEHInitialize(pThread, flags))
-        {
-            ERROR("Unable to initialize SEH support\n");
-            goto CLEANUP5;
-        }
 
         if (FALSE == TIMEInitialize())
         {
@@ -518,19 +639,45 @@ Initialize(
             goto CLEANUP10;
         }
 
+        if (flags & PAL_INITIALIZE_SYNC_THREAD)
+        {
+            //
+            // Tell the synchronization manager to start its worker thread
+            //
+            palError = CPalSynchMgrController::StartWorker(pThread);
+            if (NO_ERROR != palError)
+            {
+                ERROR("Synch manager failed to start worker thread\n");
+                goto CLEANUP13;
+            }
+        }
+
+        /* initialize structured exception handling stuff (signals, etc) */
+        if (FALSE == SEHInitialize(pThread, flags))
+        {
+            ERROR("Unable to initialize SEH support\n");
+            goto CLEANUP13;
+        }
+
         if (flags & PAL_INITIALIZE_STD_HANDLES)
         {
             /* create file objects for standard handles */
             if (!FILEInitStdHandles())
             {
                 ERROR("Unable to initialize standard file handles\n");
-                goto CLEANUP13;
+                goto CLEANUP14;
             }
         }
 
         if (FALSE == CRTInitStdStreams())
         {
             ERROR("Unable to initialize CRT standard streams\n");
+            goto CLEANUP15;
+        }
+
+        if (FALSE == NUMASupportInitialize())
+        {
+            ERROR("Unable to initialize NUMA support\n");
             goto CLEANUP15;
         }
 
@@ -559,21 +706,22 @@ Initialize(
     }
     goto done;
 
+    NUMASupportCleanup();
     /* No cleanup required for CRTInitStdStreams */ 
 CLEANUP15:
     FILECleanupStdHandles();
+CLEANUP14:
+    SEHCleanup();
 CLEANUP13:
     VIRTUALCleanup();
 CLEANUP10:
     MAPCleanup();
 CLEANUP6:
-    SEHCleanup();
-CLEANUP5:
     PROCCleanupInitialProcess();
 CLEANUP2:
-    InternalFree(exe_path);
+    free(exe_path);
 CLEANUP1e:
-    InternalFree(command_line);
+    free(command_line);
 CLEANUP1d:
     // Cleanup synchronization manager
 CLEANUP1c:
@@ -585,6 +733,7 @@ CLEANUP1a:
 CLEANUP1:
     SHMCleanup();
 CLEANUP0:
+    CleanupCGroup();
     TLSCleanup();
     ERROR("PAL_Initialize failed\n");
     SetLastError(palError);
@@ -661,6 +810,12 @@ PAL_InitializeCoreCLR(const char *szExePath)
         return ERROR_DLL_INIT_FAILED;
     }
 
+    if (!PROCAbortInitialize())
+    {
+        printf("PROCAbortInitialize FAILED %d (%s)\n", errno, strerror(errno));
+        return ERROR_GEN_FAILURE;
+    }
+
     if (!InitializeFlushProcessWriteBuffers())
     {
         return ERROR_GEN_FAILURE;
@@ -704,6 +859,8 @@ PAL_IsDebuggerPresent()
             debugger_present = !!atoi(tracer_pid + sizeof(TracerPid) - 1);
         }
     }
+
+    close(status_fd);
 
     return debugger_present;
 #elif defined(__APPLE__)
@@ -904,14 +1061,11 @@ PALCommonCleanup()
         PROCDumpThreadList();
 #endif
     }
-
-    // Mark that the PAL is uninitialized
-    init_count = 0;
 }
 
 BOOL PALIsShuttingDown()
 {
-    /* ROTORTODO: This function may be used to provide a reader/writer-like
+    /* TODO: This function may be used to provide a reader/writer-like
        mechanism (or a ref counting one) to prevent PAL APIs that need to access 
        PAL runtime data, from working when PAL is shutting down. Each of those API 
        should acquire a read access while executing. The shutting down code would
@@ -923,7 +1077,7 @@ BOOL PALIsShuttingDown()
 
 void PALSetShutdownIntent()
 {
-    /* ROTORTODO: See comment in PALIsShuttingDown */
+    /* TODO: See comment in PALIsShuttingDown */
     shutdown_intent = TRUE;
 }
 
@@ -990,6 +1144,7 @@ Return value:
 --*/
 static BOOL INIT_IncreaseDescriptorLimit(void)
 {
+#ifndef DONT_SET_RLIMIT_NOFILE
     struct rlimit rlp;
     int result;
     
@@ -1001,12 +1156,20 @@ static BOOL INIT_IncreaseDescriptorLimit(void)
     // Set our soft limit for file descriptors to be the same
     // as the max limit.
     rlp.rlim_cur = rlp.rlim_max;
+#ifdef __APPLE__
+    // Based on compatibility note in setrlimit(2) manpage for OSX,
+    // trim the limit to OPEN_MAX.
+    if (rlp.rlim_cur > OPEN_MAX)
+    {
+        rlp.rlim_cur = OPEN_MAX;
+    }
+#endif
     result = setrlimit(RLIMIT_NOFILE, &rlp);
     if (result != 0)
     {
         return FALSE;
     }
-
+#endif // !DONT_SET_RLIMIT_NOFILE
     return TRUE;
 }
 
@@ -1111,7 +1274,7 @@ static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
     if (i == 0)
     {
         ASSERT("MultiByteToWideChar failure\n");
-        InternalFree(command_line);
+        free(command_line);
         return NULL;
     }
 
@@ -1119,33 +1282,32 @@ static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
     if(retval == NULL)
     {
         ERROR("can't allocate memory for Unicode command line!\n");
-        InternalFree(command_line);
+        free(command_line);
         return NULL;
     }
 
     if(!MultiByteToWideChar(CP_ACP, 0,command_line, i, retval, i))
     {
         ASSERT("MultiByteToWideChar failure\n");
-        InternalFree(retval);
+        free(retval);
         retval = NULL;
     }
     else
         TRACE("Command line is %s\n", command_line);
 
-    InternalFree(command_line);
+    free(command_line);
     return retval;
 }
 
 /*++
 Function:
-  INIT_FindEXEPath
+  INIT_ConvertEXEPath
 
 Abstract:
-    Determine the full, canonical path of the current executable by searching
-    $PATH.
+    Check whether the executable path is valid, and convert its type (LPCSTR -> LPWSTR)
 
 Parameters:
-    LPCSTR exe_name : file to search for
+    LPCSTR exe_name : full path of the current executable
 
 Return:
     pointer to buffer containing the full path. This buffer must be released
@@ -1153,299 +1315,33 @@ Return:
 
 Notes :
     this function assumes that "exe_name" is in Unix style (no \)
-
-Notes 2:
-    This doesn't handle the case of directories with the desired name
-    (and directories are usually executable...)
 --*/
-static LPWSTR INIT_FindEXEPath(LPCSTR exe_name)
+static LPWSTR INIT_ConvertEXEPath(LPCSTR exe_path)
 {
-#ifndef __APPLE__
     PathCharString real_path;
-    LPSTR env_path;
-    LPSTR path_ptr;
-    LPSTR cur_dir;
-    INT exe_name_length;
-    BOOL need_slash;
     LPWSTR return_value;
     INT return_size;
     struct stat theStats;
-    /* if a path is specified, only search there */
-    if (strchr(exe_name, '/'))
+
+    if (!strchr(exe_path, '/'))
     {
-        if ( -1 == stat( exe_name, &theStats ) )
-        {
-            ERROR( "The file does not exist\n" );
-            return NULL;
-        }
-
-        if ( UTIL_IsExecuteBitsSet( &theStats ) )
-        {
-            if (!CorUnix::RealPathHelper(exe_name, real_path))
-            {
-                ERROR("realpath() failed!\n");
-                return NULL;
-            }
-
-            return_size=MultiByteToWideChar(CP_ACP,0,real_path,-1,NULL,0);
-            if ( 0 == return_size )
-            {
-                ASSERT("MultiByteToWideChar failure\n");
-                return NULL;
-            }
-
-            return_value = reinterpret_cast<LPWSTR>(InternalMalloc((return_size*sizeof(WCHAR))));
-            if ( NULL == return_value )
-            {
-                ERROR("Not enough memory to create full path\n");
-                return NULL;
-            }
-            else
-            {
-                if (!MultiByteToWideChar(CP_ACP, 0, real_path, -1, 
-                                        return_value, return_size))
-                {
-                    ASSERT("MultiByteToWideChar failure\n");
-                    InternalFree(return_value);
-                    return_value = NULL;
-                }
-                else
-                {
-                    TRACE("full path to executable is %s\n", real_path.GetString());
-                }
-            }
-            return return_value;
-        }
-    }
-
-    /* no path was specified : search $PATH */
-
-    env_path = EnvironGetenv("PATH");
-    if (!env_path || *env_path=='\0')
-    {
-        WARN("$PATH isn't set.\n");
-        if (env_path != NULL)
-        {
-            InternalFree(env_path);
-        }
-
-        goto last_resort;
-    }
-
-    exe_name_length=strlen(exe_name);
-
-    cur_dir=env_path;
-
-    while (cur_dir)
-    {
-        LPSTR full_path;
-        struct stat theStats;
-
-        /* skip all leading ':' */
-        while (*cur_dir==':')
-        {
-            cur_dir++;
-        }
-        if (*cur_dir=='\0')
-        {
-            break;
-        }
-
-        /* cut string at next ':' */
-        path_ptr = strchr(cur_dir, ':');
-        if (path_ptr)
-        {
-            /* check if we need to add a '/' between the path and filename */
-            need_slash=(*(path_ptr-1))!='/';
-
-            /* NULL_terminate path element */
-            *path_ptr++='\0';
-        }
-        else
-        {
-            /* check if we need to add a '/' between the path and filename */
-            need_slash=(cur_dir[strlen(cur_dir)-1])!='/';
-        }
-
-        TRACE("looking for %s in %s\n", exe_name, cur_dir);
-
-        /* build tentative full file name */
-        int iLength = (strlen(cur_dir)+exe_name_length+2);
-        full_path = reinterpret_cast<LPSTR>(InternalMalloc(iLength));
-        if (!full_path)
-        {
-            ERROR("Not enough memory!\n");
-            break;
-        }
-        
-        if (strcpy_s(full_path, iLength, cur_dir) != SAFECRT_SUCCESS)
-        {
-            ERROR("strcpy_s failed!\n");
-            InternalFree(full_path);
-            InternalFree(env_path);
-            return NULL;
-        }
-
-        if (need_slash)
-        {
-            if (strcat_s(full_path, iLength, "/") != SAFECRT_SUCCESS)
-            {
-                ERROR("strcat_s failed!\n");
-                InternalFree(full_path);
-                InternalFree(env_path);
-                return NULL;
-            }
-        }
-
-        if (strcat_s(full_path, iLength, exe_name) != SAFECRT_SUCCESS)
-        {
-            ERROR("strcat_s failed!\n");
-            InternalFree(full_path);
-            InternalFree(env_path);
-            return NULL;
-        }
-
-        /* see if file exists AND is executable */
-        if ( -1 != stat( full_path, &theStats ) )
-        {
-            if( UTIL_IsExecuteBitsSet( &theStats ) )
-            {
-                /* generate canonical path */
-                if (!CorUnix::RealPathHelper(full_path, real_path))
-                {
-                    ERROR("realpath() failed!\n");
-                    InternalFree(full_path);
-                    InternalFree(env_path);
-                    return NULL;
-                }
-                InternalFree(full_path);
-
-                return_size = MultiByteToWideChar(CP_ACP,0,real_path,-1,NULL,0);
-                if ( 0 == return_size )
-                {
-                    ASSERT("MultiByteToWideChar failure\n");
-                    InternalFree(env_path);
-                    return NULL;
-                }
-
-                return_value = reinterpret_cast<LPWSTR>(InternalMalloc((return_size*sizeof(WCHAR))));
-                if ( NULL == return_value )
-                {
-                    ERROR("Not enough memory to create full path\n");
-                    InternalFree(env_path);
-                    return NULL;
-                }
-
-                if (!MultiByteToWideChar(CP_ACP, 0, real_path, -1, return_value,
-                                    return_size))
-                {
-                    ASSERT("MultiByteToWideChar failure\n");
-                    InternalFree(return_value);
-                    return_value = NULL;
-                }
-                else
-                {
-                    TRACE("found %s in %s; real path is %s\n", exe_name,
-                          cur_dir,real_path.GetString());
-                }
-
-                InternalFree(env_path);
-                return return_value;
-            }
-        }
-
-        /* file doesn't exist : keep searching */
-        InternalFree(full_path);
-
-        /* path_ptr is NULL if there's no ':' after this directory */
-        cur_dir=path_ptr;
-    }
-
-    InternalFree(env_path);
-    TRACE("No %s found in $PATH (%s)\n", exe_name, EnvironGetenv("PATH", FALSE));
-
-last_resort:
-    /* last resort : see if the executable is in the current directory. This is
-       possible if it comes from a exec*() call. */
-    if (0 == stat(exe_name,&theStats))
-    {
-        if ( UTIL_IsExecuteBitsSet( &theStats ) )
-        {
-            if (!CorUnix::RealPathHelper(exe_name, real_path))
-            {
-                ERROR("realpath() failed!\n");
-                return NULL;
-            }
-
-            return_size = MultiByteToWideChar(CP_ACP,0,real_path,-1,NULL,0);
-            if (0 == return_size)
-            {
-                ASSERT("MultiByteToWideChar failure\n");
-                return NULL;
-            }
-
-            return_value = reinterpret_cast<LPWSTR>(InternalMalloc((return_size*sizeof(WCHAR))));
-            if (NULL == return_value)
-            {
-                ERROR("Not enough memory to create full path\n");
-                return NULL;
-            }
-            else
-            {
-                if (!MultiByteToWideChar(CP_ACP, 0, real_path, -1, 
-                                        return_value, return_size))
-                {
-                    ASSERT("MultiByteToWideChar failure\n");
-                    InternalFree(return_value);
-                    return_value = NULL;
-                }
-                else
-                {
-                    TRACE("full path to executable is %s\n", real_path.GetString());
-                }
-            }
-
-            return return_value;
-        }
-        else
-        {
-            ERROR("found %s in current directory, but it isn't executable!\n",
-                  exe_name);
-        }                                                                   
-    }
-    else
-    {
-        TRACE("last resort failed : executable %s is not in the current "
-              "directory\n",exe_name);
-    }
-
-    ERROR("executable %s not found anywhere!\n", exe_name);
-    return NULL;
-#else // !__APPLE__
-    // On the Mac we can just directly ask the OS for the executable path.
-
-    LPWSTR return_value;
-    INT return_size;
-
-    PathCharString exec_pathPS;
-    LPSTR  exec_path = exec_pathPS.OpenStringBuffer(MAX_PATH);
-    uint32_t bufsize = exec_pathPS.GetCount();
-
-    if (-1 == _NSGetExecutablePath(exec_path, &bufsize))
-    {
-        exec_pathPS.CloseBuffer(exec_pathPS.GetCount());
-        exec_path = exec_pathPS.OpenStringBuffer(bufsize);
-    }
-
-    if (_NSGetExecutablePath(exec_path, &bufsize))
-    {
-        ASSERT("_NSGetExecutablePath failure\n");
+        ERROR( "The exe path is not fully specified\n" );
         return NULL;
     }
 
-    exec_pathPS.CloseBuffer(bufsize);
+    if (-1 == stat(exe_path, &theStats))
+    {
+        ERROR( "The file does not exist\n" );
+        return NULL;
+    }
 
-    return_size = MultiByteToWideChar(CP_ACP,0,exec_path,-1,NULL,0);
+    if (!CorUnix::RealPathHelper(exe_path, real_path))
+    {
+        ERROR("realpath() failed!\n");
+        return NULL;
+    }
+
+    return_size = MultiByteToWideChar(CP_ACP, 0, real_path, -1, NULL, 0);
     if (0 == return_size)
     {
         ASSERT("MultiByteToWideChar failure\n");
@@ -1460,19 +1356,78 @@ last_resort:
     }
     else
     {
-        if (!MultiByteToWideChar(CP_ACP, 0, exec_path, -1, 
+        if (!MultiByteToWideChar(CP_ACP, 0, real_path, -1,
                                 return_value, return_size))
         {
             ASSERT("MultiByteToWideChar failure\n");
-            InternalFree(return_value);
+            free(return_value);
             return_value = NULL;
         }
         else
         {
-            TRACE("full path to executable is %s\n", exec_path);
+            TRACE("full path to executable is %s\n", real_path.GetString());
         }
     }
 
     return return_value;
-#endif // !__APPLE__
+}
+
+/*++
+Function:
+  INIT_SharedFilesPath
+
+Abstract:
+    Initializes the shared application
+--*/
+static BOOL INIT_SharedFilesPath(void)
+{
+#ifdef __APPLE__
+    // Store application group Id. It will be null if not set
+    gApplicationGroupId = getenv("DOTNET_SANDBOX_APPLICATION_GROUP_ID");
+
+    if (nullptr != gApplicationGroupId)
+    {
+        // Verify the length of the application group ID
+        gApplicationGroupIdLength = strlen(gApplicationGroupId);
+        if (gApplicationGroupIdLength > MAX_APPLICATION_GROUP_ID_LENGTH)
+        {
+            SetLastError(ERROR_BAD_LENGTH);
+            return FALSE;
+        }
+
+        // In sandbox, all IPC files (locks, pipes) should be written to the application group
+        // container. There will be no write permissions to TEMP_DIRECTORY_PATH
+        if (!GetApplicationContainerFolder(*gSharedFilesPath, gApplicationGroupId, gApplicationGroupIdLength))
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+
+        // Verify the size of the path won't exceed maximum allowed size
+        if (gSharedFilesPath->GetCount() + SHARED_MEMORY_MAX_FILE_PATH_CHAR_COUNT + 1 /* null terminator */ > MAX_LONGPATH)
+        {
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return FALSE;
+        }
+
+        // Check if the path already exists and it's a directory
+        struct stat statInfo;
+        int statResult = stat(*gSharedFilesPath, &statInfo);
+
+        // If the path exists, check that it's a directory
+        if (statResult != 0 || !(statInfo.st_mode & S_IFDIR))
+        {
+            SetLastError(ERROR_PATH_NOT_FOUND);
+            return FALSE;
+        }
+
+        return TRUE;
+    }
+#endif // __APPLE__
+
+    // If we are here, then we are not in sandbox mode, resort to TEMP_DIRECTORY_PATH as shared files path
+    return gSharedFilesPath->Set(TEMP_DIRECTORY_PATH);
+
+    // We can verify statically the non sandboxed case, since the size is known during compile time
+    static_assert_no_msg(string_countof(TEMP_DIRECTORY_PATH) + SHARED_MEMORY_MAX_FILE_PATH_CHAR_COUNT + 1 /* null terminator */ <= MAX_LONGPATH);
 }

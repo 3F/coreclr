@@ -1,5 +1,16 @@
-#include "platformdefines.cpp"
+#include <platformdefines.h>
 #include <xplatform.h>
+
+inline char* CoStrDup(const char* str)
+{
+	size_t size = strlen(str) + 1;
+	char* dup = (char *)CoreClrAlloc(size);
+    if (dup != nullptr)
+    {
+        strcpy_s(dup, size, str);
+    }
+    return dup;
+}
 
 const int NumArrElements = 2;
 struct InnerSequential
@@ -19,20 +30,7 @@ void ChangeInnerSequential(InnerSequential* p)
 {
 	p->f1 = 77;
 	p->f2 = 77.0;
-
-	char const * lpstr = "changed string";
-	size_t size = sizeof(char) * (strlen(lpstr) + 1);
-	LPSTR temp = (LPSTR)TP_CoTaskMemAlloc( size );
-	memset(temp, 0, size);
-	if(temp)
-	{
-		strcpy( (char*)temp, lpstr );
-		p->f3 = temp;
-	}
-	else
-	{
-		printf("Memory Allocated Failed!");
-	}
+	p->f3 = CoStrDup("changed string");
 }
 
 bool IsCorrectInnerSequential(InnerSequential* p)
@@ -41,13 +39,7 @@ bool IsCorrectInnerSequential(InnerSequential* p)
 		return false;
 	if(p->f2 != 1.0)
 		return false;
-
-	char const * lpstr = "some string";
-	size_t size = sizeof(char) * (strlen(lpstr) + 1);
-	LPSTR temp = (LPSTR)TP_CoTaskMemAlloc( size );
-	memset(temp, 0, size);
-
-	if( strcmp((char*)p->f3, temp) != 0 )
+	if(strcmp(p->f3, "") != 0)
 		return false;
 
 	return true;
@@ -64,21 +56,18 @@ typedef float FLOAT;
 typedef double DOUBLE;
 #endif
 
-struct INNER2 // size = 12 bytes
+struct INNER2
 {
     INT f1;
     FLOAT f2;
     LPCSTR f3;
 };
+
 void ChangeINNER2(INNER2* p)
 {
 	p->f1 = 77;
 	p->f2 = 77.0;
-	char const * temp = "changed string";
-	size_t len = strlen(temp);
-	LPCSTR str = (LPCSTR)TP_CoTaskMemAlloc( sizeof(char)*(len+1) );
-	strcpy((char*)str,temp);
-	p->f3 = str;
+	p->f3 = CoStrDup("changed string");
 }
 void PrintINNER2(INNER2* p, char const * name)
 {
@@ -132,12 +121,7 @@ void PrintInnerExplicit(InnerExplicit* p, char const * name)
 void ChangeInnerExplicit(InnerExplicit* p)
 {
 	p->f1 = 77;
-
-	char const * temp = "changed string";
-	size_t len = strlen(temp);
-	LPCSTR str = (LPCSTR)TP_CoTaskMemAlloc( sizeof(char)*(len+1) );
-	strcpy((char*)str,temp);
-	p->f3 = str;
+	p->f3 = CoStrDup("changed string");
 }
 
 struct InnerArraySequential
@@ -157,25 +141,11 @@ void PrintInnerArraySequential(InnerArraySequential* p, char const * name)
 
 void ChangeInnerArraySequential(InnerArraySequential* p)
 {
-	char const * lpstr = "changed string";
-	LPSTR temp;
 	for(int i = 0; i < NumArrElements; i++)
 	{
 		(p->arr)[i].f1 = 77;
 		(p->arr)[i].f2 = 77.0;
-
-		size_t size = sizeof(char) * (strlen(lpstr) + 1);
-		temp = (LPSTR)TP_CoTaskMemAlloc( size );
-		memset(temp, 0, size);
-		if(temp)
-		{
-			strcpy( (char*)temp, lpstr );
-			(p->arr)[i].f3 = temp;
-		}
-		else
-		{
-			printf("Memory Allocated Failed!");
-		}
+		(p->arr)[i].f3 = CoStrDup("changed string");
 	}
 }
 
@@ -192,44 +162,60 @@ bool IsCorrectInnerArraySequential(InnerArraySequential* p)
 }
 
 
-union InnerArrayExplicit // size = 32 bytes
+union InnerArrayExplicit
 {
 	struct InnerSequential arr[2];
 	struct
 	{
 		LONG64 _unused0;
 		LPCSTR f4;
-	}; 
-
+	} s; 
 };
 
 
 #ifdef WINDOWS
-	#ifdef _WIN64
-		union OUTER3 // size = 32 bytes
-		{
-			struct InnerSequential arr[2];
-			struct
-			{
-				CHAR _unused0[24];
-				LPCSTR f4;
-			};
-		};
-	#else
-		struct OUTER3 // size = 28 bytes
-		{
-			struct InnerSequential arr[2];
-			LPCSTR f4;
-		};
-	#endif
+#ifdef _WIN64
+#pragma warning(push) 
+#pragma warning(disable: 4201) // nonstandard extension used: nameless struct/union
+union OUTER3
+{
+    struct InnerSequential arr[2];
+    struct
+    {
+        CHAR _unused0[24];
+        LPCSTR f4;
+    };
+};
+static_assert_no_msg(sizeof(OUTER3) == 32);
+#pragma warning(pop)
+#else
+struct OUTER3
+{
+    struct InnerSequential arr[2];
+    LPCSTR f4;
+};
+static_assert_no_msg(sizeof(OUTER3) == 28);
 #endif
-
-#ifndef WINDOWS
-	struct OUTER3 // size = 28 bytes
-	{
-		struct InnerSequential arr[2];
-		LPCSTR f4;
-	};
+#else // WINDOWS
+#if defined(__x86_64__) || defined(__aarch64__)
+union OUTER3
+{
+    struct InnerSequential arr[2];
+    struct
+    {
+        CHAR _unused0[24];
+        LPCSTR f4;
+    };
+};
+static_assert_no_msg(sizeof(OUTER3) == 32);
+#else
+struct OUTER3
+{
+    struct InnerSequential arr[2];
+    LPCSTR f4;
+};
+static_assert_no_msg(sizeof(OUTER3) == 28);
+#endif
 #endif
 
 void PrintOUTER3(OUTER3* p, char const * name)
@@ -244,22 +230,14 @@ void PrintOUTER3(OUTER3* p, char const * name)
 }
 void ChangeOUTER3(OUTER3* p)
 {
-	char const * temp = "changed string";
-	size_t len = strlen(temp);
-	LPCSTR str = NULL;
 	for(int i = 0; i < NumArrElements; i++)
 	{
 		(p->arr)[i].f1 = 77;
 		(p->arr)[i].f2 = 77.0;
-	
-		str = (LPCSTR)TP_CoTaskMemAlloc( sizeof(char)*(len+1) );
-		strcpy((char*)str,temp);
-		(p->arr)[i].f3 = str;
+		(p->arr)[i].f3 = CoStrDup("changed string");
 	}
 
-	str = (LPCSTR)TP_CoTaskMemAlloc( sizeof(char)*(len+1) );
-	strcpy((char*)str,temp);
-	p->f4 = str;
+	p->f4 = CoStrDup("changed string");
 }
 bool IsCorrectOUTER3(OUTER3* p)
 {
@@ -293,19 +271,8 @@ void PrintCharSetAnsiSequential(CharSetAnsiSequential* p, char const * name)
 
 void ChangeCharSetAnsiSequential(CharSetAnsiSequential* p)
 {
-	char const * strSource = "change string";
-	size_t size = strlen(strSource) + 1;
-	LPSTR temp = (LPSTR)TP_CoTaskMemAlloc(size);
-	if(temp != NULL)
-	{
-		strcpy((char*)temp,strSource);
-		p->f1 = temp;
-		p->f2 = 'n';
-	}
-	else
-	{
-		printf("Memory Allocated Failed!");
-	}
+	p->f1 = CoStrDup("change string");
+	p->f2 = 'n';
 }
 
 bool IsCorrectCharSetAnsiSequential(CharSetAnsiSequential* p)
@@ -325,7 +292,11 @@ struct CharSetUnicodeSequential
 };
 void PrintCharSetUnicodeSequential(CharSetUnicodeSequential* p, char const * name)
 {
+#ifdef _WIN32
+	wprintf(L"\t%S.f1 = %s\n", name, p->f1);
+#else
 	wprintf(L"\t%s.f1 = %S\n", name, p->f1);
+#endif
 	printf("\t%s.f2 = %c\n", name, p->f2);
 }
 
@@ -336,11 +307,11 @@ void ChangeCharSetUnicodeSequential(CharSetUnicodeSequential* p)
 #else
 	LPCWSTR strSource = u"change string";
 #endif
-	int len = wcslen(strSource);
-	LPCWSTR temp = (LPCWSTR)TP_CoTaskMemAlloc(sizeof(WCHAR)*(len+1));
+	size_t len = TP_slen(strSource);
+	LPCWSTR temp = (LPCWSTR)CoreClrAlloc(sizeof(WCHAR)*(len+1));
 	if(temp != NULL)
 	{
-		wcscpy_s((WCHAR*)temp, (len+1)*sizeof(WCHAR), strSource);
+		TP_scpy_s((WCHAR*)temp, (len+1), strSource);
 		p->f1 = temp;
 		p->f2 = L'n';
 	}
@@ -370,7 +341,7 @@ bool IsCorrectCharSetUnicodeSequential(CharSetUnicodeSequential* p)
 }
 
 
-struct NumberSequential // size = 64 bytes
+struct NumberSequential
 {
 	LONG64 i64;
 	ULONG64 ui64;
@@ -418,7 +389,7 @@ void ChangeNumberSequential(NumberSequential* p)
 
 bool IsCorrectNumberSequential(NumberSequential* p)
 {
-	if(p->i32 != -0x80000000 || p->ui32 != 0xffffffff || p->s1 != -0x8000 || p->us1 != 0xffff || p->b != 0 || 
+	if(p->i32 != (-0x7fffffff - 1) || p->ui32 != 0xffffffff || p->s1 != -0x8000 || p->us1 != 0xffff || p->b != 0 ||
 		p->sb != 0x7f ||p->i16 != -0x8000 || p->ui16 != 0xffff || p->i64 != -1234567890 ||
 		p->ui64 != 1234567890 || (p->sgl) != 32.0 || p->d != 3.2)
 	{
@@ -427,7 +398,7 @@ bool IsCorrectNumberSequential(NumberSequential* p)
 	return true;
 }
 
-struct S3 // size = 1032 bytes
+struct S3
 {
     BOOL flag;
     LPCSTR str;
@@ -448,17 +419,10 @@ void ChangeS3(S3* p)
 {
 	p->flag = false;
 
-	char const * strSource = "change string";
-	int len = strlen(strSource);
-	
-	LPCSTR temp = (LPCSTR)TP_CoTaskMemAlloc((sizeof(char)*len) + 1);
-	if(temp != NULL)
-	{
-		/*TP_CoTaskMemFree((void *)p->str);*/
-		strcpy((char*)temp,strSource);		
-		p->str = temp;
-	}
-	for(int i = 1;i<257;i++)
+	/*CoreClrFree((void *)p->str);*/
+	p->str = CoStrDup("change string");
+
+    for(int i = 1;i<257;i++)
 	{
 		p->vals[i-1] = i;
 	}
@@ -468,12 +432,7 @@ bool IsCorrectS3(S3* p)
 {
 	int iflag = 0;
 
-	char const * lpstr = "some string";
-	size_t size = sizeof(char) * (strlen(lpstr) + 1);
-	LPSTR temp = (LPSTR)TP_CoTaskMemAlloc( size );
-	memset(temp, 0, size);
-
-	if(!p->flag || strcmp((char*)p->str, temp) != 0)
+	if (!p->flag || strcmp(p->str, "") != 0)
 		return false;
     for (int i = 0; i < 256; i++)
     {
@@ -490,7 +449,7 @@ bool IsCorrectS3(S3* p)
 	return true;
 }
 
-struct S4 // size = 8 bytes
+struct S4
 {
     INT age;
     LPCSTR name;
@@ -500,7 +459,7 @@ enum Enum1
     e1 = 1,
     e2 = 3 
 };
-struct S5 // size = 8 bytes
+struct S5
 {
     struct S4 s4;
     Enum1 ef;
@@ -514,37 +473,20 @@ void PrintS5(S5* str, char const * name)
 }
 void ChangeS5(S5* str)
 {
-	Enum1 eInstance = e2;
-	char const * strSource = "change string";	
-	int len = strlen(strSource);
-	LPCSTR temp = (LPCSTR)TP_CoTaskMemAlloc(sizeof(char)*(len+1));
-	if(temp != NULL)
-	{
-		strcpy((char*)temp,strSource);
-		str->s4.name = temp;
-	}
+	str->s4.name = CoStrDup("change string");
 	str->s4.age = 64;
-	str->ef = eInstance;
+	str->ef = e2;
 }
 bool IsCorrectS5(S5* str)
 {
-	Enum1 eInstance = e1;
-
-	char const * lpstr = "some string";
-	size_t size = sizeof(char) * (strlen(lpstr) + 1);
-	LPSTR temp = (LPSTR)TP_CoTaskMemAlloc( size );
-	memset(temp, 0, size);
-
-	if(str->s4.age != 32 || strcmp((char*)str->s4.name, temp) != 0)
+	if(str->s4.age != 32 || strcmp(str->s4.name, "") != 0)
 		return false;
-	if(str->ef != eInstance)
-	{
+	if(str->ef != e1)
 		return false;
-	}
 	return true;
 }
 
-struct StringStructSequentialAnsi // size = 8 bytes
+struct StringStructSequentialAnsi
 {
 	LPCSTR first;
     LPCSTR last;
@@ -577,8 +519,8 @@ bool IsCorrectStringStructSequentialAnsi(StringStructSequentialAnsi* str)
 
 void ChangeStringStructSequentialAnsi(StringStructSequentialAnsi* str)
 {
-	char* newFirst = (char*)TP_CoTaskMemAlloc(sizeof(char)*513);
-	char* newLast = (char*)TP_CoTaskMemAlloc(sizeof(char)*513);
+	char* newFirst = (char*)CoreClrAlloc(sizeof(char)*513);
+	char* newLast = (char*)CoreClrAlloc(sizeof(char)*513);
 	for (int i = 0; i < 512; ++i)
 	{
 		newFirst[i] = 'b';
@@ -591,7 +533,7 @@ void ChangeStringStructSequentialAnsi(StringStructSequentialAnsi* str)
 	str->last = newLast;
 }
 
-struct StringStructSequentialUnicode // size = 8 bytes
+struct StringStructSequentialUnicode
 {
     LPCWSTR first;
     LPCWSTR last;
@@ -599,8 +541,13 @@ struct StringStructSequentialUnicode // size = 8 bytes
 
 void PrintStringStructSequentialUnicode(StringStructSequentialUnicode* str, char const * name)
 {
+#ifdef _WIN32
+	wprintf(L"\t%S.first = %s\n", name, str->first);
+	wprintf(L"\t%S.last = %s\n", name, str->last);
+#else
 	wprintf(L"\t%s.first = %s\n", name, str->first);
 	wprintf(L"\t%s.last = %s\n", name, str->last);
+#endif
 }
 
 bool IsCorrectStringStructSequentialUnicode(StringStructSequentialUnicode* str)
@@ -625,8 +572,8 @@ bool IsCorrectStringStructSequentialUnicode(StringStructSequentialUnicode* str)
 
 void ChangeStringStructSequentialUnicode(StringStructSequentialUnicode* str)
 {
-	WCHAR* newFirst = (WCHAR*)TP_CoTaskMemAlloc(sizeof(WCHAR)*257);
-	WCHAR* newLast = (WCHAR*)TP_CoTaskMemAlloc(sizeof(WCHAR)*257);
+	WCHAR* newFirst = (WCHAR*)CoreClrAlloc(sizeof(WCHAR)*257);
+	WCHAR* newLast = (WCHAR*)CoreClrAlloc(sizeof(WCHAR)*257);
 	for (int i = 0; i < 256; ++i)
 	{
 		newFirst[i] = L'b';
@@ -639,7 +586,7 @@ void ChangeStringStructSequentialUnicode(StringStructSequentialUnicode* str)
 }
 
 
-struct S8 // size = 32 bytes
+struct S8
 {
     LPCSTR name;
     BOOL gender;
@@ -674,19 +621,7 @@ bool IsCorrectS8(S8* str)
 
 void ChangeS8(S8* str)
 {
-	char const * lpstr = "world";
-	size_t size = sizeof(char) * (strlen(lpstr) + 1);
-	LPSTR temp = (LPSTR)TP_CoTaskMemAlloc( size );
-	memset(temp, 0, size);
-	if(temp)
-	{
-		strcpy( (char*)temp, lpstr );
-		str->name = temp;
-	}
-	else
-	{
-		printf("Memory Allocated Failed!");
-	}
+	str->name = CoStrDup("world");
 	str->gender = false;
 	str->jobNum = 1;
 	str->i32 = 256;
@@ -694,7 +629,7 @@ void ChangeS8(S8* str)
 	str->mySByte = 64;
 }
 #pragma pack (8)
-struct S_int // size = 4 bytes
+struct S_int
 {
     INT i;
 };
@@ -702,19 +637,19 @@ struct S_int // size = 4 bytes
 struct S9;
 typedef void (*TestDelegate1)(struct S9 myStruct);
 
-struct S9 // size = 8 bytes
+struct S9
 {
     INT i32;
     TestDelegate1 myDelegate1;
 };
 
-struct S101 // size = 8 bytes
+struct S101
 {
     INT i;
     struct S_int s_int;
 };
 
-struct S10 // size = 8 bytes
+struct S10
 {
     struct S101 s;
 };
@@ -741,13 +676,13 @@ void ChangeS10(S10* str)
 typedef int* LPINT;
 #endif
 
-struct S11 // size = 8 bytes
+struct S11
 {
     LPINT i32;
     INT i;
 };
 
-union U // size = 8 bytes
+union U
 {
     INT i32;
     UINT ui32;
@@ -787,7 +722,7 @@ void ChangeU(U* p)
 	p->uiPtr = (LPVOID)(64);
 	p->s = 32767;
 	p->us = 0;
-	p->b = -1;
+	p->b = 255;
 	p->sb = -128;
 	p->l = -1234567890;
 	p->ul = 0;
@@ -804,7 +739,7 @@ bool IsCorrectU(U* p)
 	return true;
 }
 
-struct ByteStructPack2Explicit // size = 2 bytes
+struct ByteStructPack2Explicit
 {
     BYTE b1;
     BYTE b2;
@@ -829,7 +764,7 @@ bool IsCorrectByteStructPack2Explicit(ByteStructPack2Explicit* p)
 
 
 
-struct ShortStructPack4Explicit // size = 4 bytes
+struct ShortStructPack4Explicit
 {
     SHORT s1;
     SHORT s2;
@@ -853,7 +788,7 @@ bool IsCorrectShortStructPack4Explicit(ShortStructPack4Explicit* p)
 }
 
 
-struct IntStructPack8Explicit // size = 8 bytes
+struct IntStructPack8Explicit
 {
     INT i1;
     INT i2;
@@ -876,7 +811,7 @@ bool IsCorrectIntStructPack8Explicit(IntStructPack8Explicit* p)
 	return true;
 }
 
-struct LongStructPack16Explicit // size = 16 bytes
+struct LongStructPack16Explicit
 {
     LONG64 l1;
     LONG64 l2;
@@ -898,3 +833,127 @@ bool IsCorrectLongStructPack16Explicit(LongStructPack16Explicit* p)
 		return false;
 	return true;
 }
+
+struct AutoString
+{
+#ifdef _WIN32
+    LPCWSTR str;
+#else
+    LPCSTR str;
+#endif
+};
+
+struct HFA
+{
+    float f1;
+    float f2;
+    float f3;
+    float f4;
+};
+
+struct DoubleHFA
+{
+    double d1;
+    double d2;
+};
+
+struct ManyInts
+{
+    int i1;
+    int i2;
+    int i3;
+    int i4;
+    int i5;
+    int i6;
+    int i7;
+    int i8;
+    int i9;
+    int i10;
+    int i11;
+    int i12;
+    int i13;
+    int i14;
+    int i15;
+    int i16;
+    int i17;
+    int i18;
+    int i19;
+    int i20;
+};
+
+struct MultipleBools
+{
+    BOOL b1;
+    BOOL b2;
+};
+
+struct IntWithInnerSequential
+{
+    int i1;
+    InnerSequential sequential;
+};
+
+struct SequentialWrapper
+{
+    InnerSequential sequential;
+};
+
+struct SequentialDoubleWrapper
+{
+    SequentialWrapper wrapper;
+};
+
+struct AggregateSequentialWrapper
+{
+    SequentialWrapper wrapper1;
+    InnerSequential sequential;
+    SequentialWrapper wrapper2;
+};
+
+union OverlappingLongFloat
+{
+    LONG64 a;
+    struct
+    {
+        char unused[4];
+        float f;
+    };
+};
+
+struct FixedBufferClassificationTest
+{
+    int arr[3];
+    float f;
+};
+
+// use float padding to ensure that we match the SystemV Classification
+// as if this field was not here (the case in the managed representation).
+union OverlappingMultipleEightbyte
+{
+    float arr[3];
+    struct
+    {
+        float padding[2]; 
+        int i;
+    };
+};
+
+union OverlappingMultipleEightbyteFirst
+{
+    float arr[3];
+    struct
+    {
+        float padding;
+        int i;
+    };
+};
+
+union OverlappingMultipleEightbyteMultiple
+{
+    float arr[3];
+    struct
+    {
+        float padding;
+        int i[3];
+    };
+};

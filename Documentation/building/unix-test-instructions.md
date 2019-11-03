@@ -4,68 +4,70 @@ Building and running tests on Linux, OS X, and FreeBSD
 CoreCLR tests
 -------------
 
-**Building**
+## Building
 
-Build CoreCLR and CoreFX. Refer to building instructions in the respective repository.
+Build CoreCLR on [Unix](https://github.com/dotnet/coreclr/blob/master/Documentation/building/linux-instructions.md).
 
-To build only the tests, on the Windows machine:
+## Building the Tests
 
-> `C:\coreclr>tests\buildtest.cmd clean`
+DotNet is required to build the tests, this can be done on any platform then copied over if the arch or os does not support DotNet. If DotNet is not supported, [CoreFX](https://github.com/dotnet/corefx/blob/master/Documentation/building/unix-instructions.md) is also required to be built.
 
-**Running tests**
+To build the tests on Unix:
+
+> `./build-test.sh`
+
+Please note that this builds the Priority 0 tests. To build priority 1:
+
+> `build-test.sh -priority 1`
+
+## Building Individual Tests
+
+During development there are many instances where building an individual test is fast and necessary. All of the necessary tools to build are under `coreclr`. It is possible to use `coreclr/.dotnet/dotnet msbuild` as you would normally use MSBuild with a few caveats.
+
+**!! Note !! -- Passing /p:__BuildOs=[OSX|Linux] is required.** 
+
+## Building an Individual Test
+
+>`/path/to/coreclr/.dotnet/dotnet msbuild tests/src/path-to-proj-file /p:__BuildOS=<BuildOS> /p:__BuildType=<BuildType>`
+
+## Running Tests
 
 The following instructions assume that on the Unix machine:
-- The CoreCLR repo is cloned at `~/coreclr`
-- The CoreFX repo is cloned at `~/corefx`
-- The Windows clone of the CoreCLR repo is mounted at `/media/coreclr`
-- The Windows clone of the CoreFX repo is mounted at `/media/corefx`
+- The CoreCLR repo is cloned at `/mnt/coreclr`
 
-Tests currently need to be built on Windows and copied over to the Unix machine for testing. Copy the test build over to the Unix machine:
+build-test.sh will have setup the Core_Root directory correctly after the test build.
 
-> `cp --recursive /media/coreclr/bin/tests/Windows_NT.x64.Debug ~/test/`
+```bash
+~/coreclr$ tests/runtest.sh x64 checked
+```
 
-See runtest.sh usage information:
+Please use the following command for help.
 
-> `~/coreclr$ tests/runtest.sh --help`
+>./tests/runtest.sh -h
 
-Run tests:
-
-> ```bash
-> ~/coreclr$ tests/runtest.sh
->     --testRootDir=~/test/Windows_NT.x64.Debug
->     --testNativeBinDir=~/coreclr/bin/obj/Linux.x64.Debug/tests
->     --coreClrBinDir=~/coreclr/bin/Product/Linux.x64.Debug
->     --mscorlibDir=/media/coreclr/bin/Product/Linux.x64.Debug
->     --coreFxBinDir="~/corefx/bin/Linux.AnyCPU.Release;~/corefx/bin/Unix.AnyCPU.Release;~/corefx/bin/AnyOS.AnyCPU.Release"
->     --coreFxNativeBinDir=~/corefx/bin/Linux.x64.Debug
-> ```
-
-The method above will copy dependencies from the set of directories provided to create an 'overlay' directory.
-If you already have an overlay directory prepared with the dependencies you need, you can specify `--coreOverlayDir`
-instead of `--coreClrBinDir`, `--mscorlibDir`, `--coreFxBinDir`, and `--coreFxNativeBinDir`. It would look something like:
-
-
-> ```bash
-> ~/coreclr$ tests/runtest.sh
->     --testRootDir=~/test/Windows_NT.x64.Debug
->     --testNativeBinDir=~/coreclr/bin/obj/Linux.x64.Debug/tests
->     --coreOverlayDir=/path/to/directory/containing/overlay
-> ```
-
+### Results
 
 Test results will go into:
 
 > `~/test/Windows_NT.x64.Debug/coreclrtests.xml`
 
-**Unsupported and temporarily disabled tests**
+### Unsupported and temporarily disabled tests
 
-These tests are skipped by default:
-- Tests that are not supported outside Windows, are listed in:
->> `~/coreclr/tests/testsUnsupportedOutsideWindows.txt`
-- Tests that are temporarily disabled outside Windows due to unexpected failures (pending investigation), are listed in:
->> `~/coreclr/tests/testsFailingOutsideWindows.txt`
+Unsupported tests outside of Windows have two annotations in their csproj to
+ignore them when run.
 
-To run only the set of temporarily disabled tests, pass in the `--runFailingTestsOnly` argument to `runtest.sh`.
+```
+<TestUnsupportedOutsideWindows>true</TestUnsupportedOutsideWindows>
+```
+
+This will write in the bash target to skip the test by returning a passing value if run outside Windows.
+
+In addition:
+```
+<DisableProjectBuild Condition="'$(TargetsUnix)' == 'true'">true</DisableProjectBuild>
+```
+
+Is used to disable the build, that way if building on Unix cycles are saved building/running.
 
 PAL tests
 ---------

@@ -5,9 +5,20 @@ add_definitions(-DFEATURE_NO_HOST)
 add_definitions(-DSELF_NO_HOST)
 remove_definitions(-DFEATURE_MERGE_JIT_AND_ENGINE)
 
+if(FEATURE_READYTORUN)
+  add_definitions(-DFEATURE_READYTORUN_COMPILER)
+endif(FEATURE_READYTORUN)
+
+if(WIN32)
+  add_definitions(-DFX_VER_INTERNALNAME_STR=protojit.dll)
+endif(WIN32)
+
+set_source_files_properties(${JIT_EXPORTS_FILE} PROPERTIES GENERATED TRUE)
+
 add_library_clr(protojit
    SHARED
    ${SHARED_LIB_SOURCES}
+   ${JIT_ARCH_SOURCES}
 )
 
 add_dependencies(protojit jit_exports)
@@ -28,7 +39,8 @@ if(CLR_CMAKE_PLATFORM_UNIX)
     )
 else()
     list(APPEND RYUJIT_LINK_LIBRARIES
-       msvcrt.lib
+       ${STATIC_MT_CRT_LIB}
+       ${STATIC_MT_VCRT_LIB}
        kernel32.lib
        advapi32.lib
        ole32.lib

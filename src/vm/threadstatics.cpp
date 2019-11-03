@@ -17,20 +17,28 @@
 
 #ifndef DACCESS_COMPILE
 
-void ThreadLocalBlock::FreeTLM(SIZE_T i)
+void ThreadLocalBlock::FreeTLM(SIZE_T i, BOOL isThreadShuttingdown)
 {
     CONTRACTL
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
-    _ASSERTE(m_pTLMTable != NULL);
 
-    PTR_ThreadLocalModule pThreadLocalModule = m_pTLMTable[i].pTLM;
-    m_pTLMTable[i].pTLM = NULL;
+    PTR_ThreadLocalModule pThreadLocalModule;
+
+    {
+        SpinLock::Holder lock(&m_TLMTableLock);
+
+        if ((m_pTLMTable == NULL) || (i >= m_TLMTableSize))
+        {
+            return;
+        }
+        pThreadLocalModule = m_pTLMTable[i].pTLM;
+        m_pTLMTable[i].pTLM = NULL;
+    }
 
     if (pThreadLocalModule != NULL)
     {
@@ -40,6 +48,20 @@ void ThreadLocalBlock::FreeTLM(SIZE_T i)
             {
                 if (pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry != NULL)
                 {
+                    if (isThreadShuttingdown && (pThreadLocalModule->m_pDynamicClassTable[k].m_dwFlags & ClassInitFlags::COLLECTIBLE_FLAG))
+                    {
+                        ThreadLocalModule::CollectibleDynamicEntry *entry = (ThreadLocalModule::CollectibleDynamicEntry*)pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry;
+                        PTR_LoaderAllocator pLoaderAllocator = entry->m_pLoaderAllocator;
+
+                        if (entry->m_hGCStatics != NULL)
+                        {
+                            pLoaderAllocator->FreeHandle(entry->m_hGCStatics);
+                        }
+                        if (entry->m_hNonGCStatics != NULL)
+                        {
+                            pLoaderAllocator->FreeHandle(entry->m_hNonGCStatics);
+                        }
+                    }
                     delete pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry;
                     pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry = NULL;
                 }
@@ -58,7 +80,6 @@ void ThreadLocalBlock::FreeTable()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_INTOLERANT;
         MODE_COOPERATIVE;
     }
     CONTRACTL_END;
@@ -70,9 +91,11 @@ void ThreadLocalBlock::FreeTable()
         {
             if (m_pTLMTable[i].pTLM != NULL)
             {
-                FreeTLM(i);
+                FreeTLM(i, TRUE /* isThreadShuttingDown */);
             }
         }
+
+        SpinLock::Holder lock(&m_TLMTableLock);
 
         // Free the table itself
         delete m_pTLMTable;
@@ -119,19 +142,23 @@ void ThreadLocalBlock::EnsureModuleIndex(ModuleIndex index)
     // Zero out the new TLM table
     memset(pNewModuleSlots, 0 , sizeof(TLMTableEntry) * aModuleIndices);
 
-    if (m_pTLMTable != NULL)
-    {
-        memcpy(pNewModuleSlots, m_pTLMTable, sizeof(TLMTableEntry) * m_TLMTableSize);
-    }
-    else
-    {
-        _ASSERTE(m_TLMTableSize == 0);
-    }
-
     PTR_TLMTableEntry pOldModuleSlots = m_pTLMTable;
-    
-    m_pTLMTable = pNewModuleSlots;
-    m_TLMTableSize = aModuleIndices;
+
+    {
+        SpinLock::Holder lock(&m_TLMTableLock);
+
+        if (m_pTLMTable != NULL)
+        {
+            memcpy(pNewModuleSlots, m_pTLMTable, sizeof(TLMTableEntry) * m_TLMTableSize);
+        }
+        else
+        {
+            _ASSERTE(m_TLMTableSize == 0);
+        }
+
+        m_pTLMTable = pNewModuleSlots;
+        m_TLMTableSize = aModuleIndices;
+    }
 
     if (pOldModuleSlots != NULL)
         delete pOldModuleSlots;
@@ -214,7 +241,6 @@ DWORD ThreadLocalModule::GetClassFlags(MethodTable* pMT, DWORD iClassIndex) // i
     CONTRACTL {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     if (pMT->IsDynamicStatics())
@@ -259,7 +285,6 @@ void ThreadLocalBlock::AddPinningHandleToList(OBJECTHANDLE oh)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -273,7 +298,6 @@ void ThreadLocalBlock::FreePinningHandles()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
         MODE_ANY;
     }
     CONTRACTL_END;
@@ -399,7 +423,7 @@ void ThreadLocalBlock::AllocateThreadStaticBoxes(MethodTable * pMT)
             PTR_BYTE pStaticBase = pMT->GetGCThreadStaticsBasePointer();
             _ASSERTE(pStaticBase != NULL);
 
-            SetObjectReference( (OBJECTREF*)(pStaticBase + pField->GetOffset()), obj, GetAppDomain() );
+            SetObjectReference( (OBJECTREF*)(pStaticBase + pField->GetOffset()), obj );
 
             // If we created a pinning handle, save it to the list
             if (handle != NULL)
@@ -500,34 +524,70 @@ void    ThreadLocalModule::AllocateDynamicClass(MethodTable *pMT)
     // We need this check because maybe a class had a cctor but no statics
     if (dwStaticBytes > 0 || dwNumHandleStatics > 0)
     {
-        // Collectible types do not support static fields yet
-        if (pMT->Collectible())
-            COMPlusThrow(kNotSupportedException, W("NotSupported_CollectibleNotYet"));
-
         if (pDynamicStatics == NULL)
         {            
+            SIZE_T dynamicEntrySize;
+            if (pMT->Collectible())
+            {
+                dynamicEntrySize = sizeof(CollectibleDynamicEntry);
+            }
+            else
+            {
+                dynamicEntrySize = DynamicEntry::GetOffsetOfDataBlob() + dwStaticBytes;
+            }
+
             // If this allocation fails, we will throw
-            pDynamicStatics = (DynamicEntry*)new BYTE[sizeof(DynamicEntry) + dwStaticBytes];
+            pDynamicStatics = (DynamicEntry*)new BYTE[dynamicEntrySize];
 
 #ifdef FEATURE_64BIT_ALIGNMENT
             // The memory block has be aligned at MAX_PRIMITIVE_FIELD_SIZE to guarantee alignment of statics
-            static_assert_no_msg(sizeof(DynamicEntry) % MAX_PRIMITIVE_FIELD_SIZE == 0);
+            static_assert_no_msg(sizeof(NormalDynamicEntry) % MAX_PRIMITIVE_FIELD_SIZE == 0);
             _ASSERTE(IS_ALIGNED(pDynamicStatics, MAX_PRIMITIVE_FIELD_SIZE));
 #endif
 
             // Zero out the new DynamicEntry
-            memset((BYTE*)pDynamicStatics, 0, sizeof(DynamicEntry) + dwStaticBytes);
+            memset((BYTE*)pDynamicStatics, 0, dynamicEntrySize);
+
+            if (pMT->Collectible())
+            {
+                ((CollectibleDynamicEntry*)pDynamicStatics)->m_pLoaderAllocator = pMT->GetLoaderAllocator();
+            }
 
             // Save the DynamicEntry in the DynamicClassTable
             m_pDynamicClassTable[dwID].m_pDynamicEntry = pDynamicStatics;
         }
 
+        if (pMT->Collectible() && (dwStaticBytes != 0))
+        {
+            OBJECTREF nongcStaticsArray = NULL;
+            GCPROTECT_BEGIN(nongcStaticsArray);
+#ifdef FEATURE_64BIT_ALIGNMENT
+            // Allocate memory with extra alignment only if it is really necessary
+            if (dwStaticBytes >= MAX_PRIMITIVE_FIELD_SIZE)
+                nongcStaticsArray = AllocatePrimitiveArray(ELEMENT_TYPE_I8, (dwStaticBytes + (sizeof(CLR_I8) - 1)) / (sizeof(CLR_I8)));
+            else
+#endif
+                nongcStaticsArray = AllocatePrimitiveArray(ELEMENT_TYPE_U1, dwStaticBytes);
+
+            ((CollectibleDynamicEntry *)pDynamicStatics)->m_hNonGCStatics = pMT->GetLoaderAllocator()->AllocateHandle(nongcStaticsArray);
+            GCPROTECT_END();
+        }
+
         if (dwNumHandleStatics > 0)
         {
-            PTR_ThreadLocalBlock pThreadLocalBlock = GetThread()->m_pThreadLocalBlock;
-            _ASSERTE(pThreadLocalBlock != NULL);
-            pThreadLocalBlock->AllocateStaticFieldObjRefPtrs(dwNumHandleStatics,
-                                                             &pDynamicStatics->m_pGCStatics);
+            if (!pMT->Collectible())
+            {
+                GetThread()->m_ThreadLocalBlock.AllocateStaticFieldObjRefPtrs(dwNumHandleStatics,
+                        &((NormalDynamicEntry *)pDynamicStatics)->m_pGCStatics);
+            }
+            else
+            {
+                OBJECTREF gcStaticsArray = NULL;
+                GCPROTECT_BEGIN(gcStaticsArray);
+                gcStaticsArray = AllocateObjectArray(dwNumHandleStatics, g_pObjectClass);
+                ((CollectibleDynamicEntry *)pDynamicStatics)->m_hGCStatics = pMT->GetLoaderAllocator()->AllocateHandle(gcStaticsArray);
+                GCPROTECT_END();
+            }
         }
     }
 }
@@ -551,6 +611,11 @@ void ThreadLocalModule::PopulateClass(MethodTable *pMT)
     // an entry in our dynamic class table
     if (pMT->IsDynamicStatics())
         AllocateDynamicClass(pMT);
+
+    if (pMT->Collectible())
+    {
+        SetClassFlags(pMT, ClassInitFlags::COLLECTIBLE_FLAG);
+    }
 
     // We need to allocate boxes any value-type statics that are not
     // primitives or enums, because these statics may contain references
@@ -582,7 +647,7 @@ PTR_ThreadLocalModule ThreadStatics::AllocateAndInitTLM(ModuleIndex index, PTR_T
     _ASSERTE(pThreadLocalBlock != NULL);
     _ASSERTE(pModule != NULL);
 
-    NewHolder<ThreadLocalModule> pThreadLocalModule = AllocateTLM(pModule);
+    NewArrayHolder<ThreadLocalModule> pThreadLocalModule = AllocateTLM(pModule);
 
     pThreadLocalBlock->AllocateThreadStaticHandles(pModule, pThreadLocalModule);
 
@@ -626,37 +691,6 @@ PTR_ThreadLocalModule ThreadStatics::GetTLM(MethodTable * pMT) //static
     return GetTLM(pModule->GetModuleIndex(), pModule);
 }
 
-PTR_ThreadLocalBlock ThreadStatics::AllocateTLB(PTR_Thread pThread, ADIndex index) //static
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_NOTRIGGER;
-        SO_TOLERANT;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-    _ASSERTE(pThread->m_pThreadLocalBlock == NULL);
-
-    // Grow the TLB table so that it has room to store the newly allocated 
-    // ThreadLocalBlock. If this growing the table fails we cannot proceed.
-    ThreadStatics::EnsureADIndex(pThread, index);
-
-    // Allocate a new TLB and update this Thread's pointer to the current 
-    // ThreadLocalBlock. Constructor zeroes out everything for us.
-    pThread->m_pThreadLocalBlock = new ThreadLocalBlock();
-
-    // Store the newly allocated ThreadLocalBlock in the TLB table
-    if (pThread->m_pThreadLocalBlock != NULL)
-    {
-        // We grew the TLB table earlier, so it should have room
-        _ASSERTE(index.m_dwIndex >= 0 && index.m_dwIndex < pThread->m_TLBTableSize);
-        pThread->m_pTLBTable[index.m_dwIndex] = pThread->m_pThreadLocalBlock;
-    }
-
-    return pThread->m_pThreadLocalBlock;
-}
-
 PTR_ThreadLocalModule ThreadStatics::AllocateTLM(Module * pModule)
 {
     CONTRACTL
@@ -667,6 +701,7 @@ PTR_ThreadLocalModule ThreadStatics::AllocateTLM(Module * pModule)
         INJECT_FAULT(COMPlusThrowOM(););
     }
     CONTRACTL_END;
+
 
     SIZE_T size = pModule->GetThreadLocalModuleSize();
 
@@ -681,29 +716,8 @@ PTR_ThreadLocalModule ThreadStatics::AllocateTLM(Module * pModule)
     
     // Zero out the part of memory where the TLM resides
     memset(pThreadLocalModule, 0, size);
-    
+
     return pThreadLocalModule;
 }
 
 #endif
-
-PTR_ThreadLocalBlock ThreadStatics::GetTLBIfExists(PTR_Thread pThread, ADIndex index) //static
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        MODE_ANY;
-        SUPPORTS_DAC;
-        SO_TOLERANT;
-    }
-    CONTRACTL_END;
-
-    // Check to see if we have a ThreadLocalBlock for the this AppDomain, 
-    if (index.m_dwIndex < pThread->m_TLBTableSize)
-    {
-        return pThread->m_pTLBTable[index.m_dwIndex];
-    }
-    
-    return NULL;
-}

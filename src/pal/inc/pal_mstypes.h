@@ -56,12 +56,6 @@ extern "C" {
 #define CDECL          __cdecl
 #endif
 
-#ifndef PAL_STDCPP_COMPAT
-#undef __fastcall
-#define __fastcall      __stdcall
-#undef _fastcall
-#define _fastcall       __fastcall
-#endif // PAL_STDCPP_COMPAT
 
 #else   // !defined(__i386__)
 
@@ -81,7 +75,7 @@ extern "C" {
 
 #endif  // !defined(__i386__)
 
-#define CALLBACK __stdcall
+#define CALLBACK __cdecl
 
 #if !defined(_declspec)
 #define _declspec(e)  __declspec(e)
@@ -102,17 +96,20 @@ extern "C" {
 #else
 #define PALIMPORT   __declspec(dllimport)
 #endif
+#define DLLEXPORT __declspec(dllexport)
 #define PAL_NORETURN __declspec(noreturn)
 
 #else
 
 #define PALIMPORT
+#define DLLEXPORT __attribute__((visibility("default")))
 #define PAL_NORETURN    __attribute__((noreturn))
 
 #endif
 
-#define PALAPI      __stdcall
-#define PALAPIV     __cdecl
+#define PALAPI             DLLEXPORT __cdecl
+#define PALAPI_NOEXPORT    __cdecl
+#define PALAPIV            __cdecl
 
 ////////////////////////////////////////////////////////////////////////
 // Type attribute stuff
@@ -215,6 +212,9 @@ extern "C" {
 // Defined in gnu's types.h. For non PAL_IMPLEMENTATION system
 // includes are not included, so we need to define them.
 #ifndef PAL_IMPLEMENTATION
+
+// OS X already defines these types in 64 bit
+#if !defined(_TARGET_MAC64)
 typedef __int64 int64_t;
 typedef unsigned __int64 uint64_t;
 typedef __int32 int32_t;
@@ -223,6 +223,8 @@ typedef __int16 int16_t;
 typedef unsigned __int16 uint16_t;
 typedef __int8 int8_t;
 typedef unsigned __int8 uint8_t;
+#endif
+
 #endif // PAL_IMPLEMENTATION
 
 #ifndef _MSC_VER
@@ -236,13 +238,8 @@ typedef long double LONG_DOUBLE;
 
 typedef void VOID;
 
-#ifndef PLATFORM_UNIX
-typedef long LONG;
-typedef unsigned long ULONG;
-#else
 typedef int LONG;       // NOTE: diff from windows.h, for LP64 compat
 typedef unsigned int ULONG; // NOTE: diff from windows.h, for LP64 compat
-#endif
 
 typedef __int64 LONGLONG;
 typedef unsigned __int64 ULONGLONG;
@@ -261,12 +258,7 @@ typedef UCHAR *PUCHAR;
 typedef char *PSZ;
 typedef ULONGLONG DWORDLONG;
 
-#ifndef PLATFORM_UNIX
-typedef unsigned long DWORD;
-#else
 typedef unsigned int DWORD; // NOTE: diff from  windows.h, for LP64 compat
-#endif
-
 typedef unsigned int DWORD32, *PDWORD32;
 
 typedef int BOOL;
@@ -567,7 +559,7 @@ typedef LONG_PTR SSIZE_T, *PSSIZE_T;
 #endif
 
 #ifndef SSIZE_T_MIN
-#define SSIZE_T_MIN I64(-9223372036854775808)
+#define SSIZE_T_MIN I64(0x8000000000000000)
 #endif
 
 #ifndef PAL_STDCPP_COMPAT
@@ -596,12 +588,6 @@ typedef LONG_PTR LPARAM;
 #endif
 
 #ifdef PAL_STDCPP_COMPAT
-
-#ifdef BIT64
-typedef unsigned long int uintptr_t;
-#else // !BIT64
-typedef unsigned int uintptr_t;
-#endif // !BIT64
 
 typedef char16_t WCHAR;
 

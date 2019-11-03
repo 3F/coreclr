@@ -35,10 +35,6 @@
 #include <cordbpriv.h>
 #include <dbgipcevents.h>
 
-#if !defined(FEATURE_DBGIPC_TRANSPORT_DI)
-#include <ipcmanagerinterface.h>
-#endif // !FEATURE_DBGIPC_TRANSPORT_DI
-
 #include "common.h"
 #include "primitives.h"
 
@@ -48,6 +44,7 @@
 
 struct MachineInfo;
 
+#include "processdescriptor.h"
 #include "nativepipeline.h"
 #include "stringcopyholder.h"
 
@@ -85,6 +82,7 @@ class CordbJITILFrame;
 class CordbInternalFrame;
 class CordbContext;
 class CordbThread;
+class CordbVariableHome;
 
 #ifdef FEATURE_INTEROP_DEBUGGING
 class CordbUnmanagedThread;
@@ -103,6 +101,7 @@ class CordbRCEventThread;
 class CordbRegisterSet;
 class CordbNativeFrame;
 class CordbObjectValue;
+class CordbReferenceValue;
 class CordbEnCErrorInfo;
 class CordbEnCErrorInfoEnum;
 class Instantiation;
@@ -176,7 +175,7 @@ private:
     USHORT m_usPort;
 };
 
-#define forDbi (*(forDbiWorker *)NULL)
+extern forDbiWorker forDbi;
 
 // for dbi we just default to new, but we need to have these defined for both dac and dbi
 inline void * operator new(size_t lenBytes, const forDbiWorker &)
@@ -1586,7 +1585,7 @@ template< typename ElemType,
           typename ElemPublicType,
           typename EnumInterfaceType,
           ElemPublicType (*GetPublicType)(ElemType)>
-class CordbEnumerator : public CordbBase, EnumInterfaceType
+class CordbEnumerator : public CordbBase, public EnumInterfaceType
 {
 private:
     // the list of items being enumerated over
@@ -1606,8 +1605,8 @@ public:
 
 // IUnknown interface
     virtual COM_METHOD QueryInterface(REFIID riid, VOID** ppInterface);
-    virtual ULONG __stdcall AddRef();
-    virtual ULONG __stdcall Release();
+    virtual ULONG STDMETHODCALLTYPE AddRef();
+    virtual ULONG STDMETHODCALLTYPE Release();
 
 // ICorDebugEnum interface
     virtual COM_METHOD Clone(ICorDebugEnum **ppEnum);
@@ -1679,6 +1678,11 @@ typedef CordbEnumerator<RsGuidToTypeMapping,
                         CorDebugGuidToTypeMapping,
                         ICorDebugGuidToTypeEnum,
                         GuidToTypeMappingConvert > CordbGuidToTypeEnumerator;
+
+typedef CordbEnumerator<RSSmartPtr<CordbVariableHome>,
+                        ICorDebugVariableHome*,
+                        ICorDebugVariableHomeEnum,
+                        QueryInterfaceConvert<RSSmartPtr<CordbVariableHome>, ICorDebugVariableHome> > CordbVariableHomeEnumerator;
 
 // ----------------------------------------------------------------------------
 // Hash table for CordbBase objects.
@@ -2193,9 +2197,7 @@ public:
     // ICorDebug
     //-----------------------------------------------------------
 
-#ifdef FEATURE_CORECLR
     HRESULT SetTargetCLR(HMODULE hmodTargetCLR);
-#endif // FEATURE_CORECLR
 
     COM_METHOD Initialize();
     COM_METHOD Terminate();
@@ -2226,7 +2228,7 @@ public:
 #if defined(FEATURE_DBGIPC_TRANSPORT_DI)
     static COM_METHOD CreateObjectTelesto(REFIID id, void ** pObject);
 #endif // FEATURE_DBGIPC_TRANSPORT_DI
-    static COM_METHOD CreateObject(CorDebugInterfaceVersion iDebuggerVersion, REFIID id, void **object);
+    static COM_METHOD CreateObject(CorDebugInterfaceVersion iDebuggerVersion, DWORD pid, LPCWSTR lpApplicationGroupId, REFIID id, void **object);
 
     //-----------------------------------------------------------
     // ICorDebugRemote
@@ -2297,6 +2299,9 @@ public:
                                        CordbAppDomain *appDomain,
                                        DebuggerIPCEvent* event);
 
+private:
+    Cordb(CorDebugInterfaceVersion iDebuggerVersion, const ProcessDescriptor& pd);
+
     //-----------------------------------------------------------
     // Data members
     //-----------------------------------------------------------
@@ -2305,6 +2310,7 @@ public:
     RSExtSmartPtr<ICorDebugManagedCallback>    m_managedCallback;
     RSExtSmartPtr<ICorDebugManagedCallback2>   m_managedCallback2;
     RSExtSmartPtr<ICorDebugManagedCallback3>   m_managedCallback3;
+    RSExtSmartPtr<ICorDebugManagedCallback4>   m_managedCallback4;
     RSExtSmartPtr<ICorDebugUnmanagedCallback>  m_unmanagedCallback;
 
     CordbRCEventThread*         m_rcEventThread;
@@ -2312,7 +2318,7 @@ public:
     CorDebugInterfaceVersion    GetDebuggerVersion() const;
 
 #ifdef FEATURE_CORESYSTEM
-	HMODULE GetTargetCLR() { return m_targetCLR; }
+    HMODULE GetTargetCLR() { return m_targetCLR; }
 #endif
 
 private:
@@ -2331,10 +2337,13 @@ private:
     // This is the version of the ICorDebug APIs that the debugger believes it's consuming.
     CorDebugInterfaceVersion    m_debuggerSpecifiedVersion;
 
+    // Store information about the process to be debugged
+    ProcessDescriptor m_pd;
+
 //Note - this code could be useful outside coresystem, but keeping the change localized
 // because we are late in the win8 release
 #ifdef FEATURE_CORESYSTEM
-	HMODULE m_targetCLR;
+    HMODULE m_targetCLR;
 #endif
 };
 
@@ -2476,12 +2485,12 @@ public:
     // ICorDebugAppDomain3 APIs
     //-----------------------------------------------------------
     COM_METHOD GetCachedWinRTTypesForIIDs(
-					    ULONG32               cGuids,
-    					GUID                * guids,
-	    				ICorDebugTypeEnum * * ppTypesEnum);
+                        ULONG32               cGuids,
+                        GUID                * guids,
+                        ICorDebugTypeEnum * * ppTypesEnum);
 
     COM_METHOD GetCachedWinRTTypes(
-						ICorDebugGuidToTypeEnum * * ppType);
+                        ICorDebugGuidToTypeEnum * * ppType);
 
     //-----------------------------------------------------------
     // ICorDebugAppDomain4
@@ -2726,6 +2735,7 @@ public:
         {
             case cInband: return "cInband";
             case cInband_NotNewEvent: return "cInband_NotNewEvent";
+            case cFirstChanceHijackStarted: return "cFirstChanceHijackStarted";
             case cInbandHijackComplete: return "cInbandHijackComplete";
             case cInbandExceptionRetrigger: return "cInbandExceptionRetrigger";
             case cBreakpointRequiringHijack: return "cBreakpointRequiringHijack";
@@ -2802,8 +2812,8 @@ void DeleteIPCEventHelper(DebuggerIPCEvent *pDel);
 class IProcessShimHooks
 {
 public:
-    // Get the OS Process ID of the target.
-    virtual DWORD GetPid() = 0;
+    // Get the OS Process descriptor of the target.
+    virtual const ProcessDescriptor* GetProcessDescriptor() = 0;
 
     // Request a synchronization for attach. 
     // This essentially just sends an AsyncBreak to the left-side. Once the target is
@@ -2920,13 +2930,14 @@ class CordbProcess :
     public ICorDebugProcess4,
     public ICorDebugProcess5,
     public ICorDebugProcess7,
-	public ICorDebugProcess8,
+    public ICorDebugProcess8,
+    public ICorDebugProcess10,
     public IDacDbiInterface::IAllocator,
     public IDacDbiInterface::IMetaDataLookup,
     public IProcessShimHooks
 {
     // Ctor is private. Use OpenVirtualProcess instead. 
-    CordbProcess(ULONG64 clrInstanceId, IUnknown * pDataTarget, HMODULE hDacModule,  Cordb * pCordb, DWORD dwProcessID, ShimProcess * pShim);
+    CordbProcess(ULONG64 clrInstanceId, IUnknown * pDataTarget, HMODULE hDacModule,  Cordb * pCordb, const ProcessDescriptor * pProcessDescriptor, ShimProcess * pShim);
 
 public:    
 
@@ -2946,7 +2957,7 @@ public:
                                       IUnknown * pDataTarget, 
                                       HMODULE hDacModule,
                                       Cordb * pCordb, 
-                                      DWORD dwProcessID, 
+                                      const ProcessDescriptor * pProcessDescriptor, 
                                       ShimProcess * pShim, 
                                       CordbProcess ** ppProcess);
 
@@ -3130,6 +3141,11 @@ public:
     COM_METHOD EnableExceptionCallbacksOutsideOfMyCode(BOOL enableExceptionsOutsideOfJMC);
 
     //-----------------------------------------------------------
+    // ICorDebugProcess10
+    //-----------------------------------------------------------
+    COM_METHOD EnableGCNotificationEvents(BOOL fEnable);
+
+    //-----------------------------------------------------------
     // Methods not exposed via a COM interface.
     //-----------------------------------------------------------
 
@@ -3245,8 +3261,11 @@ public:
 
     bool IsThreadSuspendedOrHijacked(ICorDebugThread * pICorDebugThread);
 
-    // Helper to get PID internally.
-    DWORD GetPid();
+    // Handle the result of the ctrlC trap.
+    void HandleControlCTrapResult(HRESULT result);
+
+    // Helper to get ProcessDescriptor internally.
+    const ProcessDescriptor* GetProcessDescriptor();
 
     HRESULT GetRuntimeOffsets();
         
@@ -3293,7 +3312,8 @@ public:
         RSLockHolder *              pLockHolder,
         ICorDebugManagedCallback *  pCallback1, 
         ICorDebugManagedCallback2 * pCallback2,
-        ICorDebugManagedCallback3 * pCallback3);
+        ICorDebugManagedCallback3 * pCallback3,
+        ICorDebugManagedCallback4 * pCallback4);
 
     void MarkAllThreadsDirty();
 
@@ -3629,7 +3649,7 @@ public:
     // the jit attach.
     HRESULT GetAttachStateFlags(CLR_DEBUGGING_PROCESS_FLAGS *pFlags);
 
-    HRESULT GetTypeForObject(CORDB_ADDRESS obj, CordbType **ppType, CordbAppDomain **pAppDomain = NULL);
+    HRESULT GetTypeForObject(CORDB_ADDRESS obj, CordbAppDomain* pAppDomainOverride, CordbType **ppType, CordbAppDomain **pAppDomain = NULL);
 
     WriteableMetadataUpdateMode GetWriteableMetadataUpdateMode() { return m_writableMetadataUpdateMode; }
 private:
@@ -3686,6 +3706,9 @@ private:
     // wait on for process termination.
     HANDLE                m_handle;
 
+    // Process descriptor - holds PID and App group ID for Mac debugging
+    ProcessDescriptor m_processDescriptor;
+
 public:
     // Wrapper to get the OS process handle. This is unsafe because it breaks the data-target abstraction.
     // The only things that need this should be calls to DuplicateHandle, and some shimming work.    
@@ -3725,7 +3748,6 @@ public:
     // It comes in both Attach and Launch scenarios.
     // This is also used in fake-native debugging scenarios.
     bool                  m_loaderBPReceived;
-
 
 private:
 
@@ -4091,6 +4113,8 @@ private:
 
     // controls how metadata updated in the target is handled
     WriteableMetadataUpdateMode m_writableMetadataUpdateMode;
+
+    COM_METHOD GetObjectInternal(CORDB_ADDRESS addr, CordbAppDomain* pAppDomainOverride, ICorDebugObjectValue **pObject);
 };
 
 // Some IMDArocess APIs are supported as interop-only.
@@ -4683,7 +4707,7 @@ public:
 // See definition of ICorDebugType for further invariants on types.
 //
 
-class CordbType : public CordbBase, public ICorDebugType
+class CordbType : public CordbBase, public ICorDebugType, public ICorDebugType2
 {
 public:
     CordbType(CordbAppDomain *appdomain, CorElementType ty, unsigned int rank);
@@ -4722,6 +4746,11 @@ public:
                                    ICorDebugValue ** ppValue);
     COM_METHOD GetRank(ULONG32 *pnRank);
 
+    //-----------------------------------------------------------
+    // ICorDebugType2
+    //-----------------------------------------------------------
+    COM_METHOD GetTypeID(COR_TYPEID *pId);
+    
     //-----------------------------------------------------------
     // Non-COM members
     //-----------------------------------------------------------
@@ -5316,7 +5345,11 @@ const BOOL bILCode = TRUE;
 // B/C of generics, a single IL function may get jitted multiple times and
 // be associated w/ multiple native code blobs (CordbNativeCode).
 //
-class CordbFunction : public CordbBase, public ICorDebugFunction, public ICorDebugFunction2, public ICorDebugFunction3
+class CordbFunction : public CordbBase, 
+                      public ICorDebugFunction, 
+                      public ICorDebugFunction2, 
+                      public ICorDebugFunction3, 
+                      public ICorDebugFunction4
 {
 public:
     //-----------------------------------------------------------
@@ -5375,6 +5408,11 @@ public:
     COM_METHOD GetActiveReJitRequestILCode(ICorDebugILCode **ppReJitedILCode);
 
     //-----------------------------------------------------------
+    // ICorDebugFunction4
+    //-----------------------------------------------------------
+    COM_METHOD CreateNativeBreakpoint(ICorDebugFunctionBreakpoint **ppBreakpoint);
+
+    //-----------------------------------------------------------
     // Internal members
     //-----------------------------------------------------------
 protected:
@@ -5409,7 +5447,7 @@ public:
     HRESULT GetILCode(CordbILCode ** ppCode);
 
     // Finds or creates an ILCode for a given rejit request
-    HRESULT LookupOrCreateReJitILCode(VMPTR_SharedReJitInfo vmSharedRejitInfo,
+    HRESULT LookupOrCreateReJitILCode(VMPTR_ILCodeVersionNode vmILCodeVersionNode,
                                       CordbReJitILCode** ppILCode);
 
 
@@ -5718,6 +5756,8 @@ public:
     HRESULT GetLocalVariableType(DWORD dwIndex, const Instantiation * pInst, CordbType ** ppResultType);
     mdSignature GetLocalVarSigToken();
 
+    COM_METHOD CreateNativeBreakpoint(ICorDebugFunctionBreakpoint **ppBreakpoint);
+
 private:
     // Read the actual bytes of IL code into the data member m_rgbCode.
     // Helper routine for GetCode
@@ -5749,11 +5789,13 @@ protected:
 * rejitID. Thus it is 1:N with a given instantiation of CordbFunction.
 * ------------------------------------------------------------------------- */
 
-class CordbReJitILCode : public CordbILCode, public ICorDebugILCode, public ICorDebugILCode2
+class CordbReJitILCode : public CordbILCode, 
+                         public ICorDebugILCode, 
+                         public ICorDebugILCode2
 {
 public:
     // Initialize a new CordbILCode instance
-    CordbReJitILCode(CordbFunction *pFunction, SIZE_T encVersion, VMPTR_SharedReJitInfo vmSharedReJitInfo);
+    CordbReJitILCode(CordbFunction *pFunction, SIZE_T encVersion, VMPTR_ILCodeVersionNode vmILCodeVersionNode);
 
     //-----------------------------------------------------------
     // IUnknown
@@ -5774,7 +5816,7 @@ public:
     //-----------------------------------------------------------
     COM_METHOD GetLocalVarSigToken(mdSignature *pmdSig);
     COM_METHOD GetInstrumentedILMap(ULONG32 cMap, ULONG32 *pcMap, COR_IL_MAP map[]);
-
+    
 private:
     HRESULT Init(DacSharedReJitInfo* pSharedReJitInfo);
 
@@ -5799,7 +5841,10 @@ private:
  * code, including an optional set of mappings from IL to offsets in the native Code.
  * ------------------------------------------------------------------------- */
 
-class CordbNativeCode : public CordbCode, public ICorDebugCode2, public ICorDebugCode3
+class CordbNativeCode : public CordbCode,
+                        public ICorDebugCode2,
+                        public ICorDebugCode3,
+                        public ICorDebugCode4
 {
 public:
     CordbNativeCode(CordbFunction * pFunction, 
@@ -5839,6 +5884,11 @@ public:
     COM_METHOD GetReturnValueLiveOffset(ULONG32 ILoffset, ULONG32 bufferSize, ULONG32 *pFetched, ULONG32 *pOffsets);
     
 
+    //-----------------------------------------------------------
+    // ICorDebugCode4
+    //-----------------------------------------------------------
+    COM_METHOD EnumerateVariableHomes(ICorDebugVariableHomeEnum **ppEnum);
+    
     //-----------------------------------------------------------
     // Internal members
     //-----------------------------------------------------------
@@ -6091,22 +6141,21 @@ public:
     void CleanupStack();
     void MarkStackFramesDirty();
 
-#if !defined(DBG_TARGET_ARM) // @ARMTODO
 
 #if defined(DBG_TARGET_X86)
     // Converts the values in the floating point register area of the context to real number values.
     void Get32bitFPRegisters(CONTEXT * pContext);
 
-#elif defined(DBG_TARGET_AMD64)
+#elif defined(DBG_TARGET_AMD64) ||  defined(DBG_TARGET_ARM64) || defined(DBG_TARGET_ARM)
     // Converts the values in the floating point register area of the context to real number values.
     void Get64bitFPRegisters(FPRegister64 * rgContextFPRegisters, int start, int nRegisters);
+
 #endif // DBG_TARGET_X86
 
    // Initializes the float state members of this instance of CordbThread. This function gets the context and
    // converts the floating point values from their context representation to real number values.    
    void LoadFloatState();
 
-#endif //!DBG_TARGET_ARM @ARMTODO
 
     HRESULT SetIP(  bool fCanSetIPOnly,
                     CordbNativeCode * pNativeCode,
@@ -6254,11 +6303,9 @@ public:
     //  Instead, we mark m_fFramesFresh in CleanupStack() and clear the cache only when it is used next time.
     CDynArray<CordbFrame *> m_stackFrames;
 
-#if !defined(DBG_TARGET_ARM) // @ARMTODO
     bool                  m_fFloatStateValid;
     unsigned int          m_floatStackTop;
     double                m_floatValues[DebuggerIPCE_FloatCount];
-#endif // !DBG_TARGET_ARM @ARMTODO
 
 private:
     // True for the window after an Exception callback, but before it's been continued.
@@ -6897,11 +6944,11 @@ public:
     // new-style constructor
     CordbMiscFrame(DebuggerIPCE_JITFuncData * pJITFuncData);
 
-#if defined(DBG_TARGET_WIN64) || defined(DBG_TARGET_ARM)
+#ifdef WIN64EXCEPTIONS
     SIZE_T             parentIP;
     FramePointer       fpParentOrSelf;
     bool               fIsFilterFunclet;
-#endif // DBG_TARGET_WIN64 || DBG_TARGET_ARM
+#endif // WIN64EXCEPTIONS
 };
 
 
@@ -7062,11 +7109,9 @@ public:
                                            ICorDebugValue **ppValue);
     UINT_PTR * GetAddressOfRegister(CorDebugRegister regNum) const;
     CORDB_ADDRESS GetLeftSideAddressOfRegister(CorDebugRegister regNum) const;
-#if !defined(DBG_TARGET_ARM) // @ARMTODO
     HRESULT GetLocalFloatingPointValue(DWORD index,
                                             CordbType * pType,
                                             ICorDebugValue **ppValue);
-#endif // !DBG_TARGET_ARM @ARMTODO
 
 
     CORDB_ADDRESS GetLSStackAddress(ICorDebugInfo::RegNum regNum, signed offset);
@@ -7083,10 +7128,10 @@ public:
     bool      IsFunclet();
     bool      IsFilterFunclet();
 
-#if defined(DBG_TARGET_WIN64) || defined(DBG_TARGET_ARM)
+#ifdef WIN64EXCEPTIONS
     // return the offset of the parent method frame at which an exception occurs
     SIZE_T    GetParentIP();
-#endif // DBG_TARGET_WIN64 || DBG_TARGET_ARM
+#endif // WIN64EXCEPTIONS
 
     TADDR GetAmbientESP() { return m_taAmbientESP; }
     TADDR GetReturnRegisterValue();
@@ -7530,7 +7575,7 @@ class CordbFunctionBreakpoint : public CordbBreakpoint,
                                 public ICorDebugFunctionBreakpoint
 {
 public:
-    CordbFunctionBreakpoint(CordbCode *code, SIZE_T offset);
+    CordbFunctionBreakpoint(CordbCode *code, SIZE_T offset, BOOL offsetIsIl);
     ~CordbFunctionBreakpoint();
 
     virtual void Neuter();
@@ -7591,6 +7636,7 @@ public:
     // leaked.
     RSExtSmartPtr<CordbCode> m_code;
     SIZE_T          m_offset;
+    BOOL            m_offsetIsIl;
 };
 
 /* ------------------------------------------------------------------------- *
@@ -8526,6 +8572,63 @@ private:
 typedef enum {kUnboxed, kBoxed} BoxedValue;
 #define EMPTY_BUFFER TargetBuffer(PTR_TO_CORDB_ADDRESS((void *)NULL), 0)
 
+/* ------------------------------------------------------------------------- *
+ * Variable Home class
+ * ------------------------------------------------------------------------- */
+class CordbVariableHome : public CordbBase, public ICorDebugVariableHome
+{
+public:
+    CordbVariableHome(CordbNativeCode *pCode,
+                      const ICorDebugInfo::NativeVarInfo nativeVarInfo,
+                      BOOL isLoc,
+                      ULONG index);
+    ~CordbVariableHome();
+    virtual void Neuter();
+
+#ifdef _DEBUG
+    virtual const char * DbgGetName() { return "CordbVariableHome"; }
+#endif
+    
+    //-----------------------------------------------------------
+    // IUnknown
+    //-----------------------------------------------------------
+    ULONG STDMETHODCALLTYPE AddRef()
+    {
+        return (BaseAddRef());
+    }
+    ULONG STDMETHODCALLTYPE Release()
+    {
+        return (BaseRelease());
+    }
+
+    COM_METHOD QueryInterface(REFIID riid, void **ppInterface);
+    
+    //-----------------------------------------------------------
+    // ICorDebugVariableHome
+    //-----------------------------------------------------------
+    
+    COM_METHOD GetCode(ICorDebugCode **ppCode);
+    
+    COM_METHOD GetSlotIndex(ULONG32 *pSlotIndex);
+
+    COM_METHOD GetArgumentIndex(ULONG32* pArgumentIndex);
+
+    COM_METHOD GetLiveRange(ULONG32* pStartOffset,
+                            ULONG32 *pEndOffset);
+    
+    COM_METHOD GetLocationType(VariableLocationType *pLocationType);
+
+    COM_METHOD GetRegister(CorDebugRegister *pRegister);
+    
+    COM_METHOD GetOffset(LONG *pOffset);
+private:
+    RSSmartPtr<CordbNativeCode> m_pCode;
+    ICorDebugInfo::NativeVarInfo m_nativeVarInfo;
+    BOOL m_isLocal;
+    ULONG m_index;
+};
+
+
 // for an inheritance graph of the ICDValue types, // See file:./ICorDebugValueTypes.vsd for a diagram of the types.  
 /* ------------------------------------------------------------------------- *
  * Value class
@@ -8614,6 +8717,8 @@ public:
         return (S_OK);
     }
 
+    virtual HRESULT STDMETHODCALLTYPE GetAddress(CORDB_ADDRESS *pAddress) = 0;
+
     //-----------------------------------------------------------
     // Methods not exported through COM
     //-----------------------------------------------------------
@@ -8651,6 +8756,9 @@ public:
     static ICorDebugValue* CreateHeapValue(CordbAppDomain* pAppDomain,
                                            VMPTR_Object vmObj);
 
+    // Creates a proper CordbReferenceValue instance based on the given remote heap object
+    static CordbReferenceValue* CreateHeapReferenceValue(CordbAppDomain* pAppDomain,
+                                                         VMPTR_Object vmObj);
 
     // Returns a pointer to the ValueHome field of this instance of CordbValue if one exists or NULL
     // otherwise. Therefore, this also tells us indirectly whether this instance of CordbValue is also an
@@ -8686,11 +8794,11 @@ public:
 };
 
 /* ------------------------------------------------------------------------- *
- * Value Breakpoint class
- * ------------------------------------------------------------------------- */
+* Value Breakpoint class
+* ------------------------------------------------------------------------- */
 
 class CordbValueBreakpoint : public CordbBreakpoint,
-                             public ICorDebugValueBreakpoint
+    public ICorDebugValueBreakpoint
 {
 public:
     CordbValueBreakpoint(CordbValue *pValue);
@@ -8734,12 +8842,12 @@ public:
     void Disconnect();
 
 public:
-    CordbValue       *m_value;
+    CordbValue * m_value;
 };
 
 /* ------------------------------------------------------------------------- *
- * Generic Value class
- * ------------------------------------------------------------------------- */
+* Generic Value class
+* ------------------------------------------------------------------------- */
 
 class CordbGenericValue : public CordbValue, public ICorDebugGenericValue, public ICorDebugValue2, public ICorDebugValue3
 {
@@ -9055,7 +9163,8 @@ class CordbObjectValue : public CordbValue,
                          public ICorDebugHeapValue2,
                          public ICorDebugHeapValue3,
                          public ICorDebugExceptionObjectValue,
-                         public ICorDebugComObjectValue
+                         public ICorDebugComObjectValue,
+                         public ICorDebugDelegateObjectValue
 {
 public:
     
@@ -9183,6 +9292,12 @@ public:
                         CORDB_ADDRESS * ptrs);
 
     //-----------------------------------------------------------
+    // ICorDebugComObjectValue
+    //-----------------------------------------------------------
+    COM_METHOD GetTarget(ICorDebugReferenceValue** ppObject);
+    COM_METHOD GetFunction(ICorDebugFunction** ppFunction);
+
+    //-----------------------------------------------------------
     // Non-COM methods
     //-----------------------------------------------------------
 
@@ -9220,6 +9335,12 @@ private:
     HRESULT IsRcw();
 
     BOOL                     m_fIsRcw;
+
+    HRESULT IsDelegate();
+    HRESULT GetFunctionHelper(ICorDebugFunction **ppFunction);
+    HRESULT GetTargetHelper(ICorDebugReferenceValue **ppTarget);
+
+    BOOL                     m_fIsDelegate;
 };
 
 /* ------------------------------------------------------------------------- *
@@ -9980,7 +10101,7 @@ public:
                                    CorDebugCreateProcessFlags corDebugFlags);
 
     HRESULT SendDebugActiveProcessEvent(MachineInfo machineInfo,
-                                        DWORD pid,
+                                        const ProcessDescriptor *pProcessDescriptor,
                                         bool fWin32Attach,
                                         CordbProcess *pProcess);
 
@@ -10079,12 +10200,12 @@ private:
 
         struct
         {
-            MachineInfo     machineInfo;
-            DWORD           processId;
+            MachineInfo machineInfo;
+            ProcessDescriptor processDescriptor;
 #if !defined(FEATURE_DBGIPC_TRANSPORT_DI)
-            bool            fWin32Attach;
+            bool fWin32Attach;
 #endif
-            CordbProcess    *pProcess;
+            CordbProcess *pProcess;
 
             // Wrapper to determine if we're interop-debugging.
             bool IsInteropDebugging()
@@ -10489,44 +10610,17 @@ private:
     HRESULT EnableSSAfterBP();
     bool GetEEThreadCantStopHelper();
 
-    DWORD_PTR GetTlsSlot(SIZE_T slot);
+    HRESULT GetTlsSlot(DWORD slot, REMOTE_PTR *pValue);
+    HRESULT SetTlsSlot(DWORD slot, REMOTE_PTR value);
     REMOTE_PTR GetPreDefTlsSlot(SIZE_T slot, bool * pRead);
 
     void * m_pPatchSkipAddress;
 
-
-
-    /* 
-     * This abstracts away an overload of the OS thread's TLS slot. In 
-     * particular the runtime may or may not have created a thread object for
-     * a particular OS thread at any point.
-     *
-     * If the runtime has created a thread object, then it stores a pointer to
-     * that thread object in the thread's TLS slot.
-     *
-     * If not, then interop-debugging uses that TLS slot to store temporary 
-     * information.
-     *
-     * To determine this, interop-debugging will set the low bit.  Thus when
-     * we read the TLS slot, if it is non-NULL, anything w/o the low bit set
-     * is an EE thread object ptr.  Anything with the low bit set is an 
-     * interop-debugging value.  Any NULL is null, and an indicator that 
-     * there does not exist a runtime thread object for this thread yet.
-     *
-     */
-    REMOTE_PTR m_pEEThread;
-    REMOTE_PTR m_pdwTlsValue;
-    BOOL m_fValidTlsData;
-
     UINT m_continueCountCached;
 
-    void CacheEEDebuggerWord();
-    HRESULT SetEEThreadValue(REMOTE_PTR EETlsValue);
-#ifdef FEATURE_IMPLICIT_TLS
     DWORD_PTR GetEEThreadValue();
-    REMOTE_PTR GetClrModuleTlsDataAddress();
     REMOTE_PTR GetEETlsDataBlock();
-#endif
+    HRESULT GetClrModuleTlsDataAddress(REMOTE_PTR* pAddress);
 
 public:
     HRESULT GetEEDebuggerWord(REMOTE_PTR *pValue);
@@ -10638,7 +10732,7 @@ private:
 class CorpubProcess : public CordbCommonBase, public ICorPublishProcess
 {
 public:
-    CorpubProcess(DWORD dwProcessId, 
+    CorpubProcess(const ProcessDescriptor * pProcessDescriptor,
         bool fManaged, 
         HANDLE hProcess,
         HANDLE hMutex, 
@@ -10697,7 +10791,7 @@ public:
     bool IsExited();
 
 public:
-    DWORD                           m_dwProcessId;
+    ProcessDescriptor               m_processDescriptor;
 
 private:
     bool                            m_fIsManaged;

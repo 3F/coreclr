@@ -22,7 +22,6 @@ Revision History:
 
 #include "pal/palinternal.h"
 #include "pal/dbgmsg.h"
-#include "pal/unicode_data.h"
 #include "pal/critsect.h"
 #include "pal/module.h"
 #include "pal/misc.h"
@@ -38,6 +37,7 @@ Revision History:
 #include <dlfcn.h>
 #endif  // NEED_DLCOMPAT
 #include <errno.h>
+#include <wctype.h>
 
 SET_DEFAULT_DEBUG_CHANNEL(MISC);
 
@@ -205,7 +205,7 @@ static LPWSTR FMTMSG_ProcessPrintf( wchar_t c ,
     UINT nFormatLength = 0;
     int nBufferLength = 0;
 
-    TRACE( "FMTMSG_ProcessPrintf( %C, %S, %S )\n", c, 
+    TRACE( "FMTMSG_ProcessPrintf( %C, %S, %p )\n", c,
            lpPrintfString, lpInsertString );
 
     switch ( c )
@@ -299,7 +299,6 @@ FormatMessageW(
     LPWSTR lpReturnString = NULL;
     LPWSTR lpWorkingString = NULL; 
     
-
     PERF_ENTRY(FormatMessageW);
     ENTRY( "FormatMessageW(dwFlags=%#x, lpSource=%p, dwMessageId=%#x, "
            "dwLanguageId=%#x, lpBuffer=%p, nSize=%u, va_list=%p)\n", 
@@ -337,11 +336,7 @@ FormatMessageW(
     }
     
     if ( !( dwFlags & FORMAT_MESSAGE_FROM_STRING ) && 
-         ( dwLanguageId != 0
-#if ENABLE_DOWNLEVEL_FOR_NLS         
-         && dwLanguageId != MAKELANGID( LANG_NEUTRAL, SUBLANG_DEFAULT ) 
-#endif
-         ) )
+         ( dwLanguageId != 0) )
     {
         ERROR( "Invalid language indentifier.\n" );
         SetLastError( ERROR_RESOURCE_LANG_NOT_FOUND );
@@ -451,7 +446,7 @@ FormatMessageW(
                 *lpWorkingString = '\0';
                 goto exit;
             }
-            else if ( PAL_iswdigit( *lpSourceString ) )
+            else if ( iswdigit( *lpSourceString ) )
             {
                 /* Get the insert number. */
                 WCHAR Number[] = { '\0', '\0', '\0' };
@@ -460,11 +455,11 @@ FormatMessageW(
                 Number[ 0 ] = *lpSourceString;
                 lpSourceString++;
                 
-                if ( PAL_iswdigit( *lpSourceString ) )
+                if ( iswdigit( *lpSourceString ) )
                 {
                     Number[ 1 ] = *lpSourceString;
                     lpSourceString++;
-                    if ( PAL_iswdigit( *lpSourceString ) )
+                    if ( iswdigit( *lpSourceString ) )
                     {
                         ERROR( "Invalid insert indentifier.\n" );
                         SetLastError( ERROR_INVALID_PARAMETER );

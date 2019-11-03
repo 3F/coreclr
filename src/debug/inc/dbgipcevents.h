@@ -129,16 +129,15 @@ struct MSLAYOUT DebuggerIPCRuntimeOffsets
     void   *m_excepNotForRuntimeBPAddr;
     void   *m_notifyRSOfSyncCompleteBPAddr;
     void   *m_raiseExceptionAddr;                       // The address of kernel32!RaiseException in the debuggee
+    DWORD   m_debuggerWordTLSIndex;                     // The TLS slot for the debugger word used in the debugger hijack functions
 #endif // FEATURE_INTEROP_DEBUGGING
     SIZE_T  m_TLSIndex;                                 // The TLS index the CLR is using to hold Thread objects
     SIZE_T  m_TLSIsSpecialIndex;                        // The index into the Predef block of the the "IsSpecial" status for a thread.
     SIZE_T  m_TLSCantStopIndex;                         // The index into the Predef block of the the Can't-Stop count.
-    SIZE_T  m_TLSIndexOfPredefs;                        // The TLS index of the Predef block.
     SIZE_T  m_EEThreadStateOffset;                      // Offset of m_state in a Thread
     SIZE_T  m_EEThreadStateNCOffset;                    // Offset of m_stateNC in a Thread
     SIZE_T  m_EEThreadPGCDisabledOffset;                // Offset of the bit for whether PGC is disabled or not in a Thread
     DWORD   m_EEThreadPGCDisabledValue;                 // Value at m_EEThreadPGCDisabledOffset that equals "PGC disabled".
-    SIZE_T  m_EEThreadDebuggerWordOffset;               // Offset of debugger word in a Thread
     SIZE_T  m_EEThreadFrameOffset;                      // Offset of the Frame ptr in a Thread
     SIZE_T  m_EEThreadMaxNeededSize;                    // Max memory to read to get what we need out of a Thread object
     DWORD   m_EEThreadSteppingStateMask;                // Mask for Thread::TSNC_DebuggerIsStepping
@@ -180,12 +179,15 @@ struct MSLAYOUT DebuggerIPCRuntimeOffsets
 // aren't any embedded buffers in the DebuggerIPCControlBlock).
 
 #if defined(DBG_TARGET_X86) || defined(DBG_TARGET_ARM)
-#define CorDBIPC_BUFFER_SIZE (2088) // hand tuned to ensure that ipc block in IPCHeader.h fits in 1 page.
+#ifdef _WIN64
+#define CorDBIPC_BUFFER_SIZE 2104
+#else
+#define CorDBIPC_BUFFER_SIZE 2092
+#endif
 #else  // !_TARGET_X86_ && !_TARGET_ARM_
-// This is the size of a DebuggerIPCEvent.  You will hit an assert in Cordb::Initialize() (DI\process.cpp)
+// This is the size of a DebuggerIPCEvent.  You will hit an assert in Cordb::Initialize() (di\rsmain.cpp)
 // if this is not defined correctly.  AMD64 actually has a page size of 0x1000, not 0x2000.
-#define CorDBIPC_BUFFER_SIZE 4016 // (4016 + 6) * 2 + 148 = 8192 (two (DebuggerIPCEvent + alignment padding) +
-                                  //                              other fields = page size)
+#define CorDBIPC_BUFFER_SIZE 4016 // (4016 + 6) * 2 + 148 = 8192 (two (DebuggerIPCEvent + alignment padding) + other fields = page size)
 #endif // DBG_TARGET_X86 || DBG_TARGET_ARM
 
 //
@@ -637,6 +639,7 @@ DEFINE_LSPTR_TYPE(class DebuggerJitInfo, LSPTR_DJI);
 DEFINE_LSPTR_TYPE(class DebuggerMethodInfo, LSPTR_DMI);
 DEFINE_LSPTR_TYPE(class MethodDesc,         LSPTR_METHODDESC);
 DEFINE_LSPTR_TYPE(class DebuggerBreakpoint, LSPTR_BREAKPOINT);
+DEFINE_LSPTR_TYPE(class DebuggerDataBreakpoint, LSPTR_DATA_BREAKPOINT);
 DEFINE_LSPTR_TYPE(class DebuggerEval,       LSPTR_DEBUGGEREVAL);
 DEFINE_LSPTR_TYPE(class DebuggerStepper,    LSPTR_STEPPER);
 
@@ -879,7 +882,8 @@ DEFINE_VMPTR(class SimpleRWLock,    PTR_SimpleRWLock,   VMPTR_SimpleRWLock);
 DEFINE_VMPTR(class SimpleRWLock,    PTR_SimpleRWLock,   VMPTR_RWLock);
 DEFINE_VMPTR(struct ReJitInfo,       PTR_ReJitInfo,      VMPTR_ReJitInfo);
 DEFINE_VMPTR(struct SharedReJitInfo, PTR_SharedReJitInfo, VMPTR_SharedReJitInfo);
-
+DEFINE_VMPTR(class NativeCodeVersionNode, PTR_NativeCodeVersionNode, VMPTR_NativeCodeVersionNode);
+DEFINE_VMPTR(class ILCodeVersionNode, PTR_ILCodeVersionNode, VMPTR_ILCodeVersionNode);
 
 typedef CORDB_ADDRESS GENERICS_TYPE_TOKEN;
 
@@ -999,7 +1003,7 @@ const size_t nameCount = sizeof(DbgIPCEventTypeNames) / sizeof(DbgIPCEventTypeNa
 
 struct MSLAYOUT IPCENames // We use a class/struct so that the function can remain in a shared header file
 {
-    static const DebuggerIPCEventType GetEventType(__in_z char * strEventType)
+    static DebuggerIPCEventType GetEventType(__in_z char * strEventType)
     {
         // pass in the string of event name and find the matching enum value
         // This is a linear search which is pretty slow. However, this is only used
@@ -1168,9 +1172,9 @@ struct MSLAYOUT DebuggerREGDISPLAY
     #define DebuggerIPCE_FloatCount 32
 
     SIZE_T  X[29];
-    SIZE_T  SP;
     SIZE_T  FP;
     SIZE_T  LR;
+    SIZE_T  SP;
     SIZE_T  PC;
 #else
     #define DebuggerIPCE_FloatCount 1
@@ -1355,11 +1359,11 @@ struct MSLAYOUT DebuggerIPCE_JITFuncData
     LSPTR_DJI   nativeCodeJITInfoToken;
     VMPTR_MethodDesc vmNativeCodeMethodDescToken;
 
-#if defined(DBG_TARGET_WIN64) || defined(DBG_TARGET_ARM)
+#ifdef WIN64EXCEPTIONS
     BOOL         fIsFilterFrame;
     SIZE_T       parentNativeOffset;
     FramePointer fpParentOrSelf;
-#endif // DBG_TARGET_WIN64 || DBG_TARGET_ARM
+#endif // WIN64EXCEPTIONS
 
     // indicates if the MethodDesc is a generic function or a method inside a generic class (or
     // both!).
@@ -1907,6 +1911,7 @@ struct MSLAYOUT DebuggerIPCEvent
     DebuggerIPCEvent*       next;
     DebuggerIPCEventType    type;
     DWORD             processId;
+    DWORD             threadId;
     VMPTR_AppDomain   vmAppDomain;
     VMPTR_Thread      vmThread;
 
@@ -2004,6 +2009,15 @@ struct MSLAYOUT DebuggerIPCEvent
         {
             LSPTR_BREAKPOINT breakpointToken;
         } BreakpointSetErrorData;
+
+        struct MSLAYOUT
+        {
+#ifdef FEATURE_DATABREAKPOINT
+            CONTEXT context;
+#else
+            int dummy;
+#endif
+        } DataBreakpointData;
 
         struct MSLAYOUT
         {
@@ -2339,7 +2353,6 @@ struct MSLAYOUT DebuggerIPCEvent
             void * pMetadataStart;
             ULONG nMetadataSize;
         } MetadataUpdateRequest;
-
     };
 };
 

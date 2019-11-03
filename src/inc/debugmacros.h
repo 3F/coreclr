@@ -13,6 +13,7 @@
 
 #include "stacktrace.h"
 #include "debugmacrosext.h"
+#include "palclr.h"
 
 #undef _ASSERTE
 #undef VERIFY
@@ -29,7 +30,7 @@ bool GetStackTraceAtContext(SString & s, struct _CONTEXT * pContext);
 void _cdecl DbgWriteEx(LPCTSTR szFmt, ...);
 bool _DbgBreakCheck(LPCSTR szFile, int iLine, LPCSTR szExpr, BOOL fConstrained = FALSE);
 
-extern VOID DbgAssertDialog(const char *szFile, int iLine, const char *szExpr);
+extern VOID ANALYZER_NORETURN DbgAssertDialog(const char *szFile, int iLine, const char *szExpr);
 
 #define TRACE_BUFF_SIZE (cchMaxAssertStackLevelStringLen * cfrMaxAssertStackLevels + cchMaxAssertExprLen + 1)
 extern char g_szExprWithStack[TRACE_BUFF_SIZE];
@@ -75,9 +76,7 @@ void DECLSPEC_NORETURN __FreeBuildAssertFail(const char *szFile, int iLine, cons
 #define FreeBuildDebugBreak() __FreeBuildDebugBreak()
 
 // At this point, EEPOLICY_HANDLE_FATAL_ERROR may or may not be defined. It will be defined
-// if we are building the VM folder, but outside VM, its not necessarily defined. Currently,
-// this is applicable to the usage of RetailAssertIfExpectedClean that is used from outside
-// the VM folder and uses _ASSERTE_ALL_BUILDS macro as well.
+// if we are building the VM folder, but outside VM, its not necessarily defined.
 //
 // Thus, if EEPOLICY_HANDLE_FATAL_ERROR is not defined, we will call into __FreeBuildAssertFail,
 // but if it is defined, we will use it.

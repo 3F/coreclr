@@ -151,7 +151,9 @@ HRESULT ICeeFileGen::CreateCeeFileFromICeeGen(ICeeGen *pICeeGen, HCEEFILE *ceeFi
         return E_POINTER;
     CCeeGen *genFrom = reinterpret_cast<CCeeGen*>(pICeeGen);
     CeeFileGenWriter *gen = NULL;
-    if (FAILED(CeeFileGenWriter::CreateNewInstance(genFrom, gen, createFlags))) return FALSE;
+    HRESULT hr = CeeFileGenWriter::CreateNewInstance(genFrom, gen, createFlags);
+    if (FAILED(hr))
+        return hr;
     TESTANDRETURN(gen != NULL, E_OUTOFMEMORY);
     *ceeFile = gen;
     return S_OK;
@@ -444,8 +446,6 @@ HRESULT ICeeFileGen::GetHeaderInfo (HCEEFILE ceeFile, PIMAGE_NT_HEADERS *ppNtHea
 
 HRESULT ICeeFileGen::GenerateCeeFile (HCEEFILE ceeFile)
 {
-    SO_NOT_MAINLINE_FUNCTION;
-
     TESTANDRETURNPOINTER(ceeFile);
 
     CeeFileGenWriter *gen = reinterpret_cast<CeeFileGenWriter*>(ceeFile);

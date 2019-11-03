@@ -38,7 +38,6 @@ FILE* Interpreter::GetLogFile()
 inline void Interpreter::LdFromMemAddr(void* addr, InterpreterType tp)
 {
     CONTRACTL {
-        SO_TOLERANT;
         THROWS;
         GC_NOTRIGGER;
         MODE_COOPERATIVE;
@@ -113,7 +112,6 @@ inline void Interpreter::LdFromMemAddr(void* addr, InterpreterType tp)
 inline void Interpreter::LdLoc(int locNum)
 {
     CONTRACTL {
-        SO_TOLERANT;
         THROWS;
         GC_TRIGGERS;
         MODE_COOPERATIVE;
@@ -136,7 +134,6 @@ inline void Interpreter::LdLoc(int locNum)
 void Interpreter::StLoc(int locNum)
 {
     CONTRACTL {
-        SO_TOLERANT;
         THROWS;
         GC_TRIGGERS;
         MODE_COOPERATIVE;
@@ -205,7 +202,7 @@ void Interpreter::StLoc(int locNum)
 
     m_curStackHt = ind;
 
-#ifdef _DEBUG
+#if INTERP_TRACING
     // The value of the locals has changed; print them.
     if (s_TraceInterpreterILFlag.val(CLRConfig::INTERNAL_TraceInterpreterIL))
     {
@@ -217,7 +214,6 @@ void Interpreter::StLoc(int locNum)
 void Interpreter::StToLocalMemAddr(void* addr, InterpreterType tp)
 {
     CONTRACTL {
-        SO_TOLERANT;
         THROWS;
         GC_TRIGGERS;
         MODE_COOPERATIVE;

@@ -12,14 +12,26 @@
  ENCODING LAYOUT
 
  1. Header
+ 
+ Slim Header for simple and common cases:
+    - EncodingType[Slim]
+    - ReturnKind (Fat: 2 bits)
+    - CodeLength
+    - NumCallSites (#ifdef PARTIALLY_INTERRUPTIBLE_GC_SUPPORTED)
+
+ Fat Header for other cases:
+    - EncodingType[Fat]
     - Flag:     isVarArg, 
                 hasSecurityObject, 
                 hasGSCookie,
                 hasPSPSymStackSlot,
                 hasGenericsInstContextStackSlot, 
                 hasStackBaseregister,
-                wantsReportOnlyLeaf,
+                wantsReportOnlyLeaf (AMD64 use only),
+                hasTailCalls (ARM/ARM64 only)
                 hasSizeOfEditAndContinuePreservedArea
+                hasReversePInvokeFrame,
+    - ReturnKind (Fat: 4 bits)
     - CodeLength
     - Prolog (if hasSecurityObject || hasGenericsInstContextStackSlot || hasGSCookie)
     - Epilog (if hasGSCookie)
@@ -29,9 +41,11 @@
     - GenericsInstContextStackSlot (if any)
     - StackBaseRegister (if any)
     - SizeOfEditAndContinuePreservedArea (if any)
+    - ReversePInvokeFrameSlot (if any)
     - SizeOfStackOutgoingAndScratchArea (#ifdef FIXED_STACK_PARAMETER_SCRATCH_AREA)
     - NumCallSites (#ifdef PARTIALLY_INTERRUPTIBLE_GC_SUPPORTED)
     - NumInterruptibleRanges
+
  2. Call sites offsets (#ifdef PARTIALLY_INTERRUPTIBLE_GC_SUPPORTED)
  3. Fully-interruptible ranges
  4. Slot table
@@ -87,9 +101,10 @@
 
 #include "gcinfotypes.h"
 
-#ifdef VERIFY_GCINFO
-#include "dbggcinfoencoder.h"
-#endif //VERIFY_GCINFO
+// As stated in issue #6008, GcInfoSize should be incorporated into debug builds. 
+#ifdef _DEBUG
+#define MEASURE_GCINFO
+#endif
 
 #ifdef MEASURE_GCINFO
 struct GcInfoSize
@@ -101,19 +116,23 @@ struct GcInfoSize
     size_t NumRanges;
     size_t NumRegs;
     size_t NumStack;
-    size_t NumEh;
+    size_t NumUntracked;
     size_t NumTransitions;
     size_t SizeOfCode;
+    size_t EncPreservedSlots;
 
+    size_t UntrackedSlotSize;
+    size_t NumUntrackedSize;
     size_t FlagsSize;
+    size_t RetKindSize;
     size_t CodeLengthSize;
     size_t ProEpilogSize;
     size_t SecObjSize;
     size_t GsCookieSize;
-    size_t GenericsCtxSize;
     size_t PspSymSize;
+    size_t GenericsCtxSize;
     size_t StackBaseSize;
-    size_t FrameMarkerSize;
+    size_t ReversePInvokeFrameSize;
     size_t FixedAreaSize;
     size_t NumCallSitesSize;
     size_t NumRangesSize;
@@ -124,7 +143,6 @@ struct GcInfoSize
     size_t RegSlotSize;
     size_t StackSlotSize;
     size_t CallSiteStateSize;
-    size_t NumEhSize;
     size_t EhPosSize;
     size_t EhStateSize;
     size_t ChunkPtrSize;
@@ -133,7 +151,7 @@ struct GcInfoSize
     size_t ChunkTransitionSize;
 
     GcInfoSize();
-    GcInfoSize& operator+=(GcInfoSize& other);
+    GcInfoSize& operator+=(const GcInfoSize& other);
     void Log(DWORD level, const char * header);
 };
 #endif
@@ -181,7 +199,6 @@ public:
 
     // bit 0 is the least significative bit
     void Write( size_t data, UINT32 count );
-    void Write( BitArray& a, UINT32 count );
 
     inline size_t GetBitCount()
     {
@@ -394,6 +411,11 @@ public:
                                     );
 
 
+    //------------------------------------------------------------------------
+    // ReturnKind
+    //------------------------------------------------------------------------
+
+    void SetReturnKind(ReturnKind returnKind);
 
     //------------------------------------------------------------------------
     // Miscellaneous method information
@@ -404,6 +426,7 @@ public:
     void SetGSCookieStackSlot( INT32 spOffsetGSCookie, UINT32 validRangeStart, UINT32 validRangeEnd );
     void SetPSPSymStackSlot( INT32 spOffsetPSPSym );
     void SetGenericsInstContextStackSlot( INT32 spOffsetGenericsContext, GENERIC_CONTEXTPARAM_TYPE type);
+    void SetReversePInvokeFrameSlot(INT32 spOffset);
     void SetIsVarArg();
     void SetCodeLength( UINT32 length );
 
@@ -413,10 +436,14 @@ public:
     // Number of slots preserved during EnC remap
     void SetSizeOfEditAndContinuePreservedArea( UINT32 size );
 
+#ifdef _TARGET_AMD64_
     // Used to only report a frame once for the leaf function/funclet
     // instead of once for each live function/funclet on the stack.
     // Called only by RyuJIT (not JIT64)
     void SetWantsReportOnlyLeaf();
+#elif defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
+    void SetHasTailCalls();
+#endif // _TARGET_AMD64_
 
 #ifdef FIXED_STACK_PARAMETER_SCRATCH_AREA
     void SetSizeOfStackOutgoingAndScratchArea( UINT32 size );
@@ -468,7 +495,11 @@ private:
     GcInfoArrayList<LifetimeTransition, 64> m_LifetimeTransitions;
 
     bool   m_IsVarArg;
+#if defined(_TARGET_AMD64_)
     bool   m_WantsReportOnlyLeaf;
+#elif defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
+    bool   m_HasTailCalls;
+#endif // _TARGET_AMD64_
     INT32  m_SecurityObjectStackSlot;
     INT32  m_GSCookieStackSlot;
     UINT32 m_GSCookieValidRangeStart;
@@ -476,9 +507,11 @@ private:
     INT32  m_PSPSymStackSlot;
     INT32  m_GenericsInstContextStackSlot;
     GENERIC_CONTEXTPARAM_TYPE m_contextParamType;
+    ReturnKind m_ReturnKind;
     UINT32 m_CodeLength;
     UINT32 m_StackBaseRegister;
     UINT32 m_SizeOfEditAndContinuePreservedArea;
+    INT32  m_ReversePInvokeFrameSlot;
     InterruptibleRange* m_pLastInterruptibleRange;
     
 #ifdef FIXED_STACK_PARAMETER_SCRATCH_AREA
@@ -525,10 +558,6 @@ private:
 #ifdef _DEBUG
     bool m_IsSlotTableFrozen;
 #endif
-
-#ifdef VERIFY_GCINFO
-    DbgGcInfo::GcInfoEncoder m_DbgEncoder;
-#endif    
 
 #ifdef MEASURE_GCINFO
     GcInfoSize m_CurrentMethodSize;

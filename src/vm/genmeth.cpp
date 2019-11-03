@@ -12,7 +12,6 @@
 #include "method.hpp"
 #include "field.h"
 #include "eeconfig.h"
-#include "perfcounters.h"
 #include "crst.h"
 #include "generics.h"
 #include "genericdict.h"
@@ -120,33 +119,9 @@ static MethodDesc* CreateMethodDesc(LoaderAllocator *pAllocator,
     {
         pMD->SetSynchronized();
     }
-    if (pTemplateMD->RequiresLinktimeCheck())
+    if (pTemplateMD->IsJitIntrinsic())
     {
-        pMD->SetRequiresLinktimeCheck();
-    }
-    if (pTemplateMD->RequiresInheritanceCheck())
-    {
-        pMD->SetRequiresInheritanceCheck();
-    }
-    if (pTemplateMD->ParentRequiresInheritanceCheck())
-    {
-        pMD->SetParentRequiresInheritanceCheck();
-    }
-    if (pTemplateMD->IsInterceptedForDeclSecurity())
-    {
-        pMD->SetInterceptedForDeclSecurity();
-    }
-    if (pTemplateMD->IsInterceptedForDeclSecurityCASDemandsOnly())
-    {
-        pMD->SetInterceptedForDeclSecurityCASDemandsOnly();
-    }
-    if (pTemplateMD->HasCriticalTransparentInfo())
-    {
-        pMD->SetCriticalTransparentInfo(pTemplateMD->IsCritical(), pTemplateMD->IsTreatAsSafe());
-    }
-    if (pTemplateMD->RequiresLinkTimeCheckHostProtectionOnly())
-    {
-        pMD->SetRequiresLinkTimeCheckHostProtectionOnly();
+        pMD->SetIsJitIntrinsic();
     }
 
     pMD->SetMemberDef(token);
@@ -380,73 +355,6 @@ InstantiatedMethodDesc::NewInstantiatedMethodDesc(MethodTable *pExactMT,
         // Crst goes out of scope here
         // We don't need to hold the crst while we build the MethodDesc, but we reacquire it later
     }
-    
-#ifdef FEATURE_PREJIT 
-    // This section is the search for an instantiation in the various NGEN images
-    // where we may have precompiled the instantiation.
-    // Never use dyn link zap items during ngen time. We will independently decide later 
-    // whether we want to store the item into ngen image or not.
-    if ((pNewMD == NULL) && !IsCompilationProcess())
-    {
-        // We need to know which domain the item must live in (DomainNeutral or AppDomain)
-        // <TODO>We can't use pDomain because at NGEN
-        // time this may not be accurate - this must be cleaned up as part of getting
-        // rid of GetLoaderModule() altogether.... </TODO>
-        BaseDomain * pRequiredDomain = BaseDomain::ComputeBaseDomain(
-            pExactMT->GetDomain(), 
-            pExactMT->GetInstantiation(), 
-            methodInst);
-
-        // Next look in each ngen'ed image in turn
-        AppDomain::AssemblyIterator assemblyIterator = GetAppDomain()->IterateAssembliesEx((AssemblyIterationFlags)(
-            kIncludeLoaded | 
-            (pExactMT->IsIntrospectionOnly() ? kIncludeIntrospection : kIncludeExecution)));
-        CollectibleAssemblyHolder<DomainAssembly *> pDomainAssembly;
-        while ((pNewMD == NULL) && assemblyIterator.Next(pDomainAssembly.This()))
-        {
-            // Make sure the domain of the NGEN'd images associated with the assembly matches...
-            // No need to check this when NGEN'ing
-            CollectibleAssemblyHolder<Assembly *> pAssembly = pDomainAssembly->GetLoadedAssembly();
-            if (GetAppDomain()->IsCompilationDomain() || (pAssembly->GetDomain() == pRequiredDomain))
-            {
-                DomainAssembly::ModuleIterator i = pDomainAssembly->IterateModules(kModIterIncludeLoaded);
-                while ((pNewMD == NULL) && i.Next())
-                {
-                    Module * pModule = i.GetLoadedModule();
-                    if (!pModule->HasNativeImage())
-                        continue;
-                    _ASSERTE(!pModule->IsCollectible());
-                    
-                    // We don't need to track references to normal (non-collectible) assemblies
-                    pNewMD = (InstantiatedMethodDesc *)pModule->GetInstMethodHashTable()->FindMethodDesc(
-                        TypeHandle(pExactMT), 
-                        pGenericMDescInRepMT->GetMemberDef(), 
-                        FALSE /* not forceBoxedEntryPoint */, 
-                        methodInst, 
-                        getWrappedCode);
-                    if (pNewMD == NULL)
-                        continue;
-#ifdef _DEBUG
-#ifndef DACCESS_COMPILE
-                    if (LoggingOn(LF_CLASSLOADER, LL_INFO10000))
-                    {
-                        StackSString methodName;
-                        pNewMD->CheckRestore();
-                        TypeString::AppendMethodDebug(methodName, pNewMD);
-                        LOG((LF_CLASSLOADER, LL_INFO10000, "Found method %S in non-preferred zap module %S\n", methodName.GetUnicode(), pModule->GetPath().GetUnicode()));
-                    }
-#endif //!DACCESS_COMPILE
-#endif //_DEBUG
-                }
-            }
-            else
-            {
-                LOG((LF_CLASSLOADER, LL_INFO10000, "Skipping assembly %S due to domain mismatch when searching for prejitted instantiation\n", 
-                    pAssembly->GetDebugName()));
-            }
-        }
-    }
-#endif // FEATURE_PREJIT
 
     if (pNewMD != NULL)
     {
@@ -465,7 +373,7 @@ InstantiatedMethodDesc::NewInstantiatedMethodDesc(MethodTable *pExactMT,
             {
                 if (pWrappedMD->IsSharedByGenericMethodInstantiations())
                 {
-                    pDL = pWrappedMD->AsInstantiatedMethodDesc()->m_pDictLayout;
+                    pDL = pWrappedMD->AsInstantiatedMethodDesc()->GetDictLayoutRaw();
                 }
             }
             else if (getWrappedCode)
@@ -1518,9 +1426,9 @@ void InstantiatedMethodDesc::SetupGenericMethodDefinition(IMDInternalImport *pIM
     S_SIZE_T dwAllocSize = S_SIZE_T(numTyPars) * S_SIZE_T(sizeof(TypeHandle));
 
     // the memory allocated for m_pMethInst will be freed if the declaring type fails to load
-    m_pPerInstInfo = (Dictionary *) pamTracker->Track(pAllocator->GetLowFrequencyHeap()->AllocMem(dwAllocSize));
+    m_pPerInstInfo.SetValue((Dictionary *) pamTracker->Track(pAllocator->GetLowFrequencyHeap()->AllocMem(dwAllocSize)));
 
-    TypeHandle * pInstDest = (TypeHandle *)m_pPerInstInfo;
+    TypeHandle * pInstDest = (TypeHandle *) IMD_GetMethodDictionaryNonNull();
     for(unsigned int i = 0; i < numTyPars; i++)
     {
         hEnumTyPars.EnumNext(&tkTyPar);
@@ -1553,7 +1461,7 @@ void InstantiatedMethodDesc::SetupWrapperStubWithInstantiations(MethodDesc* wrap
 
     m_pWrappedMethodDesc.SetValue(wrappedMD);
     m_wFlags2 = WrapperStubWithInstantiations | (m_wFlags2 & ~KindMask);
-    m_pPerInstInfo = (Dictionary*)pInst;
+    m_pPerInstInfo.SetValueMaybeNull((Dictionary*)pInst);
 
     _ASSERTE(FitsIn<WORD>(numGenericArgs));
     m_wNumGenericArgs = static_cast<WORD>(numGenericArgs);
@@ -1571,12 +1479,12 @@ void InstantiatedMethodDesc::SetupSharedMethodInstantiation(DWORD numGenericArgs
     _ASSERTE(numGenericArgs != 0);
     // Initially the dictionary layout is empty
     m_wFlags2 = SharedMethodInstantiation | (m_wFlags2 & ~KindMask);
-    m_pPerInstInfo = (Dictionary *)pPerInstInfo;
+    m_pPerInstInfo.SetValueMaybeNull((Dictionary *)pPerInstInfo);
 
     _ASSERTE(FitsIn<WORD>(numGenericArgs));
     m_wNumGenericArgs = static_cast<WORD>(numGenericArgs);
 
-    m_pDictLayout = pDL;
+    m_pDictLayout.SetValueMaybeNull(pDL);
 
 
     _ASSERTE(IMD_IsSharedByGenericMethodInstantiations());
@@ -1589,7 +1497,7 @@ void InstantiatedMethodDesc::SetupUnsharedMethodInstantiation(DWORD numGenericAr
 
     // The first field is never used
     m_wFlags2 = UnsharedMethodInstantiation | (m_wFlags2 & ~KindMask);
-    m_pPerInstInfo = (Dictionary *)pInst;
+    m_pPerInstInfo.SetValueMaybeNull((Dictionary *)pInst);
 
     _ASSERTE(FitsIn<WORD>(numGenericArgs));
     m_wNumGenericArgs = static_cast<WORD>(numGenericArgs);

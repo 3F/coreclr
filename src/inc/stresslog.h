@@ -17,7 +17,12 @@
 /* The log has a very simple structure, and it meant to be dumped from a NTSD 
    extention (eg. strike). There is no memory allocation system calls etc to purtub things */
 
-/* see the tools/strike/stressdump.cpp for the dumper utility that parses this log */
+// ******************************************************************************
+// WARNING!!!: These classes are used by SOS in the diagnostics repo. Values should 
+// added or removed in a backwards and forwards compatible way.
+// See: https://github.com/dotnet/diagnostics/blob/master/src/inc/stresslog.h
+// Parser: https://github.com/dotnet/diagnostics/blob/master/src/SOS/Strike/stressLogDump.cpp
+// ******************************************************************************
 
 /*************************************************************************************/
 
@@ -127,7 +132,7 @@
             LOG((facility, level, msg, data1, data2, data3, data4, data5, data6, data7));               \
             } while(0)
 
-#define STRESS_LOG_COND0(facility, level, msg) do {                           \
+#define STRESS_LOG_COND0(facility, level, cond, msg) do {                     \
             if (StressLog::LogOn(facility, level) && (cond))                  \
                 StressLog::LogMsg(level, facility, 0, msg);                   \
             LOG((facility, level, msg));                                      \
@@ -397,7 +402,7 @@ typedef USHORT
     static StressLog theLog;    // We only have one log, and this is it
 };
 
-typedef Holder<CRITSEC_COOKIE, StressLog::Enter, StressLog::Leave, NULL, CompareDefault<CRITSEC_COOKIE>, HSV_NoValidation> StressLogLockHolder;
+typedef Holder<CRITSEC_COOKIE, StressLog::Enter, StressLog::Leave, NULL, CompareDefault<CRITSEC_COOKIE>> StressLogLockHolder;
 
 #if defined(DACCESS_COMPILE)
 inline BOOL StressLog::LogOn(unsigned facility, unsigned level)
@@ -423,14 +428,14 @@ inline BOOL StressLog::LogOn(unsigned facility, unsigned level)
 struct StressMsg {
     union {
         struct {
-            DWORD_PTR numberOfArgs  : 3;   // at most 7 arguments
-            DWORD_PTR formatOffset  : 29;  // offset of string in mscorwks
+            uint32_t numberOfArgs  : 3;     // at most 7 arguments
+            uint32_t formatOffset  : 29;    // offset of string in mscorwks
         };
-        DWORD_PTR fmtOffsCArgs;            // for optimized access
+        uint32_t fmtOffsCArgs;    // for optimized access
     };
-    DWORD_PTR facility;                    // facility used to log the entry
-    unsigned __int64 timeStamp;            // time when mssg was logged
-    void*     args[0];                     // size given by numberOfArgs
+    uint32_t facility;                      // facility used to log the entry
+    uint64_t timeStamp;                     // time when mssg was logged
+    void*     args[0];                      // size given by numberOfArgs
 
     static const size_t maxArgCnt = 7;
     static const size_t maxOffset = 0x20000000;
@@ -512,17 +517,17 @@ struct StressLogChunk
 //     to the corresponding field
 class ThreadStressLog {
     ThreadStressLog* next;      // we keep a linked list of these
-    unsigned   threadId;        // the id for the thread using this buffer
-    BOOL       isDead;          // Is this thread dead 
+    uint64_t   threadId;        // the id for the thread using this buffer
+    uint8_t    isDead;          // Is this thread dead 
+    uint8_t    readHasWrapped;  // set when read ptr has passed chunListTail
+    uint8_t    writeHasWrapped; // set when write ptr has passed chunListHead
     StressMsg* curPtr;          // where packets are being put on the queue
     StressMsg* readPtr;         // where we are reading off the queue (used during dumping)
-    BOOL       readHasWrapped;      // set when read ptr has passed chunListTail
-    BOOL       writeHasWrapped;     // set when write ptr has passed chunListHead
     StressLogChunk * chunkListHead; //head of a list of stress log chunks
     StressLogChunk * chunkListTail; //tail of a list of stress log chunks
     StressLogChunk * curReadChunk; //the stress log chunk we are currently reading
     StressLogChunk * curWriteChunk; //the stress log chunk we are currently writing
-    LONG chunkListLength; // how many stress log chunks are in this stress log
+    long       chunkListLength; // how many stress log chunks are in this stress log
 
 #ifdef STRESS_LOG_READONLY
     FORCEINLINE StressMsg* AdvanceRead();
@@ -683,7 +688,7 @@ public:
     static const char* gcRootPromoteMsg()
     {
         STATIC_CONTRACT_LEAF;
-        return "    GCHeap::Promote: Promote GC Root *%p = %p MT = %pT\n";
+        return "    IGCHeap::Promote: Promote GC Root *%p = %p MT = %pT\n";
     }
 
     static const char* gcPlugMoveMsg()
@@ -698,14 +703,14 @@ public:
         return "StressLog TaskSwitch Marker\n";
     }
 
-    void LogMsg ( DWORD_PTR facility, int cArgs, const char* format, ... )
+    void LogMsg (unsigned facility, int cArgs, const char* format, ... )
     {
         va_list Args;
         va_start(Args, format);
         LogMsg (facility, cArgs, format, Args);
         va_end(Args);
     }
-    void LogMsg ( DWORD_PTR facility, int cArgs, const char* format, va_list Args);
+    void LogMsg (unsigned facility, int cArgs, const char* format, va_list Args);
 #ifdef STRESS_LOG_READONLY
     static size_t OffsetOfNext () {return offsetof (ThreadStressLog, next);}
     static size_t OffsetOfListHead () {return offsetof (ThreadStressLog, chunkListHead);}

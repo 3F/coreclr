@@ -46,7 +46,7 @@ public:
     // PInvoke stub helpers
     //-------------------------------------------------------
 
-    static FCDECL1(double,          DateMarshaler__ConvertToNative,  INT64 managedDate);
+    static FCDECL1_V(double,        DateMarshaler__ConvertToNative,  INT64 managedDate);
     static FCDECL1_V(INT64,         DateMarshaler__ConvertToManaged, double nativeDate);
 
     static FCDECL4(void,            ValueClassMarshaler__ConvertToNative, LPVOID pDest, LPVOID pSrc, MethodTable* pMT, OBJECTREF *ppCleanupWorkListOnStack);
@@ -74,18 +74,9 @@ public:
     static FCDECL1(StringObject*,   UriMarshaler__GetRawUriFromNative, ABI::Windows::Foundation::IUriRuntimeClass* pIUriRC);
     static FCDECL2(IUnknown*,       UriMarshaler__CreateNativeUriInstance, __in_ecount(strLen) CLR_CHAR* pRawUriObj, UINT strLen);
 
-    static ABI::Windows::UI::Xaml::Interop::INotifyCollectionChangedEventArgs* QCALLTYPE 
-        EventArgsMarshaler__CreateNativeNCCEventArgsInstance
-        (int action, ABI::Windows::UI::Xaml::Interop::IBindableVector *newItem, ABI::Windows::UI::Xaml::Interop::IBindableVector *oldItem, int newIndex, int oldIndex);
-
-    static ABI::Windows::UI::Xaml::Data::IPropertyChangedEventArgs* QCALLTYPE EventArgsMarshaler__CreateNativePCEventArgsInstance(HSTRING name);
-
     static FCDECL1(MethodDesc *,    GetDelegateInvokeMethod, DelegateObject *pThisUNSAFE);
     static FCDECL2(IInspectable *,  GetWinRTFactoryReturnValue, Object *pThisUNSAFE, PCODE pCtorEntry);
     static FCDECL2(IInspectable *,  GetOuterInspectable, Object *pThisUNSAFE, MethodDesc *pCtorMD);
-#ifdef MDA_SUPPORTED
-    static FCDECL2(ExceptionObject*,TriggerExceptionSwallowedMDA, ExceptionObject* pExceptionUNSAFE, PCODE pManagedTarget);
-#endif // MDA_SUPPORTED
 #endif // FEATURE_COMINTEROP
 
     static FCDECL0(void,            SetLastError            );
@@ -95,12 +86,6 @@ public:
     static FCDECL1(void*,           GetNDirectTarget,       NDirectMethodDesc* pNMD);
     static FCDECL2(void*,           GetDelegateTarget,      DelegateObject *pThisUNSAFE, UINT_PTR *ppStubArg);
 
-#ifndef FEATURE_CORECLR
-#ifndef _WIN64
-    static FCDECL3(void*,           GetFinalStubTarget, LPVOID pStubArg, LPVOID pUnmngThis, DWORD dwFlags);
-#endif // !_WIN64
-    static FCDECL1(void,            DemandPermission, NDirectMethodDesc *pNMD);
-#endif // !FEATURE_CORECLR
 
     static FCDECL2(void,            ThrowInteropParamException, UINT resID, UINT paramIdx);
     static FCDECL1(Object*,         GetHRExceptionObject,   HRESULT hr);
@@ -111,36 +96,24 @@ public:
 
     static FCDECL3(void*,           CreateCustomMarshalerHelper, MethodDesc* pMD, mdToken paramToken, TypeHandle hndManagedType);
 
-    static FCDECL1(void,            DecimalCanonicalizeInternal, DECIMAL *pDec);
     static FCDECL3(void,            FmtClassUpdateNativeInternal, Object* pObjUNSAFE, BYTE* pbNative, OBJECTREF *ppCleanupWorkListOnStack);
     static FCDECL2(void,            FmtClassUpdateCLRInternal, Object* pObjUNSAFE, BYTE* pbNative);
     static FCDECL2(void,            LayoutDestroyNativeInternal, BYTE* pbNative, MethodTable* pMT);
     static FCDECL1(Object*,         AllocateInternal,       EnregisteredTypeHandle typeHnd);
-    static FCDECL1(int,             AnsiStrlen,             __in_z char* pszStr);
     static FCDECL3(void,            MarshalToUnmanagedVaListInternal, va_list va, DWORD cbVaListSize, const VARARGS* pArgIterator);
     static FCDECL2(void,            MarshalToManagedVaListInternal, va_list va, VARARGS* pArgIterator);
     static FCDECL0(void*,           GetStubContext);
     static FCDECL2(void,            LogPinnedArgument, MethodDesc *localDesc, Object *nativeArg);
-#ifdef _WIN64
+#ifdef _TARGET_64BIT_
     static FCDECL0(void*,           GetStubContextAddr);
-#endif // _WIN64
+#endif // _TARGET_64BIT_
     static FCDECL1(DWORD,           CalcVaListSize, VARARGS *varargs);
     static FCDECL3(void,            ValidateObject, Object *pObjUNSAFE, MethodDesc *pMD, Object *pThisUNSAFE);
     static FCDECL3(void,            ValidateByref, void *pByref, MethodDesc *pMD, Object *pThisUNSAFE);
 
 #ifdef FEATURE_COMINTEROP
-    //-------------------------------------------------------
-    // Helper for the MDA RaceOnRCWCleanup
-    //-------------------------------------------------------
-    static FCDECL1(void,            StubRegisterRCW,        Object *unsafe_pThis);
-    static FCDECL1(void,            StubUnregisterRCW,      Object *unsafe_pThis);
     static FCDECL1(Object*,         GetWinRTFactoryObject,  MethodDesc *pCMD);    
 #endif // FEATURE_COMINTEROP
-
-#ifdef MDA_SUPPORTED
-    static FCDECL0(void,            TriggerGCForMDA);    
-    static FCDECL1(void,            CheckCollectedDelegateMDA, LPVOID pEntryThunk);
-#endif // MDA_SUPPORTED
 
 #ifdef PROFILING_SUPPORTED
     //-------------------------------------------------------
@@ -159,7 +132,7 @@ public:
     static FCDECL2(ReflectClassBaseObject *,    WinRTTypeNameConverter__GetTypeFromWinRTTypeName, StringObject *pWinRTTypeNameUNSAFE, CLR_BOOL *pbIsPrimitive);
 #endif // FEATURE_COMINTEROP
 
-#ifdef FEATURE_STUBS_AS_IL
+#ifdef FEATURE_MULTICASTSTUB_AS_IL
     static FCDECL2(void,            MulticastDebuggerTraceHelper, Object*, INT32);
 #endif
 };

@@ -3,159 +3,140 @@
 usage()
 {
     echo "Builds the NuGet packages from the binaries that were built in the Build product binaries step."
-    echo "Usage: build-packages [arch] [configuration]"
-    echo "arch can be x64, x86, arm, arm64 (default is x64)"
-    echo "configuration can be release, checked, debug (default is debug)"
+    echo "Usage: build-packages -BuildArch -BuildType"
+    echo "BuildArch can be x64, x86, arm, arm64 (default is x64)"
+    echo "BuildType can be release, checked, debug (default is debug)"
     echo
     exit 1
 }
 
-__ProjectRoot="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-build_packages_log=$__ProjectRoot/build-packages.log
-binclashlog=$__ProjectRoot/binclash.log
-binclashloggerdll=$__ProjectRoot/Tools/Microsoft.DotNet.Build.Tasks.dll
-RuntimeOS=ubuntu.$VERSION_ID
+initDistroRid()
+{
+    source init-distro-rid.sh
 
-__MSBuildPath=$__ProjectRoot/Tools/MSBuild.exe
+    local passedRootfsDir=""
 
-# Parse arguments
-__BuildArch=x64
-__BuildType=Debug
-
-allargs="$@"
-
-echo -e "Running build-packages.sh $allargs" > $build_packages_log
-
-if [ "$allargs" == "-h" ] || [ "$allargs" == "--help" ]; then
-    usage
-fi
-
-while :; do
-    if [ $# -le 0 ]; then
-        break
+    # Only pass ROOTFS_DIR if __DoCrossArchBuild is specified.
+    if (( ${__CrossBuild} == 1 )); then
+        passedRootfsDir=${ROOTFS_DIR}
     fi
 
-    lowerI="$(echo $1 | awk '{print tolower($0)}')"
-    case $lowerI in
-        -\?|-h|--help)
-            usage
-            exit 1
-            ;;
+    initDistroRidGlobal ${__BuildOS} ${__BuildArch} ${__IsPortableBuild} ${passedRootfsDir}
+}
 
-        x86)
-            __BuildArch=x86
-            ;;
-
-        x64)
-            __BuildArch=x64
-            ;;
-
-        arm)
-            __BuildArch=arm
-            ;;
-
-        arm64)
-            __BuildArch=arm64
-            ;;
-        debug)
-            __BuildType=Debug
-            ;;
-        release)
-            __BuildType=Release
-            ;;
-        checked)
-            __BuildType=Checked
-    esac
-    shift
-done
+__ProjectRoot="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+__IsPortableBuild=1
+__CrossBuild=0
 
 # Use uname to determine what the OS is.
 OSName=$(uname -s)
 case $OSName in
     Linux)
         __BuildOS=Linux
+        __HostOS=Linux
         ;;
 
     Darwin)
         __BuildOS=OSX
+        __HostOS=OSX
         ;;
 
     FreeBSD)
         __BuildOS=FreeBSD
+        __HostOS=FreeBSD
         ;;
 
     OpenBSD)
         __BuildOS=OpenBSD
+        __HostOS=OpenBSD
         ;;
 
     NetBSD)
         __BuildOS=NetBSD
+        __HostOS=NetBSD
         ;;
 
     SunOS)
         __BuildOS=SunOS
+        __HostOS=SunOS
         ;;
 
     *)
         echo "Unsupported OS $OSName detected, configuring as if for Linux"
         __BuildOS=Linux
+        __HostOS=Linux
         ;;
 esac
 
-if [ "$__BuildOS" == "Linux" ]; then
-    if [ ! -e /etc/os-release ]; then
-        echo "WARNING: Can not determine runtime id for current distro."
-        export __DistroRid=""
-    else
-        source /etc/os-release
-        export __DistroRid="$ID.$VERSION_ID-$__BuildArch"
+buildArgs=
+unprocessedBuildArgs=
+
+# TODO: get rid of argument processing entirely once we remove the
+# uses of -Arg=Value style in buildpipeline.
+while :; do
+    if [ $# -le 0 ]; then
+        break
     fi
+
+    case "$1" in
+        -\?|-h|--help)
+            usage
+            exit 1
+            ;;
+        -BuildArch=*)
+            __BuildArch=$(echo $1| cut -d'=' -f 2)
+            buildArgs="$buildArgs /p:__BuildArch=$__BuildArch"
+            ;;
+        -BuildType=*)
+            __Type=$(echo $1| cut -d'=' -f 2)
+            buildArgs="$buildArgs /p:__BuildType=$__Type"
+            ;;
+        -OfficialBuildId=*|-officialbuildid=*)
+            __Id=$(echo $1| cut -d'=' -f 2)
+            buildArgs="$buildArgs /p:OfficialBuildId=$__Id"
+            ;;
+        -__DoCrossArchBuild=*)
+            __CrossBuild=$(echo $1| cut -d'=' -f 2)
+            buildArgs="$buildArgs /p:__DoCrossArchBuild=$__CrossBuild"
+            ;;
+        -portablebuild=false)
+            buildArgs="$buildArgs /p:PortableBuild=false"
+            __IsPortableBuild=0
+            ;;
+        --)
+            ;;
+        *)
+            unprocessedBuildArgs="$unprocessedBuildArgs $1"
+    esac
+    shift
+done
+
+initDistroRid
+
+if [ "${__DistroRid}" = "linux-musl-arm64" ]; then
+    # ArchGroup is generally determined from parsing {}-{}; however, linux-musl-arm64
+    # will break this logic. To work around this, pass ArchGroup explicitely.
+
+    export ArchGroup=arm64
+
+    # Currently the decision tree in src/.nuget/dirs.props will incorrectly
+    # reparse the already calculated __DistroRid. For linux-musl-arm64 use
+    # the hack/hook to specifically bypass this logic.
+    export OutputRID=${__DistroRid}
 fi
 
-__IntermediatesDir="$__ProjectRoot/bin/obj/$__BuildOS.$__BuildArch.$__BuildType"
-
-# Ensure that MSBuild is available
-echo "Running init-tools.sh"
-$__ProjectRoot/init-tools.sh
-
-    echo "Generating nuget packages for "$__BuildOS
-
-    # Invoke MSBuild
-    $__ProjectRoot/Tools/corerun "$__MSBuildPath" /nologo "$__ProjectRoot/src/.nuget/Microsoft.NETCore.Runtime.CoreCLR/Microsoft.NETCore.Runtime.CoreCLR.builds" /verbosity:minimal "/fileloggerparameters:Verbosity=normal;LogFile=$binclashlog" /t:Build /p:__BuildOS=$__BuildOS /p:__BuildArch=$__BuildArch /p:__BuildType=$__BuildType /p:__IntermediatesDir=$__IntermediatesDir /p:BuildNugetPackage=false /p:UseSharedCompilation=false
-
-if [ $? -ne 0 ]; then
-    echo -e "\nAn error occurred. Aborting build-packages.sh ." >> $build_packages_log
-    echo "ERROR: An error occurred while building packages, see $build_packages_log for more details."
-    exit 1
-fi
-
-    # Build the JIT packages
-    $__ProjectRoot/Tools/corerun "$__MSBuildPath" /nologo "$__ProjectRoot/src/.nuget/Microsoft.NETCore.Jit/Microsoft.NETCore.Jit.builds" /verbosity:minimal "/fileloggerparameters:Verbosity=normal;LogFile=$binclashlog" /t:Build /p:__BuildOS=$__BuildOS /p:__BuildArch=$__BuildArch /p:__BuildType=$__BuildType /p:__IntermediatesDir=$__IntermediatesDir /p:BuildNugetPackage=false /p:UseSharedCompilation=false
-
-if [ $? -ne 0 ]; then
-    echo -e "\nAn error occurred. Aborting build-packages.sh ." >> $build_packages_log
-    echo "ERROR: An error occurred while building packages, see $build_packages_log for more details."
-    exit 1
-fi
-
-    # Build the ILAsm package
-    $__ProjectRoot/Tools/corerun "$__MSBuildPath" /nologo "$__ProjectRoot/src/.nuget/Microsoft.NETCore.ILAsm/Microsoft.NETCore.ILAsm.builds" /verbosity:minimal "/fileloggerparameters:Verbosity=normal;LogFile=$binclashlog" /t:Build /p:__BuildOS=$__BuildOS /p:__BuildArch=$__BuildArch /p:__BuildType=$__BuildType /p:__IntermediatesDir=$__IntermediatesDir /p:BuildNugetPackage=false /p:UseSharedCompilation=false
-
-if [ $? -ne 0 ]; then
-    echo -e "\nAn error occurred. Aborting build-packages.sh ." >> $build_packages_log
-    echo "ERROR: An error occurred while building packages, see $build_packages_log for more details."
-    exit 1
-fi
-
-    # Build the ILDAsm package
-    $__ProjectRoot/Tools/corerun "$__MSBuildPath" /nologo "$__ProjectRoot/src/.nuget/Microsoft.NETCore.ILDAsm/Microsoft.NETCore.ILDAsm.builds" /verbosity:minimal "/fileloggerparameters:Verbosity=normal;LogFile=$binclashlog" /t:Build /p:__BuildOS=$__BuildOS /p:__BuildArch=$__BuildArch /p:__BuildType=$__BuildType /p:__IntermediatesDir=$__IntermediatesDir /p:BuildNugetPackage=false /p:UseSharedCompilation=false
-
-if [ $? -ne 0 ]; then
-    echo -e "\nAn error occurred. Aborting build-packages.sh ." >> $build_packages_log
-    echo "ERROR: An error occurred while building packages, see $build_packages_log for more details."
+logFile=$__ProjectRoot/bin/Logs/build-packages.binlog
+$__ProjectRoot/eng/common/build.sh -r -b -projects $__ProjectRoot/src/.nuget/packages.builds \
+                                   -verbosity minimal -bl:$logFile \
+                                   /p:__BuildOS=$__BuildOS /p:ArcadeBuild=true \
+                                   /p:PortableBuild=true /p:__DistroRid=$__DistroRid \
+                                   $buildArgs $unprocessedBuildArgs
+if [ $? -ne 0 ]
+then
+    echo "ERROR: An error occurred while building packages; See log for more details:"
+    echo "    $logFile"
     exit 1
 fi
 
 echo "Done building packages."
-echo -e "\nDone building packages." >> $build_packages_log
 exit 0

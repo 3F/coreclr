@@ -13,8 +13,12 @@
 #define _READYTORUNINFO_H_
 
 #include "nativeformatreader.h"
+#include "inlinetracking.h"
+#include "wellknownattributes.h"
 
 typedef DPTR(struct READYTORUN_SECTION) PTR_READYTORUN_SECTION;
+
+class PrepareCodeConfig;
 
 typedef DPTR(class ReadyToRunInfo) PTR_ReadyToRunInfo;
 class ReadyToRunInfo
@@ -36,28 +40,38 @@ class ReadyToRunInfo
     NativeFormat::NativeArray       m_methodDefEntryPoints;
     NativeFormat::NativeHashtable   m_instMethodEntryPoints;
     NativeFormat::NativeHashtable   m_availableTypesHashtable;
+    NativeFormat::NativeHashtable   m_pMetaDataHashtable;
+    NativeFormat::NativeCuckooFilter m_attributesPresence;
 
     Crst                            m_Crst;
     PtrHashMap                      m_entryPointToMethodDescMap;
 
-    ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader);
+    PTR_PersistentInlineTrackingMapR2R m_pPersistentInlineTrackingMap;
+
+    ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader, AllocMemTracker *pamTracker);
 
 public:
     static BOOL IsReadyToRunEnabled();
 
     static PTR_ReadyToRunInfo Initialize(Module * pModule, AllocMemTracker *pamTracker);
 
-    PCODE GetEntryPoint(MethodDesc * pMD, BOOL fFixups = TRUE);
+    PCODE GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig, BOOL fFixups);
 
     MethodDesc * GetMethodDescForEntryPoint(PCODE entryPoint);
 
     BOOL HasHashtableOfTypes();
-    BOOL TryLookupTypeTokenFromName(NameHandle *pName, mdToken * pFoundTypeToken);
+    BOOL TryLookupTypeTokenFromName(const NameHandle *pName, mdToken * pFoundTypeToken);
 
     BOOL SkipTypeValidation()
     {
         LIMITED_METHOD_CONTRACT;
         return m_pHeader->Flags & READYTORUN_FLAG_SKIP_TYPE_VALIDATION;
+    }
+
+    BOOL IsPartial()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_pHeader->Flags & READYTORUN_FLAG_PARTIAL;
     }
 
     PTR_PEImageLayout GetImage()
@@ -103,10 +117,31 @@ public:
         ReadyToRunInfo * m_pInfo;
         int m_methodDefIndex;
 
+        NativeFormat::NativeHashtable::AllEntriesEnumerator m_genericEnum;
+        NativeFormat::NativeParser m_genericParser;
+        uint m_genericCurrentOffset;
+        RID m_genericCurrentRid;
+        PCCOR_SIGNATURE m_genericCurrentSig;
+
+        void ParseGenericMethodSignatureAndRid(uint *offset, RID *rid);
+
     public:
-        MethodIterator(ReadyToRunInfo * pInfo)
-            : m_pInfo(pInfo), m_methodDefIndex(-1)
+        MethodIterator(ReadyToRunInfo * pInfo) : 
+            m_pInfo(pInfo), 
+            m_methodDefIndex(-1),
+            m_genericEnum(),
+            m_genericParser(),
+            m_genericCurrentOffset(-1),
+            m_genericCurrentRid(-1),
+            m_genericCurrentSig(NULL)
         {
+            NativeFormat::PTR_NativeHashtable pHash = NULL;
+            if (!pInfo->m_instMethodEntryPoints.IsNull())
+            {
+                pHash = NativeFormat::PTR_NativeHashtable(&pInfo->m_instMethodEntryPoints);
+            }
+
+            m_genericEnum = NativeFormat::NativeHashtable::AllEntriesEnumerator(pHash);
         }
 
         BOOL Next();
@@ -118,10 +153,19 @@ public:
 
     static DWORD GetFieldBaseOffset(MethodTable * pMT);
 
+    PTR_PersistentInlineTrackingMapR2R GetInlineTrackingMap()
+    {
+        return m_pPersistentInlineTrackingMap;
+    }
+
+    bool MayHaveCustomAttribute(WellKnownAttribute attribute, mdToken token);
+    void DisableCustomAttributeFilter();
+
 private:
     BOOL GetTypeNameFromToken(IMDInternalImport * pImport, mdToken mdType, LPCUTF8 * ppszName, LPCUTF8 * ppszNameSpace);
     BOOL GetEnclosingToken(IMDInternalImport * pImport, mdToken mdType, mdToken * pEnclosingToken);
     BOOL CompareTypeNameOfTokens(mdToken mdToken1, IMDInternalImport * pImport1, mdToken mdToken2, IMDInternalImport * pImport2);
+	BOOL IsImageVersionAtLeast(int majorVersion, int minorVersion);
 };
 
 class DynamicHelpers
@@ -138,7 +182,7 @@ public:
     static PCODE CreateReturnIndirConst(LoaderAllocator * pAllocator, TADDR arg, INT8 offset);
     static PCODE CreateHelperWithTwoArgs(LoaderAllocator * pAllocator, TADDR arg, PCODE target);
     static PCODE CreateHelperWithTwoArgs(LoaderAllocator * pAllocator, TADDR arg, TADDR arg2, PCODE target);
-    static PCODE CreateDictionaryLookupHelper(LoaderAllocator * pAllocator, CORINFO_RUNTIME_LOOKUP * pLookup);
+    static PCODE CreateDictionaryLookupHelper(LoaderAllocator * pAllocator, CORINFO_RUNTIME_LOOKUP * pLookup, DWORD dictionaryIndexAndSlot, Module * pModule);
 };
 
 #endif // _READYTORUNINFO_H_

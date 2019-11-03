@@ -15,8 +15,13 @@
 
 #define READYTORUN_SIGNATURE 0x00525452 // 'RTR'
 
-#define READYTORUN_MAJOR_VERSION 0x0001
-#define READYTORUN_MINOR_VERSION 0x0002
+#define READYTORUN_MAJOR_VERSION 0x0003
+#define READYTORUN_MINOR_VERSION 0x0001
+#define MINIMUM_READYTORUN_MAJOR_VERSION 0x003
+// R2R Version 2.1 adds the READYTORUN_SECTION_INLINING_INFO section
+// R2R Version 2.2 adds the READYTORUN_SECTION_PROFILEDATA_INFO section
+// R2R Version 3.0 changes calling conventions to correctly handle explicit structures to spec.
+//     R2R 3.0 is not backward compatible with 2.x.
 
 struct READYTORUN_HEADER
 {
@@ -43,6 +48,8 @@ enum ReadyToRunFlag
     // Set if the original IL assembly was platform-neutral
     READYTORUN_FLAG_PLATFORM_NEUTRAL_SOURCE         = 0x00000001,
     READYTORUN_FLAG_SKIP_TYPE_VALIDATION            = 0x00000002,
+    // Set of methods with native code was determined using profile data
+    READYTORUN_FLAG_PARTIAL                         = 0x00000004,
 };
 
 enum ReadyToRunSectionType
@@ -57,6 +64,16 @@ enum ReadyToRunSectionType
     // 107 used by an older format of READYTORUN_SECTION_AVAILABLE_TYPES
     READYTORUN_SECTION_AVAILABLE_TYPES              = 108,
     READYTORUN_SECTION_INSTANCE_METHOD_ENTRYPOINTS  = 109,
+    READYTORUN_SECTION_INLINING_INFO                = 110, // Added in V2.1
+    READYTORUN_SECTION_PROFILEDATA_INFO             = 111, // Added in V2.2
+    READYTORUN_SECTION_MANIFEST_METADATA            = 112, // Added in V2.3
+    READYTORUN_SECTION_ATTRIBUTEPRESENCE            = 113, // Added in V3.1
+
+	// If you add a new section consider whether it is a breaking or non-breaking change.
+	// Usually it is non-breaking, but if it is preferable to have older runtimes fail
+	// to load the image vs. ignoring the new section it could be marked breaking.
+	// Increment the READYTORUN_MINOR_VERSION (non-breaking) or READYTORUN_MAJOR_VERSION
+	// (breaking) as appropriate.
 };
 
 //
@@ -166,6 +183,9 @@ enum ReadyToRunFixupKind
     READYTORUN_FIXUP_Check_FieldOffset          = 0x2B,
 
     READYTORUN_FIXUP_DelegateCtor               = 0x2C, /* optimized delegate ctor */
+    READYTORUN_FIXUP_DeclaringTypeHandle        = 0x2D,
+
+    READYTORUN_FIXUP_IndirectPInvokeTarget      = 0x2E, /* Target of an inlined pinvoke */
 };
 
 //
@@ -216,8 +236,15 @@ enum ReadyToRunHelper
     READYTORUN_HELPER_MemSet                    = 0x40,
     READYTORUN_HELPER_MemCpy                    = 0x41,
 
+    // PInvoke helpers
+    READYTORUN_HELPER_PInvokeBegin              = 0x42,
+    READYTORUN_HELPER_PInvokeEnd                = 0x43,
+
     // Get string handle lazily
     READYTORUN_HELPER_GetString                 = 0x50,
+
+    // Used by /Tuning for Profile optimizations
+    READYTORUN_HELPER_LogMethodEnter            = 0x51,
 
     // Reflection helpers
     READYTORUN_HELPER_GetRuntimeTypeHandle      = 0x54,
@@ -229,6 +256,7 @@ enum ReadyToRunHelper
     READYTORUN_HELPER_Unbox                     = 0x5A,
     READYTORUN_HELPER_Unbox_Nullable            = 0x5B,
     READYTORUN_HELPER_NewMultiDimArr            = 0x5C,
+    READYTORUN_HELPER_NewMultiDimArr_NonVarArg  = 0x5D,
 
     // Helpers used with generic handle lookup cases
     READYTORUN_HELPER_NewObject                 = 0x60,
@@ -277,11 +305,15 @@ enum ReadyToRunHelper
     READYTORUN_HELPER_DblRound                  = 0xE2,
     READYTORUN_HELPER_FltRound                  = 0xE3,
 
-#ifndef _TARGET_X86_
+#ifdef WIN64EXCEPTIONS
     // Personality rountines
     READYTORUN_HELPER_PersonalityRoutine        = 0xF0,
     READYTORUN_HELPER_PersonalityRoutineFilterFunclet = 0xF1,
 #endif
+
+    // Synchronized methods
+    READYTORUN_HELPER_MonitorEnter              = 0xF8,
+    READYTORUN_HELPER_MonitorExit               = 0xF9,
 
     //
     // Deprecated/legacy

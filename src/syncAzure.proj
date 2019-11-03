@@ -3,9 +3,9 @@
   <Import Project="$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildThisFileDirectory), dir.props))\dir.props" />
 
   <PropertyGroup>
-    <ContainerNamePrefix Condition="'$(ContainerNamePrefix)' == ''">coreclr-$(PreReleaseLabel)</ContainerNamePrefix>
-    <ContainerName Condition="'$(ContainerNamePrefix)' != '' and '$(BuildNumberMajor)' != '' and '$(BuildNumberMinor)' != ''">$(ContainerNamePrefix)-$(BuildNumberMajor)-$(BuildNumberMinor)</ContainerName>
-    <DownloadDirectory>$(PackagesDir)AzureTransfer</DownloadDirectory>
+    <ContainerName>$(ContainerName.Replace(".","-"))</ContainerName>
+    <BlobNamePrefix>$(__BlobNamePrefix)</BlobNamePrefix>
+    <DownloadDirectory Condition="'$(DownloadDirectory)' == ''">$(PackagesDir)AzureTransfer</DownloadDirectory>
   </PropertyGroup>
 
   <Import Project="$(ToolsDir)SyncCloudContent.targets" />
@@ -13,7 +13,10 @@
   <Target Name="ValidateRequiredProperties">
     <Error Condition="'$(CloudDropAccountName)' == ''" Text="Missing property CloudDropAccountName." />
     <Error Condition="'$(CloudDropAccessToken)' == ''" Text="Missing property CloudDropAccessToken." />
+    <Error Condition="'$(ContainerName)' == '' and '$(PublishTestNativeBins)' == 'true'" Text="Missing property Container." />
+    <Error Condition="'$(RuntimeId)' == '' and '$(PublishTestNativeBins)' == 'true'" Text="Missing property RuntimeId." />
   </Target>
 
-  <Target Name="Build" DependsOnTargets="ValidateRequiredProperties;DownloadBlobsFromAzureTargets" />
+  <!-- We don't want to run sync on test native binaries for Windows, since those don't get published -->
+  <Target Name="Build" DependsOnTargets="ValidateRequiredProperties;DownloadBlobsFromAzureTargets" Condition="!$(RuntimeId.ToLower().StartsWith('win'))"/>
 </Project>

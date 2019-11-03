@@ -22,9 +22,6 @@ enum PrecodeType {
 #ifdef HAS_NDIRECT_IMPORT_PRECODE
     PRECODE_NDIRECT_IMPORT  = NDirectImportPrecode::Type,
 #endif // HAS_NDIRECT_IMPORT_PRECODE
-#ifdef HAS_REMOTING_PRECODE
-    PRECODE_REMOTING        = RemotingPrecode::Type,
-#endif // HAS_REMOTING_PRECODE
 #ifdef HAS_FIXUP_PRECODE
     PRECODE_FIXUP           = FixupPrecode::Type,
 #endif // HAS_FIXUP_PRECODE
@@ -62,16 +59,6 @@ public:
 
 private:
 #endif // HAS_NDIRECT_IMPORT_PRECODE
-
-#ifdef HAS_REMOTING_PRECODE
-    RemotingPrecode* AsRemotingPrecode()
-    {
-        LIMITED_METHOD_CONTRACT;
-        SUPPORTS_DAC;
-
-        return dac_cast<PTR_RemotingPrecode>(this);
-    }
-#endif // HAS_REMOTING_PRECODE
 
 #ifdef HAS_FIXUP_PRECODE
     FixupPrecode* AsFixupPrecode()
@@ -170,6 +157,11 @@ public:
             align = 8;
 #endif // _TARGET_X86_ && HAS_FIXUP_PRECODE
 
+#if defined(_TARGET_ARM_) && defined(HAS_COMPACT_ENTRYPOINTS)
+        // Precodes have to be aligned to allow fast compact entry points check
+        _ASSERTE (align >= sizeof(void*));
+#endif // _TARGET_ARM_ && HAS_COMPACT_ENTRYPOINTS
+
         return align;
     }
 
@@ -215,12 +207,6 @@ public:
         WRAPPER_NO_CONTRACT;
         SUPPORTS_DAC;
 
-#ifdef HAS_REMOTING_PRECODE
-        // Remoting precode is special case
-        if (GetType() == PRECODE_REMOTING)
-            return FALSE;
-#endif
-
         return IsPointingTo(GetTarget(), pNativeCode);
     }
 
@@ -256,7 +242,8 @@ public:
     void Init(PrecodeType t, MethodDesc* pMD, LoaderAllocator *pLoaderAllocator);
 
 #ifndef DACCESS_COMPILE
-    BOOL SetTargetInterlocked(PCODE target);
+    void ResetTargetInterlocked();
+    BOOL SetTargetInterlocked(PCODE target, BOOL fOnlyRedirectFromPrestub = TRUE);
 
     // Reset precode to point to prestub
     void Reset();
@@ -311,13 +298,8 @@ public:
 
     static Precode * GetPrecodeForTemporaryEntryPoint(TADDR temporaryEntryPoints, int index);
 
-    static SIZE_T SizeOfTemporaryEntryPoints(PrecodeType t, int count);
-    static SIZE_T SizeOfTemporaryEntryPoints(TADDR temporaryEntryPoints, int count)
-    {
-        WRAPPER_NO_CONTRACT;
-        SUPPORTS_DAC;
-        return SizeOfTemporaryEntryPoints(PTR_Precode(temporaryEntryPoints)->GetType(), count);
-    }
+    static SIZE_T SizeOfTemporaryEntryPoints(PrecodeType t, bool preallocateJumpStubs, int count);
+    static SIZE_T SizeOfTemporaryEntryPoints(TADDR temporaryEntryPoints, int count);
 
     static TADDR AllocateTemporaryEntryPoints(MethodDescChunk* pChunk,
         LoaderAllocator *pLoaderAllocator, AllocMemTracker *pamTracker);

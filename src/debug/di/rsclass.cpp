@@ -240,36 +240,38 @@ HRESULT CordbClass::GetStaticFieldValue2(CordbModule * pModule,
     CORDB_ADDRESS pRmtStaticValue = NULL;
     CordbProcess * pProcess = pModule->GetProcess();
 
-    if (pFieldData->m_fFldIsCollectibleStatic)
+    if (!pFieldData->m_fFldIsTLS)
     {
-        EX_TRY
+        if (pFieldData->m_fFldIsCollectibleStatic)
         {
-            pRmtStaticValue = pProcess->GetDAC()->GetCollectibleTypeStaticAddress(pFieldData->m_vmFieldDesc, 
-                                                                                  pModule->GetAppDomain()->GetADToken());
+            EX_TRY
+            {
+                pRmtStaticValue = pProcess->GetDAC()->GetCollectibleTypeStaticAddress(pFieldData->m_vmFieldDesc, 
+                                                                                      pModule->GetAppDomain()->GetADToken());
+            }
+            EX_CATCH_HRESULT(hr);
+            if(FAILED(hr))
+            {
+                return hr;
+            }
         }
-        EX_CATCH_HRESULT(hr);
-        if(FAILED(hr)) 
+        else
         {
-            return hr;
+            // Statics never move, so we always address them using their absolute address.
+            _ASSERTE(pFieldData->OkToGetOrSetStaticAddress());
+            pRmtStaticValue = pFieldData->GetStaticAddress();
         }
-    }
-    else if (!pFieldData->m_fFldIsTLS && !pFieldData->m_fFldIsContextStatic)
-    {
-        // Statics never move, so we always address them using their absolute address.
-        _ASSERTE(pFieldData->OkToGetOrSetStaticAddress());
-        pRmtStaticValue = pFieldData->GetStaticAddress();
     }
     else
     {
-        // We've got a thread or context local static
+        // We've got a thread local static
 
         if( fEnCHangingField )
         {
             // fEnCHangingField is set for fields added with EnC which hang off the FieldDesc.
-            // Thread-local and context-local statics cannot be added with EnC, so we shouldn't be here
-            // if this is an EnC field is thread- or context-local.
+            // Thread-local statics cannot be added with EnC, so we shouldn't be here
+            // if this is an EnC field is thread-local.
             _ASSERTE(!pFieldData->m_fFldIsTLS );
-            _ASSERTE(!pFieldData->m_fFldIsContextStatic );
         }
         else
         {
@@ -286,8 +288,8 @@ HRESULT CordbClass::GetStaticFieldValue2(CordbModule * pModule,
 
             EX_TRY
             {
-                pRmtStaticValue = pProcess->GetDAC()->GetThreadOrContextStaticAddress(pFieldData->m_vmFieldDesc, 
-                                                                                      pThread->m_vmThreadToken);
+                pRmtStaticValue = pProcess->GetDAC()->GetThreadStaticAddress(pFieldData->m_vmFieldDesc,
+                                                                             pThread->m_vmThreadToken);
             }
             EX_CATCH_HRESULT(hr);
             if(FAILED(hr)) 
@@ -331,8 +333,7 @@ HRESULT CordbClass::GetStaticFieldValue2(CordbModule * pModule,
     bool fIsBoxed = (fIsValueClass &&
                      !pFieldData->m_fFldIsRVA &&
                      !pFieldData->m_fFldIsPrimitive &&
-                     !pFieldData->m_fFldIsTLS &&
-                     !pFieldData->m_fFldIsContextStatic);
+                     !pFieldData->m_fFldIsTLS);
 
     TargetBuffer remoteValue(pRmtStaticValue, CordbValue::GetSizeForType(pType, fIsBoxed ? kBoxed : kUnboxed));
     ICorDebugValue * pValue;
@@ -807,7 +808,7 @@ void CordbClass::Init(ClassLoadLevel desiredLoadLevel)
 BOOL CordbClass::GotUnallocatedStatic(DacDbiArrayList<FieldData> * pFieldList)
 {
     BOOL fGotUnallocatedStatic = FALSE;
-    int count = 0;
+    unsigned int count = 0;
     while ((count < pFieldList->Count()) && !fGotUnallocatedStatic )
     {
         if ((*pFieldList)[count].OkToGetOrSetStaticAddress() &&
@@ -815,7 +816,7 @@ BOOL CordbClass::GotUnallocatedStatic(DacDbiArrayList<FieldData> * pFieldList)
         {
             // The address for a regular static field isn't available yet
             // How can this happen?  Statics appear to get allocated during domain load.
-            // There may be some lazieness or a race-condition involved.
+            // There may be some laziness or a race-condition involved.
             fGotUnallocatedStatic = TRUE;
         }
         ++count;
@@ -1144,7 +1145,7 @@ HRESULT CordbClass::SearchFieldInfo(
     FieldData **ppFieldData
 )
 {
-    int i;
+    unsigned int i;
 
     IMetaDataImport * pImport = pModule->GetMetaDataImporter(); // throws      
 

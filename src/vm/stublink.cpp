@@ -12,7 +12,6 @@
 #include "threads.h"
 #include "excep.h"
 #include "stublink.h"
-#include "perfcounters.h"
 #include "stubgen.h"
 #include "stublink.inl"
 
@@ -132,7 +131,6 @@ FindStubFunctionEntry (
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
     }
     CONTRACTL_END
 
@@ -195,7 +193,7 @@ FindStubFunctionEntry (
 }
 
 
-void UnregisterUnwindInfoInLoaderHeapCallback (PVOID pvAllocationBase, SIZE_T cbReserved)
+bool UnregisterUnwindInfoInLoaderHeapCallback (PVOID pvArgs, PVOID pvAllocationBase, SIZE_T cbReserved)
 {
     CONTRACTL
     {
@@ -251,6 +249,8 @@ void UnregisterUnwindInfoInLoaderHeapCallback (PVOID pvAllocationBase, SIZE_T cb
             ppPrevStubHeapSegment = &pStubHeapSegment->pNext;
         }
     }
+
+    return false; // Keep enumerating
 }
 
 
@@ -264,7 +264,7 @@ VOID UnregisterUnwindInfoInLoaderHeap (UnlockedLoaderHeap *pHeap)
     }
     CONTRACTL_END;
 
-    pHeap->EnumPageRegions(&UnregisterUnwindInfoInLoaderHeapCallback);
+    pHeap->EnumPageRegions(&UnregisterUnwindInfoInLoaderHeapCallback, NULL /* pvArgs */);
 
 #ifdef _DEBUG
     pHeap->m_fStubUnwindInfoUnregistered = TRUE;
@@ -343,7 +343,6 @@ StubLinker::StubLinker()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -389,7 +388,6 @@ VOID StubLinker::EmitBytes(const BYTE *pBytes, UINT numBytes)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -455,7 +453,6 @@ VOID StubLinker::Emit16(unsigned __int16 val)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -477,7 +474,6 @@ VOID StubLinker::Emit32(unsigned __int32 val)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -520,7 +516,6 @@ VOID StubLinker::EmitPtr(const VOID *val)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -545,7 +540,6 @@ CodeLabel* StubLinker::NewCodeLabel()
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -587,7 +581,6 @@ VOID StubLinker::EmitLabel(CodeLabel* pCodeLabel)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -612,7 +605,6 @@ CodeLabel* StubLinker::EmitNewCodeLabel()
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -631,7 +623,6 @@ VOID StubLinker::EmitPatchLabel()
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -653,7 +644,6 @@ UINT32 StubLinker::GetLabelOffset(CodeLabel *pLabel)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -672,7 +662,6 @@ CodeLabel* StubLinker::NewExternalCodeLabel(LPVOID pExternalAddress)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;   
 
         PRECONDITION(CheckPointer(pExternalAddress));
     }
@@ -705,7 +694,6 @@ VOID StubLinker::EmitLabelRef(CodeLabel* target, const InstructionFormat & instr
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -737,7 +725,6 @@ CodeRun *StubLinker::GetLastCodeRunIfAny()
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -780,7 +767,6 @@ VOID StubLinker::AppendCodeElement(CodeElement *pCodeElement)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -799,7 +785,6 @@ static BOOL LabelCanReach(LabelRef *pLabelRef)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -854,7 +839,7 @@ Stub *StubLinker::LinkInterceptor(LoaderHeap *pHeap, Stub* interceptee, void *pR
                                                     , UnwindInfoSize(globalsize)
 #endif
                                                     );
-        bool fSuccess; fSuccess = EmitStub(pStub, globalsize);
+        bool fSuccess; fSuccess = EmitStub(pStub, globalsize, pHeap);
 
 #ifdef STUBLINKER_GENERATES_UNWIND_INFO
         if (fSuccess)
@@ -888,7 +873,9 @@ Stub *StubLinker::Link(LoaderHeap *pHeap, DWORD flags)
     int globalsize = 0;
     int size = CalculateSize(&globalsize);
 
+#ifndef CROSSGEN_COMPILE
     _ASSERTE(!pHeap || pHeap->IsExecutable());
+#endif
 
     StubHolder<Stub> pStub;
 
@@ -908,7 +895,7 @@ Stub *StubLinker::Link(LoaderHeap *pHeap, DWORD flags)
                 );
         ASSERT(pStub != NULL);
 
-        bool fSuccess; fSuccess = EmitStub(pStub, globalsize);
+        bool fSuccess; fSuccess = EmitStub(pStub, globalsize, pHeap);
 
 #ifdef STUBLINKER_GENERATES_UNWIND_INFO
         if (fSuccess)
@@ -934,7 +921,6 @@ int StubLinker::CalculateSize(int* pGlobalSize)
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
 
@@ -1070,7 +1056,7 @@ int StubLinker::CalculateSize(int* pGlobalSize)
     return globalsize + datasize;
 }
 
-bool StubLinker::EmitStub(Stub* pStub, int globalsize)
+bool StubLinker::EmitStub(Stub* pStub, int globalsize, LoaderHeap* pHeap)
 {
     STANDARD_VM_CONTRACT;
 
@@ -1155,7 +1141,7 @@ bool StubLinker::EmitStub(Stub* pStub, int globalsize)
 #ifdef STUBLINKER_GENERATES_UNWIND_INFO
     if (pStub->HasUnwindInfo())
     {
-        if (!EmitUnwindInfo(pStub, globalsize))
+        if (!EmitUnwindInfo(pStub, globalsize, pHeap))
             return false;
     }
 #endif // STUBLINKER_GENERATES_UNWIND_INFO
@@ -1228,7 +1214,6 @@ VOID StubLinker::UnwindAllocStack (SHORT FrameSizeIncrement)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     if (! ClrSafeInt<SHORT>::addition(m_stackSize, FrameSizeIncrement, m_stackSize))
@@ -1276,7 +1261,6 @@ UNWIND_CODE *StubLinker::AllocUnwindInfo (UCHAR Op, UCHAR nExtraSlots /*= 0*/)
     {
         THROWS;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } CONTRACTL_END;
 
     _ASSERTE(Op < sizeof(UnwindOpExtraSlotTable));
@@ -1306,7 +1290,34 @@ UNWIND_CODE *StubLinker::AllocUnwindInfo (UCHAR Op, UCHAR nExtraSlots /*= 0*/)
 }
 #endif // defined(_TARGET_AMD64_) 
 
-bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
+struct FindBlockArgs
+{
+    BYTE *pCode;
+    BYTE *pBlockBase;
+    SIZE_T cbBlockSize;
+};
+
+bool FindBlockCallback (PTR_VOID pvArgs, PTR_VOID pvAllocationBase, SIZE_T cbReserved)
+{
+    CONTRACTL
+    {
+        NOTHROW;
+        GC_TRIGGERS;
+    }
+    CONTRACTL_END;
+
+    FindBlockArgs* pArgs = (FindBlockArgs*)pvArgs;
+    if (pArgs->pCode >= pvAllocationBase && (pArgs->pCode < ((BYTE *)pvAllocationBase + cbReserved)))
+    {
+        pArgs->pBlockBase = (BYTE*)pvAllocationBase;
+        pArgs->cbBlockSize = cbReserved;
+        return true;
+    }
+
+    return false;
+}
+
+bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize, LoaderHeap* pHeap)
 {
     STANDARD_VM_CONTRACT;
 
@@ -1314,19 +1325,21 @@ bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
 
     //
     // Determine the lower bound of the address space containing the stub.
-    // The properties of individual pages may change, but the bounds of a
-    // VirtualAlloc(MEM_RESERVE)'d region will never change.
     //
 
-    MEMORY_BASIC_INFORMATION mbi;
+    FindBlockArgs findBlockArgs;
+    findBlockArgs.pCode = pCode;
+    findBlockArgs.pBlockBase = NULL;
 
-    if (sizeof(mbi) != ClrVirtualQuery(pCode, &mbi, sizeof(mbi)))
+    pHeap->EnumPageRegions(&FindBlockCallback, &findBlockArgs);
+
+    if (findBlockArgs.pBlockBase == NULL)
     {
         // REVISIT_TODO better exception
         COMPlusThrowOM();
     }
 
-    BYTE *pbRegionBaseAddress = (BYTE*)mbi.AllocationBase;
+    BYTE *pbRegionBaseAddress = findBlockArgs.pBlockBase;
 
 #ifdef _DEBUG
     static SIZE_T MaxSegmentSize = -1;
@@ -1591,7 +1604,7 @@ bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
         *pUnwindCodes++ = (BYTE)0xFF; // end
     }
 
-    int epilogUnwindCodeIndex = 0;
+    ptrdiff_t epilogUnwindCodeIndex = 0;
 
     //epilog differs from prolog
     if(m_cbStackFrame >= 4096)
@@ -1626,7 +1639,7 @@ bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
     }
 
     // Number of 32-bit unwind codes
-    int codeWordsCount = (ALIGN_UP((size_t)pUnwindCodes, sizeof(void*)) - (size_t)pUnwindInfo - sizeof(DWORD))/4;
+    size_t codeWordsCount = (ALIGN_UP((size_t)pUnwindCodes, sizeof(void*)) - (size_t)pUnwindInfo - sizeof(DWORD))/4;
 
     _ASSERTE(epilogUnwindCodeIndex < 32);
 
@@ -1636,8 +1649,8 @@ bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
     *(DWORD *)pUnwindInfo = 
         ((functionLength) / 2) |
         (1 << 21) |
-        (epilogUnwindCodeIndex << 23)|
-        (codeWordsCount << 28);  
+        ((int)epilogUnwindCodeIndex << 23)|
+        ((int)codeWordsCount << 28);
 
 #elif defined(_TARGET_ARM64_)
     if (!m_fProlog)
@@ -1695,7 +1708,7 @@ bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
         // to report them to the OS. (they are not expressible anyways)
 
         // 5. Floating point argument registers:
-        // Similar to Integer argumetn registers, no reporting
+        // Similar to Integer argument registers, no reporting
         //
 
         // 4. Set the frame pointer
@@ -1803,39 +1816,12 @@ bool StubLinker::EmitUnwindInfo(Stub* pStub, int globalsize)
     if (!pStubHeapSegment)
     {
         //
-        // Determine the upper bound of the address space containing the stub.
-        // Start with stub region's allocation base, and query for each
-        // successive region's allocation base until it changes or we hit an
-        // unreserved region.
-        //
-
-        PBYTE pbCurrentBase = pbBaseAddress;
-
-        for (;;)
-        {
-            if (sizeof(mbi) != ClrVirtualQuery(pbCurrentBase, &mbi, sizeof(mbi)))
-            {
-                // REVISIT_TODO better exception
-                COMPlusThrowOM();
-            }
-
-            // AllocationBase is undefined if this is set.
-            if (mbi.State & MEM_FREE)
-                break;
-
-            if (pbRegionBaseAddress != mbi.AllocationBase)
-                break;
-
-            pbCurrentBase += mbi.RegionSize;
-        }
-
-        //
         // RtlInstallFunctionTableCallback will only accept a ULONG for the
         // region size.  We've already checked above that the RUNTIME_FUNCTION
         // offsets will work relative to pbBaseAddress.
         //
 
-        SIZE_T cbSegment = pbCurrentBase - pbBaseAddress;
+        SIZE_T cbSegment = findBlockArgs.cbBlockSize;
 
         if (cbSegment > MaxSegmentSize)
             cbSegment = MaxSegmentSize;
@@ -1981,8 +1967,6 @@ VOID Stub::DeleteStub()
         GC_TRIGGERS;
     }
     CONTRACTL_END;
-
-    COUNTER_ONLY(GetPerfCounters().m_Interop.cStubs--);
 
 #ifdef STUBLINKER_GENERATES_UNWIND_INFO
     if (HasUnwindInfo())
@@ -2161,8 +2145,6 @@ Stub* Stub::NewStub(PTR_VOID pCode, DWORD flags)
 #ifdef STUBLINKER_GENERATES_UNWIND_INFO
     _ASSERTE(!nUnwindInfoSize || !pHeap || pHeap->m_fPermitStubsWithUnwindInfo);
 #endif // STUBLINKER_GENERATES_UNWIND_INFO
-
-    COUNTER_ONLY(GetPerfCounters().m_Interop.cStubs++);
 
     S_SIZE_T size = S_SIZE_T(sizeof(Stub));
 

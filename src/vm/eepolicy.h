@@ -35,8 +35,6 @@ public:
         TA_None,  // No Abort
         // Abort at a safe spot: not having any lock, not inside finally, not inside catch
         TA_Safe,
-        // Do we need this one?
-        TA_V1Compatible,
         // Do not run user finally, no attention to lock count
         TA_Rude
     };
@@ -112,8 +110,6 @@ public:
 
     static void PerformResourceConstraintAction(Thread *pThread, EPolicyAction action, UINT exitCode, BOOL haveStack);
 
-    static void PerformADUnloadAction(EPolicyAction action, BOOL haveStack, BOOL forStackOverflow = FALSE);
-
     static void HandleOutOfMemory();
 
     static void HandleStackOverflow(StackOverflowDetector detector, void * pLimitFrame);
@@ -124,7 +120,7 @@ public:
 
     static void HandleExitProcess(ShutdownCompleteAction sca = SCA_ExitProcessWhenShutdownComplete);
 
-    static void DECLSPEC_NORETURN HandleFatalError(UINT exitCode, UINT_PTR address, LPCWSTR pMessage=NULL, PEXCEPTION_POINTERS pExceptionInfo= NULL);
+    static int NOINLINE HandleFatalError(UINT exitCode, UINT_PTR address, LPCWSTR pMessage=NULL, PEXCEPTION_POINTERS pExceptionInfo= NULL, LPCWSTR errorSource=NULL, LPCWSTR argExceptionString=NULL);
 
     static void DECLSPEC_NORETURN HandleFatalStackOverflow(EXCEPTION_POINTERS *pException, BOOL fSkipDebugger = FALSE);
 
@@ -147,7 +143,7 @@ private:
     BOOL IsValidActionForFailure(EClrFailure failure, EPolicyAction action);
     EPolicyAction GetFinalAction(EPolicyAction action, Thread *pThread);
 
-    static void LogFatalError(UINT exitCode, UINT_PTR address, LPCWSTR pMessage, PEXCEPTION_POINTERS pExceptionInfo);
+    static void LogFatalError(UINT exitCode, UINT_PTR address, LPCWSTR pMessage, PEXCEPTION_POINTERS pExceptionInfo, LPCWSTR errorSource, LPCWSTR argExceptionString=NULL);
 
     // IMPORTANT NOTE: only the following two functions should be calling ExitProcessViaShim.
     // - CorHost2::ExitProcess
@@ -166,9 +162,6 @@ inline EEPolicy* GetEEPolicy()
 {
     return (EEPolicy*)&g_EEPolicyInstance;
 }
-
-extern void FinalizerThreadAbortOnTimeout();
-extern ULONGLONG GetObjFinalizeStartTime();
 
 //
 // Use EEPOLICY_HANDLE_FATAL_ERROR when you have a situtation where the Runtime's internal state would be

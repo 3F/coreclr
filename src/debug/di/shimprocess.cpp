@@ -132,7 +132,7 @@ void ShimProcess::SetProcess(ICorDebugProcess * pProcess)
     if (pProcess != NULL)
     {
         // Verify that DataTarget + new process have the same pid?
-        _ASSERTE(m_pProcess->GetPid() == m_pLiveDataTarget->GetPid());
+        _ASSERTE(m_pProcess->GetProcessDescriptor()->m_Pid == m_pLiveDataTarget->GetPid());
     }
 }
 
@@ -152,12 +152,12 @@ void ShimProcess::SetProcess(ICorDebugProcess * pProcess)
 // Notes:
 //    Only call this once, during the initialization dance. 
 //
-HRESULT ShimProcess::InitializeDataTarget(DWORD processId)
+HRESULT ShimProcess::InitializeDataTarget(const ProcessDescriptor * pProcessDescriptor)
 {
     _ASSERTE(m_pLiveDataTarget == NULL);
 
     
-    HRESULT hr = BuildPlatformSpecificDataTarget(GetMachineInfo(), processId, &m_pLiveDataTarget);
+    HRESULT hr = BuildPlatformSpecificDataTarget(GetMachineInfo(), pProcessDescriptor, &m_pLiveDataTarget);
     if (FAILED(hr))
     {
         _ASSERTE(m_pLiveDataTarget == NULL);
@@ -365,12 +365,12 @@ DWORD WINAPI CallStopGoThreadProc(LPVOID parameter)
     // Calling Stop + Continue will synchronize the process and force any queued events to be called.
     // Stop is synchronous and will block until debuggee is synchronized.
     hr = pProc->Stop(INFINITE);
-    SIMPLIFYING_ASSUMPTION(SUCCEEDED(hr));
+    SIMPLIFYING_ASSUMPTION_SUCCEEDED(hr);
 
     // Continue will resume the debuggee. If there are queued events (which we expect in this case)
     // then continue will drain the event queue instead of actually resuming the process.
     hr = pProc->Continue(FALSE);
-    SIMPLIFYING_ASSUMPTION(SUCCEEDED(hr));
+    SIMPLIFYING_ASSUMPTION_SUCCEEDED(hr);
 
     // This thread just needs to trigger an event dispatch. Now that it's done that, it can exit.
     return 0;
@@ -814,7 +814,7 @@ HRESULT ShimProcess::HandleWin32DebugEvent(const DEBUG_EVENT * pEvent)
                 // Call back into that. This will handle Continuing the debug event.
                 m_pProcess->HandleDebugEventForInteropDebugging(pEvent); 
 #else
-                _ASSERTE(!"Interop debugging not supported on Rotor");
+                _ASSERTE(!"Interop debugging not supported");
 #endif
             }
             else
@@ -833,7 +833,7 @@ HRESULT ShimProcess::HandleWin32DebugEvent(const DEBUG_EVENT * pEvent)
     EX_CATCH_HRESULT(hrIgnore);
     // Dont' expect errors here (but could probably return it up to become an
     // unrecoverable error if necessary). We still want to call Continue thought.
-    SIMPLIFYING_ASSUMPTION(SUCCEEDED(hrIgnore));
+    SIMPLIFYING_ASSUMPTION_SUCCEEDED(hrIgnore);
 
     //
     // Continue the debuggee if needed.
@@ -873,7 +873,7 @@ HRESULT ShimProcess::HandleWin32DebugEvent(const DEBUG_EVENT * pEvent)
             {
                 ::Sleep(500);
                 hrIgnore = GetNativePipeline()->EnsureThreadsRunning();
-                SIMPLIFYING_ASSUMPTION(SUCCEEDED(hrIgnore));
+                SIMPLIFYING_ASSUMPTION_SUCCEEDED(hrIgnore);
             }
         }
     }    
@@ -1850,11 +1850,7 @@ HMODULE ShimProcess::GetDacModule()
     //   mscordaccore.dll  <-- coreclr
     //   mscordacwks.dll   <-- desktop
     PCWSTR eeFlavor = 
-#if defined(FEATURE_MAIN_CLR_MODULE_USES_CORE_NAME)
         W("mscordaccore.dll");
-#else
-        W("mscordacwks.dll");
-#endif
     
 #endif // FEATURE_PAL
     wszAccessDllPath.Append(eeFlavor);

@@ -19,20 +19,15 @@
 #include "assembly.hpp"
 #include "clsload.hpp"
 #include "eehash.h"
-#ifdef FEATURE_FUSION
-#include "fusion.h"
-#endif
 #include "arraylist.h"
 #include "comreflectioncache.hpp"
 #include "comutilnative.h"
 #include "domainfile.h"
 #include "objectlist.h"
 #include "fptrstubs.h"
-#include "ilstubcache.h"
-#include "testhookmgr.h"
-#ifdef FEATURE_VERSIONING
+#include "gcheaputilities.h"
+#include "gchandleutilities.h"
 #include "../binder/inc/applicationcontext.hpp"
-#endif // FEATURE_VERSIONING
 #include "rejit.h"
 
 #ifdef FEATURE_MULTICOREJIT
@@ -41,56 +36,37 @@
 
 #ifdef FEATURE_COMINTEROP
 #include "clrprivbinderwinrt.h"
-#ifndef FEATURE_CORECLR
-#include "clrprivbinderreflectiononlywinrt.h"
-#include "clrprivtypecachereflectiononlywinrt.h"
-#endif
 #include "..\md\winmd\inc\adapter.h"
 #include "winrttypenameconverter.h"
 #endif // FEATURE_COMINTEROP
 
 #include "appxutil.h"
 
+#include "tieredcompilation.h"
+
+#include "codeversion.h"
+
 class BaseDomain;
 class SystemDomain;
-class SharedDomain;
 class AppDomain;
 class CompilationDomain;
 class AppDomainEnum;
 class AssemblySink;
 class EEMarshalingData;
-class Context;
 class GlobalStringLiteralMap;
 class StringLiteralMap;
-struct SecurityContext;
 class MngStdInterfacesInfo;
 class DomainModule;
 class DomainAssembly;
 struct InteropMethodTableData;
 class LoadLevelLimiter;
-class UMEntryThunkCache;
 class TypeEquivalenceHashTable;
-class IApplicationSecurityDescriptor;
 class StringArrayList;
-
-typedef VPTR(IApplicationSecurityDescriptor) PTR_IApplicationSecurityDescriptor;
-
-extern INT64 g_PauseTime;  // Total time in millisecond the CLR has been paused
 
 #ifdef FEATURE_COMINTEROP
 class ComCallWrapperCache;
 struct SimpleComCallWrapper;
-
 class RCWRefCache;
-
-// This enum is used to specify whether user want COM or remoting
-enum COMorRemotingFlag {
-    COMorRemoting_NotInitialized = 0,
-    COMorRemoting_COM            = 1, // COM will be used both cross-domain and cross-runtime
-    COMorRemoting_Remoting       = 2, // Remoting will be used cross-domain; cross-runtime will use Remoting only if it looks like it's expected (default)
-    COMorRemoting_LegacyMode     = 3  // Remoting will be used both cross-domain and cross-runtime
-};
-
 #endif // FEATURE_COMINTEROP
 
 #ifdef _MSC_VER
@@ -327,7 +303,6 @@ struct DomainLocalModule
         {
             NOTHROW;
             GC_NOTRIGGER;
-            SO_TOLERANT;
             MODE_COOPERATIVE;
             SUPPORTS_DAC;
         }
@@ -358,7 +333,6 @@ struct DomainLocalModule
         {
             NOTHROW;
             GC_NOTRIGGER;
-            SO_TOLERANT;
             MODE_COOPERATIVE;
             SUPPORTS_DAC;
         }
@@ -501,97 +475,12 @@ public:
 
 };  // struct DomainLocalModule
 
-
-typedef DPTR(class DomainLocalBlock) PTR_DomainLocalBlock;
-class DomainLocalBlock
-{
-    friend class ClrDataAccess;
-    friend class CheckAsmOffsets;
-
-private:
-    PTR_AppDomain          m_pDomain;
-    DPTR(PTR_DomainLocalModule) m_pModuleSlots;
-    SIZE_T                 m_aModuleIndices;               // Module entries the shared block has allocated
-
-public: // used by code generators
-    static SIZE_T GetOffsetOfModuleSlotsPointer() { return offsetof(DomainLocalBlock, m_pModuleSlots);}
-
-public:
-
-#ifndef DACCESS_COMPILE
-    DomainLocalBlock()
-      : m_pDomain(NULL),  m_pModuleSlots(NULL), m_aModuleIndices(0) {}
-
-    void    EnsureModuleIndex(ModuleIndex index);
-
-    void Init(AppDomain *pDomain) { LIMITED_METHOD_CONTRACT; m_pDomain = pDomain; }
+#define OFFSETOF__DomainLocalModule__m_pDataBlob_                    (6 * TARGET_POINTER_SIZE)
+#ifdef FEATURE_64BIT_ALIGNMENT
+#define OFFSETOF__DomainLocalModule__NormalDynamicEntry__m_pDataBlob (TARGET_POINTER_SIZE /* m_pGCStatics */ + TARGET_POINTER_SIZE /* m_padding */)
+#else
+#define OFFSETOF__DomainLocalModule__NormalDynamicEntry__m_pDataBlob TARGET_POINTER_SIZE /* m_pGCStatics */
 #endif
-
-    void SetModuleSlot(ModuleIndex index, PTR_DomainLocalModule pLocalModule);
-
-    FORCEINLINE PTR_DomainLocalModule GetModuleSlot(ModuleIndex index)
-    {
-        WRAPPER_NO_CONTRACT;
-        SUPPORTS_DAC;
-        _ASSERTE(index.m_dwIndex < m_aModuleIndices);
-        return m_pModuleSlots[index.m_dwIndex];
-    }
-
-    inline PTR_DomainLocalModule GetModuleSlot(MethodTable* pMT)
-    {
-        WRAPPER_NO_CONTRACT;
-        return GetModuleSlot(pMT->GetModuleForStatics()->GetModuleIndex());
-    }
-
-    DomainFile* TryGetDomainFile(ModuleIndex index)
-    {
-        WRAPPER_NO_CONTRACT;
-        SUPPORTS_DAC;
-
-        // the publishing of m_aModuleIndices and m_pModuleSlots is dependent
-        // on the order of accesses; we must ensure that we read from m_aModuleIndices
-        // before m_pModuleSlots.
-        if (index.m_dwIndex < m_aModuleIndices)
-        {
-            MemoryBarrier();
-            if (m_pModuleSlots[index.m_dwIndex])
-            {
-                return m_pModuleSlots[index.m_dwIndex]->GetDomainFile();
-            }
-        }
-
-        return NULL;
-    }
-
-    DomainFile* GetDomainFile(SIZE_T ModuleID)
-    {
-        WRAPPER_NO_CONTRACT;
-        ModuleIndex index = Module::IDToIndex(ModuleID);
-        _ASSERTE(index.m_dwIndex < m_aModuleIndices);
-        return m_pModuleSlots[index.m_dwIndex]->GetDomainFile();
-    }
-
-#ifndef DACCESS_COMPILE
-    void SetDomainFile(ModuleIndex index, DomainFile* pDomainFile)
-    {
-        WRAPPER_NO_CONTRACT;
-        _ASSERTE(index.m_dwIndex < m_aModuleIndices);
-        m_pModuleSlots[index.m_dwIndex]->SetDomainFile(pDomainFile);
-    }
-#endif
-
-#ifdef DACCESS_COMPILE
-    void EnumMemoryRegions(CLRDataEnumMemoryFlags flags);
-#endif
-
-
-private:
-
-    //
-    // Low level routines to get & set class entries
-    //
-
-};
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -604,7 +493,7 @@ class LargeHeapHandleBucket
 {
 public:
     // Constructor and desctructor.
-    LargeHeapHandleBucket(LargeHeapHandleBucket *pNext, DWORD Size, BaseDomain *pDomain, BOOL bCrossAD = FALSE);
+    LargeHeapHandleBucket(LargeHeapHandleBucket *pNext, DWORD Size, BaseDomain *pDomain);
     ~LargeHeapHandleBucket();
 
     // This returns the next bucket.
@@ -661,7 +550,7 @@ public:
     ~LargeHeapHandleTable();
 
     // Allocate handles from the large heap handle table.
-    OBJECTREF* AllocateHandles(DWORD nRequested, BOOL bCrossAD = FALSE);
+    OBJECTREF* AllocateHandles(DWORD nRequested);
 
     // Release object handles allocated using AllocateHandles().
     void ReleaseHandles(OBJECTREF *pObjRef, DWORD nReleased);    
@@ -814,14 +703,14 @@ private:
 // set) and being able to specify specific versions.
 //
 
-#define LOW_FREQUENCY_HEAP_RESERVE_SIZE        (3 * PAGE_SIZE)
-#define LOW_FREQUENCY_HEAP_COMMIT_SIZE         (1 * PAGE_SIZE)
+#define LOW_FREQUENCY_HEAP_RESERVE_SIZE        (3 * GetOsPageSize())
+#define LOW_FREQUENCY_HEAP_COMMIT_SIZE         (1 * GetOsPageSize())
 
-#define HIGH_FREQUENCY_HEAP_RESERVE_SIZE       (10 * PAGE_SIZE)
-#define HIGH_FREQUENCY_HEAP_COMMIT_SIZE        (1 * PAGE_SIZE)
+#define HIGH_FREQUENCY_HEAP_RESERVE_SIZE       (10 * GetOsPageSize())
+#define HIGH_FREQUENCY_HEAP_COMMIT_SIZE        (1 * GetOsPageSize())
 
-#define STUB_HEAP_RESERVE_SIZE                 (3 * PAGE_SIZE)
-#define STUB_HEAP_COMMIT_SIZE                  (1 * PAGE_SIZE)
+#define STUB_HEAP_RESERVE_SIZE                 (3 * GetOsPageSize())
+#define STUB_HEAP_COMMIT_SIZE                  (1 * GetOsPageSize())
 
 // --------------------------------------------------------------------------------
 // PE File List lock - for creating list locks on PE files
@@ -845,7 +734,7 @@ public:
              pEntry != NULL;
              pEntry = pEntry->m_pNext)
         {
-            if (((PEFile *)pEntry->m_pData)->Equals(pFile))
+            if (((PEFile *)pEntry->m_data)->Equals(pFile))
             {
                 return pEntry;
             }
@@ -855,7 +744,7 @@ public:
     }
 #endif // DACCESS_COMPILE
 
-    DEBUG_NOINLINE static void HolderEnter(PEFileListLock *pThis) PUB
+    DEBUG_NOINLINE static void HolderEnter(PEFileListLock *pThis)
     {
         WRAPPER_NO_CONTRACT;
         ANNOTATION_SPECIAL_HOLDER_CALLER_NEEDS_DYNAMIC_CONTRACT;
@@ -863,7 +752,7 @@ public:
         pThis->Enter();
     }
 
-    DEBUG_NOINLINE static void HolderLeave(PEFileListLock *pThis) PUB
+    DEBUG_NOINLINE static void HolderLeave(PEFileListLock *pThis)
     {
         WRAPPER_NO_CONTRACT;
         ANNOTATION_SPECIAL_HOLDER_CALLER_NEEDS_DYNAMIC_CONTRACT;
@@ -906,14 +795,12 @@ private:
     FileLoadLevel           m_level;
     DomainFile              *m_pDomainFile;
     HRESULT                 m_cachedHR;
-    ADID                    m_AppDomainId;
 
 public:
     static FileLoadLock *Create(PEFileListLock *pLock, PEFile *pFile, DomainFile *pDomainFile);
 
     ~FileLoadLock();
     DomainFile *GetDomainFile();
-    ADID GetAppDomainId();
     FileLoadLevel GetLoadLevel();
 
     // CanAcquire will return FALSE if Acquire will definitely not take the lock due
@@ -954,6 +841,9 @@ typedef FileLoadLock::Holder FileLoadLockHolder;
 #ifndef DACCESS_COMPILE
     typedef ReleaseHolder<FileLoadLock> FileLoadLockRefHolder;
 #endif // DACCESS_COMPILE
+
+    typedef ListLockBase<NativeCodeVersion> JitListLock;
+    typedef ListLockEntryBase<NativeCodeVersion> JitListLockEntry;
 
 
 #ifdef _MSC_VER
@@ -1046,19 +936,6 @@ class BaseDomain
     VPTR_BASE_VTABLE_CLASS(BaseDomain)
     VPTR_UNIQUE(VPTR_UNIQUE_BaseDomain)
 
-protected:
-    // These 2 variables are only used on the AppDomain, but by placing them here
-    // we reduce the cost of keeping the asmconstants file up to date.
-
-    // The creation sequence number of this app domain (starting from 1)
-    // This ID is generated by the code:SystemDomain::GetNewAppDomainId routine
-    // The ID are recycled. 
-    // 
-    // see also code:ADID 
-    ADID m_dwId;
-
-    DomainLocalBlock    m_sDomainLocalBlock;
-
 public:
 
     class AssemblyIterator;
@@ -1075,43 +952,19 @@ public:
     virtual ~BaseDomain() {}
     void Init();
     void Stop();
-    void Terminate();
 
-    // ID to uniquely identify this AppDomain - used by the AppDomain publishing
-    // service (to publish the list of all appdomains present in the process),
-    // which in turn is used by, for eg., the debugger (to decide which App-
-    // Domain(s) to attach to).
-    // This is also used by Remoting for routing cross-appDomain calls.
-    ADID GetId (void)
-    {
-        LIMITED_METHOD_DAC_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        return m_dwId;
-    }
-    
     virtual BOOL IsAppDomain()    { LIMITED_METHOD_DAC_CONTRACT; return FALSE; }
-    virtual BOOL IsSharedDomain() { LIMITED_METHOD_DAC_CONTRACT; return FALSE; }
 
-    inline BOOL IsDefaultDomain();  // defined later in this file
-    virtual PTR_LoaderAllocator GetLoaderAllocator() = 0;
+    BOOL IsSharedDomain() { LIMITED_METHOD_DAC_CONTRACT; return FALSE; }
+    BOOL IsDefaultDomain() { LIMITED_METHOD_DAC_CONTRACT; return TRUE; }
+
+    PTR_LoaderAllocator GetLoaderAllocator();
     virtual PTR_AppDomain AsAppDomain()
     {
         LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
         _ASSERTE(!"Not an AppDomain");
         return NULL;
     }
-
-    
-    // If one domain is the SharedDomain and one is an AppDomain then
-    // return the AppDomain, i.e. return the domain with the shorter lifetime
-    // of the two given domains.
-    static PTR_BaseDomain ComputeBaseDomain(
-         BaseDomain *pGenericDefinitionDomain,    // the domain that owns the generic type or method
-         Instantiation classInst,                       // the type arguments to the type (if any)
-         Instantiation methodInst = Instantiation());   // the type arguments to the method (if any)
-
-    static PTR_BaseDomain ComputeBaseDomain(TypeKey * pTypeKey);
 
 #ifdef FEATURE_COMINTEROP
     //****************************************************************************************
@@ -1119,45 +972,6 @@ public:
     // This will look up interop data for a method table
     //
 
-#ifndef DACCESS_COMPILE
-    // Returns the data pointer if present, NULL otherwise
-    InteropMethodTableData *LookupComInteropData(MethodTable *pMT)
-    {
-        // Take the lock
-        CrstHolder holder(&m_InteropDataCrst);
-
-        // Lookup
-        InteropMethodTableData *pData = (InteropMethodTableData*) m_interopDataHash.LookupValue((UPTR) pMT, (LPVOID) NULL);
-
-        // Not there...
-        if (pData == (InteropMethodTableData*) INVALIDENTRY)
-            return NULL;
-
-        // Found it
-        return pData;
-    }
-
-    // Returns TRUE if successfully inserted, FALSE if this would be a duplicate entry
-    BOOL InsertComInteropData(MethodTable* pMT, InteropMethodTableData *pData)
-    {
-        // We don't keep track of this kind of information for interfaces
-        _ASSERTE(!pMT->IsInterface());
-
-        // Take the lock
-        CrstHolder holder(&m_InteropDataCrst);
-
-        // Check to see that it's not already in there
-        InteropMethodTableData *pDupData = (InteropMethodTableData*) m_interopDataHash.LookupValue((UPTR) pMT, (LPVOID) NULL);
-        if (pDupData != (InteropMethodTableData*) INVALIDENTRY)
-            return FALSE;
-
-        // Not in there, so insert
-        m_interopDataHash.InsertValue((UPTR) pMT, (LPVOID) pData);
-
-        // Success
-        return TRUE;
-    }
-#endif // DACCESS_COMPILE
 #endif // FEATURE_COMINTEROP
 
     void SetDisableInterfaceCache()
@@ -1182,15 +996,6 @@ public:
         return m_pWinRtBinder;
     }
 #endif // FEATURE_COMINTEROP
-
-    //****************************************************************************************
-    // This method returns marshaling data that the EE uses that is stored on a per app domain
-    // basis.
-    EEMarshalingData *GetMarshalingData();
-
-    // Deletes marshaling data at shutdown (which contains cached factories that needs to be released)
-    void DeleteMarshalingData();
-    
 #ifdef _DEBUG
     BOOL OwnDomainLocalBlockLock()
     {
@@ -1199,7 +1004,7 @@ public:
         return m_DomainLocalBlockCrst.OwnedByCurrentThread();
     }
 #endif
-
+   
     //****************************************************************************************
     // Get the class init lock. The method is limited to friends because inappropriate use
     // will cause deadlocks in the system
@@ -1210,7 +1015,7 @@ public:
         return &m_ClassInitLock;
     }
 
-    ListLock* GetJitLock()
+    JitListLock* GetJitLock()
     {
         LIMITED_METHOD_CONTRACT;
         return &m_JITLock;
@@ -1225,13 +1030,11 @@ public:
     STRINGREF *IsStringInterned(STRINGREF *pString);
     STRINGREF *GetOrInternString(STRINGREF *pString);
 
-    virtual BOOL CanUnload()   { LIMITED_METHOD_CONTRACT; return FALSE; }    // can never unload BaseDomain
-
     // Returns an array of OBJECTREF* that can be used to store domain specific data.
     // Statics and reflection info (Types, MemberInfo,..) are stored this way
     // If ppLazyAllocate != 0, allocation will only take place if *ppLazyAllocate != 0 (and the allocation
     // will be properly serialized)
-    OBJECTREF *AllocateObjRefPtrsInLargeTable(int nRequested, OBJECTREF** ppLazyAllocate = NULL, BOOL bCrossAD = FALSE);
+    OBJECTREF *AllocateObjRefPtrsInLargeTable(int nRequested, OBJECTREF** ppLazyAllocate = NULL);
 
 #ifdef FEATURE_PREJIT
     // Ensures that the file for logging profile data is open (we only open it once)
@@ -1242,61 +1045,70 @@ public:
     //****************************************************************************************
     // Handles
 
-#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE) // needs GetCurrentThreadHomeHeapNumber
-    OBJECTHANDLE CreateTypedHandle(OBJECTREF object, int type)
+#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+    IGCHandleStore* GetHandleStore()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_handleStore;
+    }
+
+    OBJECTHANDLE CreateTypedHandle(OBJECTREF object, HandleType type)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateTypedHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object, type);
+        return ::CreateHandleCommon(m_handleStore, object, type);
     }
 
     OBJECTHANDLE CreateHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
         CONDITIONAL_CONTRACT_VIOLATION(ModeViolation, object == NULL)
-        return ::CreateHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreateHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreateWeakHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateWeakHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreateWeakHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreateShortWeakHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateShortWeakHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreateShortWeakHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreateLongWeakHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
         CONDITIONAL_CONTRACT_VIOLATION(ModeViolation, object == NULL)
-        return ::CreateLongWeakHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreateLongWeakHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreateStrongHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateStrongHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreateStrongHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreatePinningHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
-#if CHECK_APP_DOMAIN_LEAKS     
-        if(IsAppDomain())
-            object->TryAssignAppDomain((AppDomain*)this,TRUE);
-#endif
-        return ::CreatePinningHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreatePinningHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreateSizedRefHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
-        OBJECTHANDLE h = ::CreateSizedRefHandle(
-            m_hHandleTableBucket->pTable[GCHeap::IsServerHeap() ? (m_dwSizedRefHandles % m_iNumberOfProcessors) : GetCurrentThreadHomeHeapNumber()], 
-            object);
+        OBJECTHANDLE h;
+        if (GCHeapUtilities::IsServerHeap())
+        {
+            h = ::CreateSizedRefHandle(m_handleStore, object, m_dwSizedRefHandles % m_iNumberOfProcessors);
+        }
+        else
+        {
+            h = ::CreateSizedRefHandle(m_handleStore, object);
+        }
+
         InterlockedIncrement((LONG*)&m_dwSizedRefHandles);
         return h;
     }
@@ -1305,48 +1117,34 @@ public:
     OBJECTHANDLE CreateRefcountedHandle(OBJECTREF object)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateRefcountedHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object);
+        return ::CreateRefcountedHandle(m_handleStore, object);
     }
 
     OBJECTHANDLE CreateWinRTWeakHandle(OBJECTREF object, IWeakReference* pWinRTWeakReference)
     {
-        CONTRACTL
-        {
-            THROWS;
-            GC_NOTRIGGER;
-            MODE_COOPERATIVE;
-        }
-        CONTRACTL_END;
-
-        return ::CreateWinRTWeakHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object, pWinRTWeakReference);
+        WRAPPER_NO_CONTRACT;
+        return ::CreateWinRTWeakHandle(m_handleStore, object, pWinRTWeakReference);
     }
 #endif // FEATURE_COMINTEROP
 
     OBJECTHANDLE CreateVariableHandle(OBJECTREF object, UINT type)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateVariableHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], object, type);
+        return ::CreateVariableHandle(m_handleStore, object, type);
     }
 
     OBJECTHANDLE CreateDependentHandle(OBJECTREF primary, OBJECTREF secondary)
     {
         WRAPPER_NO_CONTRACT;
-        return ::CreateDependentHandle(m_hHandleTableBucket->pTable[GetCurrentThreadHomeHeapNumber()], primary, secondary);
+        return ::CreateDependentHandle(m_handleStore, primary, secondary);
     }
+
 #endif // DACCESS_COMPILE && !CROSSGEN_COMPILE
 
-    BOOL ContainsOBJECTHANDLE(OBJECTHANDLE handle);
-
-#ifdef FEATURE_FUSION
-    IApplicationContext *GetFusionContext() {LIMITED_METHOD_CONTRACT;  return m_pFusionContext; }
-#else
     IUnknown *GetFusionContext() {LIMITED_METHOD_CONTRACT;  return m_pFusionContext; }
     
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER)    
     CLRPrivBinderCoreCLR *GetTPABinderContext() {LIMITED_METHOD_CONTRACT;  return m_pTPABinderContext; }
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
 
-#endif
 
     CrstExplicitInit * GetLoaderAllocatorReferencesLock()
     {
@@ -1385,24 +1183,17 @@ protected:
     CrstExplicitInit m_crstAssemblyList;
     BOOL             m_fDisableInterfaceCache;  // RCW COM interface cache
     ListLock         m_ClassInitLock;
-    ListLock         m_JITLock;
+    JitListLock      m_JITLock;
     ListLock         m_ILStubGenLock;
 
     // Fusion context, used for adding assemblies to the is domain. It defines
     // fusion properties for finding assemblyies such as SharedBinPath,
     // PrivateBinPath, Application Directory, etc.
-#ifdef FEATURE_FUSION    
-    IApplicationContext* m_pFusionContext; // Binding context for the domain
-#else
     IUnknown *m_pFusionContext; // Current binding context for the domain
 
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER)    
     CLRPrivBinderCoreCLR *m_pTPABinderContext; // Reference to the binding context that holds TPA list details
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
 
-#endif    
-
-    HandleTableBucket *m_hHandleTableBucket;
+    IGCHandleStore* m_handleStore;
 
     // The large heap handle table.
     LargeHeapHandleTable        *m_pLargeHeapHandleTable;
@@ -1410,32 +1201,21 @@ protected:
     // The large heap handle table critical section.
     CrstExplicitInit             m_LargeHeapHandleTableCrst;
 
-    EEMarshalingData            *m_pMarshalingData;
-
 #ifdef FEATURE_COMINTEROP
     // Information regarding the managed standard interfaces.
     MngStdInterfacesInfo        *m_pMngStdInterfacesInfo;
     
-    // WinRT binder (only in classic = non-AppX; AppX has the WinRT binder inside code:CLRPrivBinderAppX)
+    // WinRT binder
     PTR_CLRPrivBinderWinRT m_pWinRtBinder;
 #endif // FEATURE_COMINTEROP
 
-    // Number of allocated slots for context local statics of this domain
-    DWORD m_dwContextStatics;
-
-    // Protects allocation of slot IDs for thread and context statics
+    // Protects allocation of slot IDs for thread statics
     static CrstStatic   m_SpecialStaticsCrst;
-
-public:
-    // Lazily allocate offset for context static
-    DWORD AllocateContextStaticsOffset(DWORD* pOffsetSlot);
 
 public:
     // Only call this routine when you can guarantee there are no
     // loads in progress.
     void ClearFusionContext();
-
-public:
 
     //****************************************************************************************
     // Synchronization holders.
@@ -1514,6 +1294,9 @@ public:
     UINT32 GetTypeID(PTR_MethodTable pMT);
     UINT32 LookupTypeID(PTR_MethodTable pMT);
     PTR_MethodTable LookupType(UINT32 id);
+#ifndef DACCESS_COMPILE
+    void RemoveTypesFromTypeIDMap(LoaderAllocator* pLoaderAllocator);
+#endif // DACCESS_COMPILE
 
 private:
     // I have yet to figure out an efficent way to get the number of handles 
@@ -1541,12 +1324,13 @@ public:
         return m_dwSizedRefHandles;
     }
 
-    // Profiler rejit
+#ifdef FEATURE_CODE_VERSIONING
 private:
-    ReJitManager m_reJitMgr;
+    CodeVersionManager m_codeVersionManager;
 
 public:
-    ReJitManager * GetReJitManager() { return &m_reJitMgr; }
+    CodeVersionManager* GetCodeVersionManager() { return &m_codeVersionManager; }
+#endif //FEATURE_CODE_VERSIONING
 
 #ifdef DACCESS_COMPILE
 public:
@@ -1565,35 +1349,6 @@ enum
     ATTACH_ALL = 0x7
 };
 
-class ADUnloadSink
-{
-    
-protected:
-    ~ADUnloadSink();
-    CLREvent m_UnloadCompleteEvent;
-    HRESULT   m_UnloadResult;
-    Volatile<LONG> m_cRef;
-public:
-    ADUnloadSink();
-    void ReportUnloadResult (HRESULT hr, OBJECTREF* pException);
-    void WaitUnloadCompletion();
-    HRESULT GetUnloadResult() {LIMITED_METHOD_CONTRACT; return m_UnloadResult;};
-    void Reset();
-    ULONG AddRef();
-    ULONG Release();
-};
-
-
-FORCEINLINE void ADUnloadSink__Release(ADUnloadSink* pADSink)
-{
-    WRAPPER_NO_CONTRACT;
-
-    if (pADSink)
-        pADSink->Release();
-}
-
-typedef Wrapper <ADUnloadSink*,DoNothing,ADUnloadSink__Release,NULL> ADUnloadSinkHolder;
-
 // This filters the output of IterateAssemblies. This ought to be declared more locally
 // but it would result in really verbose callsites.
 //
@@ -1606,7 +1361,7 @@ typedef Wrapper <ADUnloadSink*,DoNothing,ADUnloadSink__Release,NULL> ADUnloadSin
 //
 // The flags can be combined so if you want all loaded assemblies, you must specify:
 //
-///     kIncludeLoaded|kIncludeExecution|kIncludeIntrospection
+///     kIncludeLoaded|kIncludeExecution
 
 enum AssemblyIterationFlags
 {
@@ -1621,7 +1376,6 @@ enum AssemblyIterationFlags
 
     // Execution / introspection flags
     kIncludeExecution     = 0x00000004, // include assemblies that are loaded for execution only
-    kIncludeIntrospection = 0x00000008, // include assemblies that are loaded for introspection only
     
     kIncludeFailedToLoad  = 0x00000010, // include assemblies that failed to load 
 
@@ -1759,54 +1513,12 @@ public:
 };  // class CollectibleAssemblyHolder<>
 
 //---------------------------------------------------------------------------------------
-// 
-#ifdef FEATURE_LOADER_OPTIMIZATION
-class SharedAssemblyLocator
-{
-public:
-    enum
-    {
-        DOMAINASSEMBLY      = 1,
-        PEASSEMBLY          = 2,
-        PEASSEMBLYEXACT     = 3
-    };
-    DWORD GetType() {LIMITED_METHOD_CONTRACT; return m_type;};
-#ifndef DACCESS_COMPILE
-    DomainAssembly* GetDomainAssembly() {LIMITED_METHOD_CONTRACT; _ASSERTE(m_type==DOMAINASSEMBLY); return (DomainAssembly*)m_value;};
-    PEAssembly* GetPEAssembly() {LIMITED_METHOD_CONTRACT; _ASSERTE(m_type==PEASSEMBLY||m_type==PEASSEMBLYEXACT); return (PEAssembly*)m_value;};
-    SharedAssemblyLocator(DomainAssembly* pAssembly)
-    {
-        LIMITED_METHOD_CONTRACT;
-        m_type=DOMAINASSEMBLY;
-        m_value=pAssembly;
-    }
-    SharedAssemblyLocator(PEAssembly* pFile, DWORD type = PEASSEMBLY)
-    {
-        LIMITED_METHOD_CONTRACT;
-        m_type = type;
-        m_value = pFile;
-    }
-#endif // DACCESS_COMPILE
-
-    DWORD Hash();
-protected:
-    DWORD m_type;
-    LPVOID m_value;
-#if FEATURE_VERSIONING    
-    ULONG   m_uIdentityHash;
-#endif
-};
-#endif // FEATURE_LOADER_OPTIMIZATION
-
 //
 // Stores binding information about failed assembly loads for DAC
 //
 struct FailedAssembly {
     SString displayName;
     SString location;
-#ifdef FEATURE_FUSION    
-    LOADCTX_TYPE context;
-#endif
     HRESULT error;
 
     void Initialize(AssemblySpec *pSpec, Exception *ex)
@@ -1829,9 +1541,6 @@ struct FailedAssembly {
         // If the parent hasn't been set but the code base has, use LoadFrom.
         // Otherwise, use the default.
         //
-#ifdef FEATURE_FUSION        
-        context = pSpec->GetParentIAssembly() ? pSpec->GetParentIAssembly()->GetFusionLoadContext() : LOADCTX_TYPE_LOADFROM;
-#endif // FEATURE_FUSION
     }
 };
 
@@ -1930,8 +1639,6 @@ class AppDomainIterator;
 
 const DWORD DefaultADID = 1;
 
-template <class AppDomainType> class AppDomainCreationHolder;
-
 // An Appdomain is the managed equivalent of a process.  It is an isolation unit (conceptually you don't
 // have pointers directly from one appdomain to another, but rather go through remoting proxies).  It is
 // also a unit of unloading.
@@ -1944,7 +1651,6 @@ template <class AppDomainType> class AppDomainCreationHolder;
 // 
 class AppDomain : public BaseDomain
 {
-    friend class ADUnloadSink;
     friend class SystemDomain;
     friend class AssemblySink;
     friend class AppDomainNative;
@@ -1955,7 +1661,6 @@ class AppDomain : public BaseDomain
     friend class RCWCache;
     friend class ClrDataAccess;
     friend class CheckAsmOffsets;
-    friend class AppDomainFromIDHolder;
 
     VPTR_VTABLE_CLASS(AppDomain, BaseDomain)
 
@@ -1963,42 +1668,22 @@ public:
 #ifndef DACCESS_COMPILE
     AppDomain();
     virtual ~AppDomain();
+    static void Create();
 #endif
-    static void DoADUnloadWork();
-    DomainAssembly* FindDomainAssembly(Assembly*);
-    void EnterContext(Thread* pThread, Context* pCtx,ContextTransitionFrame *pFrame);
 
-#ifndef DACCESS_COMPILE
     //-----------------------------------------------------------------------------------------------------------------
     // Convenience wrapper for ::GetAppDomain to provide better encapsulation.
-    static AppDomain * GetCurrentDomain()
-    { return ::GetAppDomain(); }
-#endif //!DACCESS_COMPILE
+    static PTR_AppDomain GetCurrentDomain()
+    { return m_pTheAppDomain; }
     
     //-----------------------------------------------------------------------------------------------------------------
     // Initializes an AppDomain. (this functions is not called from the SystemDomain)
     void Init();
 
-    // creates only unamaged part
-    static void CreateUnmanagedObject(AppDomainCreationHolder<AppDomain>& result);
-    inline void SetAppDomainManagerInfo(LPCWSTR szAssemblyName, LPCWSTR szTypeName, EInitializeNewDomainFlags dwInitializeDomainFlags);
-    inline BOOL HasAppDomainManagerInfo();
-    inline LPCWSTR GetAppDomainManagerAsm();
-    inline LPCWSTR GetAppDomainManagerType();
-    inline EInitializeNewDomainFlags GetAppDomainManagerInitializeNewDomainFlags();
+#if defined(FEATURE_COMINTEROP)
+    HRESULT SetWinrtApplicationContext(LPCWSTR pwzAppLocalWinMD);
+#endif // FEATURE_COMINTEROP
 
-#ifndef FEATURE_CORECLR
-    inline BOOL AppDomainManagerSetFromConfig();
-    Assembly *GetAppDomainManagerEntryAssembly();
-    void ComputeTargetFrameworkName();
-#endif // FEATURE_CORECLR
-
-#if defined(FEATURE_CORECLR) && defined(FEATURE_COMINTEROP)
-    HRESULT SetWinrtApplicationContext(SString &appLocalWinMD);
-#endif // FEATURE_CORECLR && FEATURE_COMINTEROP
-
-    BOOL CanReversePInvokeEnter();
-    void SetReversePInvokeCannotEnter();
     bool MustForceTrivialWaitOperations();
     void SetForceTrivialWaitOperations();
 
@@ -2008,59 +1693,18 @@ public:
     // the critical sections
     void Stop();
 
-    // Gets rid of resources
-    void Terminate();
-
-#ifdef  FEATURE_PREJIT
-    //assembly cleanup that requires suspended runtime
-    void DeleteNativeCodeRanges();
-#endif
-
     // final assembly cleanup
-    void ShutdownAssemblies();
-    void ShutdownFreeLoaderAllocators(BOOL bFromManagedCode);
+    void ShutdownFreeLoaderAllocators();
     
-    void ReleaseDomainBoundInfo();
     void ReleaseFiles();
     
-
-    // Remove the Appdomain for the system and cleans up. This call should not be
-    // called from shut down code.
-    void CloseDomain();
-
     virtual BOOL IsAppDomain() { LIMITED_METHOD_DAC_CONTRACT; return TRUE; }
     virtual PTR_AppDomain AsAppDomain() { LIMITED_METHOD_CONTRACT; return dac_cast<PTR_AppDomain>(this); }
 
-#ifndef FEATURE_CORECLR
-    void InitializeSorting(OBJECTREF* ppAppdomainSetup);
-    void InitializeHashing(OBJECTREF* ppAppdomainSetup);
-#endif
-
-    OBJECTREF DoSetup(OBJECTREF* setupInfo);
-
-    OBJECTREF GetExposedObject();
-    OBJECTREF GetRawExposedObject() {
-        CONTRACTL
-        {
-            NOTHROW;
-            GC_NOTRIGGER;
-            SO_TOLERANT;
-            MODE_COOPERATIVE;
-        }
-        CONTRACTL_END;
-        if (m_ExposedObject) {
-            return ObjectFromHandle(m_ExposedObject);
-        }
-        else {
-            return NULL;
-        }
-    }
-
-    OBJECTHANDLE GetRawExposedObjectHandleForDebugger() { LIMITED_METHOD_DAC_CONTRACT; return m_ExposedObject; }
+    OBJECTREF GetRawExposedObject() { LIMITED_METHOD_CONTRACT; return NULL; }
+    OBJECTHANDLE GetRawExposedObjectHandleForDebugger() { LIMITED_METHOD_DAC_CONTRACT; return NULL; }
 
 #ifdef FEATURE_COMINTEROP
-    HRESULT GetComIPForExposedObject(IUnknown **pComIP);
-
     MethodTable *GetRedirectedType(WinMDAdapter::RedirectedTypeIndex index);
 #endif // FEATURE_COMINTEROP
 
@@ -2289,7 +1933,6 @@ public:
         return AssemblyIterator::Create(this, assemblyIterationFlags);
     }
 
-#ifdef FEATURE_CORECLR
 private:
     struct NativeImageDependenciesEntry
     {
@@ -2297,7 +1940,7 @@ private:
         GUID m_guidMVID;
     };
 
-    class NativeImageDependenciesTraits : public NoRemoveSHashTraits<DefaultSHashTraits<NativeImageDependenciesEntry *> >
+    class NativeImageDependenciesTraits : public DeleteElementsOnDestructSHashTraits<DefaultSHashTraits<NativeImageDependenciesEntry *> >
     {
     public:
         typedef BaseAssemblySpec *key_t;
@@ -2318,6 +1961,7 @@ private:
 
 public:
     void CheckForMismatchedNativeImages(AssemblySpec * pSpec, const GUID * pGuid);
+    BOOL RemoveNativeImageDependency(AssemblySpec* pSpec);
 
 public:
     class PathIterator
@@ -2339,13 +1983,10 @@ public:
             return dac_cast<PTR_SString>(m_i.GetElement());
         }
     };
-    BOOL BindingByManifestFile();
 
     PathIterator IterateNativeDllSearchDirectories();
     void SetNativeDllSearchDirectories(LPCWSTR paths);
     BOOL HasNativeDllSearchDirectories();
-    void ShutdownNativeDllSearchDirectories();
-#endif // FEATURE_CORECLR
 
 public:
     SIZE_T GetAssemblyCount()
@@ -2373,17 +2014,10 @@ public:
 
     DomainAssembly * FindAssembly(PEAssembly * pFile, FindAssemblyOptions options = FindAssemblyOptions_None) DAC_EMPTY_RET(NULL);
 
-#ifdef FEATURE_MIXEDMODE
-    // Finds only loaded modules, elevates level if needed
-    Module* GetIJWModule(HMODULE hMod) DAC_EMPTY_RET(NULL);
-    // Finds loading modules
-    DomainFile* FindIJWDomainFile(HMODULE hMod, const SString &path) DAC_EMPTY_RET(NULL);
-#endif //  FEATURE_MIXEDMODE
 
     Assembly *LoadAssembly(AssemblySpec* pIdentity,
                            PEAssembly *pFile,
-                           FileLoadLevel targetLevel,
-                           AssemblyLoadSecurity *pLoadSecurity = NULL);
+                           FileLoadLevel targetLevel);
 
     // this function does not provide caching, you must use LoadDomainAssembly
     // unless the call is guaranteed to succeed or you don't need the caching 
@@ -2393,31 +2027,15 @@ public:
     //which is violating our internal assumptions
     DomainAssembly *LoadDomainAssemblyInternal( AssemblySpec* pIdentity,
                                                 PEAssembly *pFile,
-                                                FileLoadLevel targetLevel,
-                                                AssemblyLoadSecurity *pLoadSecurity = NULL);
+                                                FileLoadLevel targetLevel);
 
     DomainAssembly *LoadDomainAssembly( AssemblySpec* pIdentity,
                                         PEAssembly *pFile,
-                                        FileLoadLevel targetLevel,
-                                        AssemblyLoadSecurity *pLoadSecurity = NULL);
+                                        FileLoadLevel targetLevel);
 
-#ifdef FEATURE_MULTIMODULE_ASSEMBLIES
-    DomainModule *LoadDomainModule(DomainAssembly *pAssembly,
-                                   PEModule *pFile,
-                                   FileLoadLevel targetLevel);
-#endif 
 
     CHECK CheckValidModule(Module *pModule);
-#ifdef FEATURE_LOADER_OPTIMIZATION    
-    DomainFile *LoadDomainNeutralModuleDependency(Module *pModule, FileLoadLevel targetLevel);
-#endif
 
-#ifdef FEATURE_FUSION
-    PEAssembly *BindExplicitAssembly(HMODULE hMod, BOOL bindable);
-    Assembly *LoadExplicitAssembly(HMODULE hMod, BOOL bindable);
-    void GetFileFromFusion(IAssembly *pIAssembly, LPCWSTR wszModuleName,
-                           SString &path);
-#endif
     // private:
     void LoadSystemAssemblies();
 
@@ -2430,6 +2048,9 @@ public:
                                  LPCWSTR wszCodeBase);
 
 #ifndef DACCESS_COMPILE // needs AssemblySpec
+
+    void GetCacheAssemblyList(SetSHash<PTR_DomainAssembly>& assemblyList);
+
     //****************************************************************************************
     // Returns and Inserts assemblies into a lookup cache based on the binding information
     // in the AssemblySpec. There can be many AssemblySpecs to a single assembly.
@@ -2445,58 +2066,21 @@ public:
     void CacheStringsForDAC();
 
     BOOL AddFileToCache(AssemblySpec* pSpec, PEAssembly *pFile, BOOL fAllowFailure = FALSE);
+    BOOL RemoveFileFromCache(PEAssembly *pFile);
+
     BOOL AddAssemblyToCache(AssemblySpec* pSpec, DomainAssembly *pAssembly);
+    BOOL RemoveAssemblyFromCache(DomainAssembly* pAssembly);
+
     BOOL AddExceptionToCache(AssemblySpec* pSpec, Exception *ex);
-    void AddUnmanagedImageToCache(LPCWSTR libraryName, HMODULE hMod);
-    HMODULE FindUnmanagedImageInCache(LPCWSTR libraryName);
+    void AddUnmanagedImageToCache(LPCWSTR libraryName, NATIVE_LIBRARY_HANDLE hMod);
+    NATIVE_LIBRARY_HANDLE FindUnmanagedImageInCache(LPCWSTR libraryName);
     //****************************************************************************************
     //
-    // Adds an assembly to the domain.
+    // Adds or removes an assembly to the domain.
     void AddAssembly(DomainAssembly * assem);
-    void RemoveAssembly_Unlocked(DomainAssembly * pAsm);
+    void RemoveAssembly(DomainAssembly * pAsm);
 
     BOOL ContainsAssembly(Assembly * assem);
-
-#ifdef FEATURE_LOADER_OPTIMIZATION    
-    enum SharePolicy
-    {
-        // Attributes to control when to use domain neutral assemblies
-        SHARE_POLICY_UNSPECIFIED,   // Use the current default policy (LoaderOptimization.NotSpecified)
-        SHARE_POLICY_NEVER,         // Do not share anything, except the system assembly (LoaderOptimization.SingleDomain)
-        SHARE_POLICY_ALWAYS,        // Share everything possible (LoaderOptimization.MultiDomain)
-        SHARE_POLICY_GAC,           // Share only GAC-bound assemblies (LoaderOptimization.MultiDomainHost)
-
-        SHARE_POLICY_COUNT,
-        SHARE_POLICY_MASK = 0x3,
-
-        // NOTE that previously defined was a bit 0x40 which might be set on this value
-        // in custom attributes.
-        SHARE_POLICY_DEFAULT = SHARE_POLICY_NEVER,
-    };
-
-    void SetSharePolicy(SharePolicy policy);
-    SharePolicy GetSharePolicy();
-    BOOL ReduceSharePolicyFromAlways();
-
-    //****************************************************************************************
-    // Determines if the image is to be loaded into the shared assembly or an individual
-    // appdomains.
-#ifndef FEATURE_CORECLR    
-    BOOL ApplySharePolicy(DomainAssembly *pFile);
-    BOOL ApplySharePolicyFlag(DomainAssembly *pFile);
-#endif    
-#endif // FEATURE_LOADER_OPTIMIZATION
-
-    BOOL HasSetSecurityPolicy();
-
-    FORCEINLINE IApplicationSecurityDescriptor* GetSecurityDescriptor()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        return static_cast<IApplicationSecurityDescriptor*>(m_pSecDesc);
-    }
-
-    void CreateSecurityDescriptor();
 
     //****************************************************************************************
     //
@@ -2514,7 +2098,6 @@ public:
     PVOID GetFriendlyNameNoSet(bool* isUtf8);
 #endif
     void SetFriendlyName(LPCWSTR pwzFriendlyName, BOOL fDebuggerCares = TRUE);
-    void ResetFriendlyName(BOOL fDebuggerCares = TRUE);
 
     //****************************************************************************************
 
@@ -2524,9 +2107,6 @@ public:
     virtual PEAssembly * BindAssemblySpec(
         AssemblySpec *pSpec,
         BOOL fThrowOnFileNotFound,
-        BOOL fRaisePrebindEvents,
-        StackCrawlMark *pCallerStackMark = NULL,
-        AssemblyLoadSecurity *pLoadSecurity = NULL,
         BOOL fUseHostBinderIfAvailable = TRUE) DAC_EMPTY_RET(NULL);
 
     HRESULT BindAssemblySpecForHostedBinder(
@@ -2539,14 +2119,10 @@ public:
         PEAssembly *       pParentPEAssembly,
         ICLRPrivAssembly * pPrivAssembly, 
         IAssemblyName *    pAssemblyName, 
-        PEAssembly **      ppAssembly, 
-        BOOL               fIsIntrospectionOnly = FALSE) DAC_EMPTY_RET(S_OK);
+        PEAssembly **      ppAssembly) DAC_EMPTY_RET(S_OK);
 
-#ifdef FEATURE_REFLECTION_ONLY_LOAD    
-    virtual DomainAssembly *BindAssemblySpecForIntrospectionDependencies(AssemblySpec *pSpec) DAC_EMPTY_RET(NULL);
-#endif
 
-    PEAssembly *TryResolveAssembly(AssemblySpec *pSpec, BOOL fPreBind);
+    PEAssembly *TryResolveAssembly(AssemblySpec *pSpec);
 
     // Store a successful binding into the cache.  This will keep the file from
     // being physically unmapped, as well as shortcutting future attempts to bind
@@ -2573,19 +2149,11 @@ public:
 
     //****************************************************************************************
     //
-#ifdef FEATURE_FUSION    
-    static BOOL SetContextProperty(IApplicationContext* pFusionContext,
-                                   LPCWSTR pProperty,
-                                   OBJECTREF* obj);
-#endif
     //****************************************************************************************
     //
     // Uses the first assembly to add an application base to the Context. This is done
     // in a lazy fashion so executables do not take the perf hit unless the load other
     // assemblies
-#ifdef FEATURE_FUSION    
-    LPWSTR GetDynamicDir();
-#endif
 #ifndef DACCESS_COMPILE
     void OnAssemblyLoad(Assembly *assem);
     void OnAssemblyLoadUnlocked(Assembly *assem);
@@ -2614,34 +2182,11 @@ public:
 
         return AllocateObjRefPtrsInLargeTable(nRequested, ppLazyAllocate);
     }
-
-    OBJECTREF* AllocateStaticFieldObjRefPtrsCrossDomain(int nRequested, OBJECTREF** ppLazyAllocate = NULL)
-    {
-        WRAPPER_NO_CONTRACT;
-
-        return AllocateObjRefPtrsInLargeTable(nRequested, ppLazyAllocate, TRUE);
-    }
 #endif // DACCESS_COMPILE
 
     void              EnumStaticGCRefs(promote_func* fn, ScanContext* sc);
 
-    DomainLocalBlock *GetDomainLocalBlock()
-    {
-        LIMITED_METHOD_DAC_CONTRACT;
-
-        return &m_sDomainLocalBlock;
-    }
-
-    static SIZE_T GetOffsetOfModuleSlotsPointer()
-    {
-        WRAPPER_NO_CONTRACT;
-
-        return offsetof(AppDomain,m_sDomainLocalBlock) + DomainLocalBlock::GetOffsetOfModuleSlotsPointer();
-    }
-
     void SetupSharedStatics();
-
-    ADUnloadSink* PrepareForWaitUnloadCompletion();
 
     //****************************************************************************************
     //
@@ -2701,8 +2246,6 @@ public:
     void RemoveWinRTFactoryObjects(LPVOID pCtxCookie);
 
     MethodTable *LoadCOMClass(GUID clsid, BOOL bLoadRecord = FALSE, BOOL* pfAssemblyInReg = NULL);
-    COMorRemotingFlag GetComOrRemotingFlag();
-    BOOL GetPreferComInsteadOfManagedRemoting();
     OBJECTREF GetMissingObject();    // DispatchInfo will call function to retrieve the Missing.Value object.
 #endif // FEATURE_COMINTEROP
 
@@ -2727,7 +2270,6 @@ public:
     }
 
 #ifdef FEATURE_COMINTEROP
-    ComCallWrapperCache* GetComCallWrapperCache();
     RCWCache *GetRCWCache()
     {
         WRAPPER_NO_CONTRACT;
@@ -2748,29 +2290,10 @@ public:
     }
 
     RCWRefCache *GetRCWRefCache();
-
-    void ResetComCallWrapperCache()
-    {
-        LIMITED_METHOD_CONTRACT;
-        m_pComCallWrapperCache = NULL;
-    }
-
-    MethodTable* GetLicenseInteropHelperMethodTable();
 #endif // FEATURE_COMINTEROP
 
     //****************************************************************************************
     // Get the proxy for this app domain
-#ifdef FEATURE_REMOTING    
-    OBJECTREF GetAppDomainProxy();
-#endif
-
-    ADIndex GetIndex()
-    {
-        LIMITED_METHOD_CONTRACT;
-        SUPPORTS_DAC;
-
-        return m_dwIndex;
-    }
 
     TPIndex GetTPIndex()
     {
@@ -2778,62 +2301,7 @@ public:
         return m_tpIndex;
     }
 
-    void InitializeDomainContext(BOOL allowRedirects, LPCWSTR pwszPath, LPCWSTR pwszConfig);
-
-#ifdef FEATURE_FUSION
-    IApplicationContext *CreateFusionContext();
-    void SetupLoaderOptimization(DWORD optimization);
-#endif
-#ifdef FEATURE_VERSIONING
     IUnknown *CreateFusionContext();
-#endif // FEATURE_VERSIONING
-
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
-    void OverrideDefaultContextBinder(IUnknown *pOverrideBinder)
-    {
-        LIMITED_METHOD_CONTRACT;
-        
-        _ASSERTE(pOverrideBinder != NULL);
-        pOverrideBinder->AddRef();
-        m_pFusionContext->Release();
-        m_pFusionContext = pOverrideBinder;
-    }
-    
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
-
-#ifdef FEATURE_PREJIT
-    CorCompileConfigFlags GetNativeConfigFlags();
-#endif // FEATURE_PREJIT
-
-    //****************************************************************************************
-    // Create a domain context rooted at the fileName. The directory containing the file name
-    // is the application base and the configuration file is the fileName appended with
-    // .config. If no name is passed in then no domain is created.
-    static AppDomain* CreateDomainContext(LPCWSTR fileName);
-
-    // Sets up the current domain's fusion context based on the given exe file name
-    // (app base & config file)
-    void SetupExecutableFusionContext(LPCWSTR exePath);
-
-    //****************************************************************************************
-    // Manage a pool of asyncrhonous objects used to fetch assemblies.  When a sink is released
-    // it places itself back on the pool list.  Only one object is kept in the pool.
-#ifdef FEATURE_FUSION
-    AssemblySink* AllocateAssemblySink(AssemblySpec* pSpec);
-#endif
-    void SetIsUserCreatedDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_dwFlags |= USER_CREATED_DOMAIN;
-    }
-
-    BOOL IsUserCreatedDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return (m_dwFlags & USER_CREATED_DOMAIN);
-    }
 
     void SetIgnoreUnhandledExceptions()
     {
@@ -2849,53 +2317,11 @@ public:
         return (m_dwFlags & IGNORE_UNHANDLED_EXCEPTIONS);
     }
 
-    void SetPassiveDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_dwFlags |= PASSIVE_DOMAIN;
-    }
-
-    BOOL IsPassiveDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return (m_dwFlags & PASSIVE_DOMAIN);
-    }
-
-    void SetVerificationDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_dwFlags |= VERIFICATION_DOMAIN;
-    }
-
-    BOOL IsVerificationDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return (m_dwFlags & VERIFICATION_DOMAIN);
-    }
-
-    void SetIllegalVerificationDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_dwFlags |= ILLEGAL_VERIFICATION_DOMAIN;
-    }
-
-    BOOL IsIllegalVerificationDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return (m_dwFlags & ILLEGAL_VERIFICATION_DOMAIN);
-    }
-
     void SetCompilationDomain()
     {
         LIMITED_METHOD_CONTRACT;
 
-        m_dwFlags |= (PASSIVE_DOMAIN|COMPILATION_DOMAIN);
+        m_dwFlags |= COMPILATION_DOMAIN;
     }
 
     BOOL IsCompilationDomain();
@@ -2908,158 +2334,8 @@ public:
         return dac_cast<PTR_CompilationDomain>(this);
     }
 
-    void SetCanUnload()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_dwFlags |= APP_DOMAIN_CAN_BE_UNLOADED;
-    }
-
-    BOOL CanUnload()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        return m_dwFlags & APP_DOMAIN_CAN_BE_UNLOADED;
-    }
-
-    void SetRemotingConfigured()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        FastInterlockOr((ULONG*)&m_dwFlags, REMOTING_CONFIGURED_FOR_DOMAIN);
-    }
-
-    BOOL IsRemotingConfigured()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        return m_dwFlags & REMOTING_CONFIGURED_FOR_DOMAIN;
-    }
-
-    void SetOrphanedLocks()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        FastInterlockOr((ULONG*)&m_dwFlags, ORPHANED_LOCKS);
-    }
-
-    BOOL HasOrphanedLocks()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        return m_dwFlags & ORPHANED_LOCKS;
-    }
-
-    // This function is used to relax asserts in the lock accounting.
-    // It returns true if we are fine with hosed lock accounting in this domain.
-    BOOL OkToIgnoreOrphanedLocks()
-    {
-        WRAPPER_NO_CONTRACT;
-        return HasOrphanedLocks() && m_Stage >= STAGE_UNLOAD_REQUESTED;
-    }
-
     static void ExceptionUnwind(Frame *pFrame);
 
-#ifdef _DEBUG
-    void TrackADThreadEnter(Thread *pThread, Frame *pFrame);
-    void TrackADThreadExit(Thread *pThread, Frame *pFrame);
-    void DumpADThreadTrack();
-#endif
-
-#ifndef DACCESS_COMPILE
-    void ThreadEnter(Thread *pThread, Frame *pFrame)
-    {
-        STATIC_CONTRACT_NOTHROW;
-        STATIC_CONTRACT_GC_NOTRIGGER;
-
-#ifdef _DEBUG
-        if (LoggingOn(LF_APPDOMAIN, LL_INFO100))
-            TrackADThreadEnter(pThread, pFrame);
-        else
-#endif
-        {
-            InterlockedIncrement((LONG*)&m_dwThreadEnterCount);
-            LOG((LF_APPDOMAIN, LL_INFO1000, "AppDomain::ThreadEnter  %p to [%d] (%8.8x) %S count %d\n", 
-                 pThread,GetId().m_dwId, this,
-                 GetFriendlyNameForLogging(),GetThreadEnterCount()));
-#if _DEBUG_AD_UNLOAD
-            printf("AppDomain::ThreadEnter %p to [%d] (%8.8x) %S count %d\n",
-                   pThread, GetId().m_dwId, this,
-                   GetFriendlyNameForLogging(), GetThreadEnterCount());
-#endif
-        }
-    }
-
-    void ThreadExit(Thread *pThread, Frame *pFrame)
-    {
-        STATIC_CONTRACT_NOTHROW;
-        STATIC_CONTRACT_GC_NOTRIGGER;
-
-#ifdef _DEBUG
-        if (LoggingOn(LF_APPDOMAIN, LL_INFO100)) {
-            TrackADThreadExit(pThread, pFrame);
-        }
-        else
-#endif
-        {
-            LONG result;
-            result = InterlockedDecrement((LONG*)&m_dwThreadEnterCount);
-            _ASSERTE(result >= 0);
-            LOG((LF_APPDOMAIN, LL_INFO1000, "AppDomain::ThreadExit from [%d] (%8.8x) %S count %d\n",
-                 this, GetId().m_dwId,
-                 GetFriendlyNameForLogging(), GetThreadEnterCount()));
-#if _DEBUG_ADUNLOAD
-            printf("AppDomain::ThreadExit %x from [%d] (%8.8x) %S count %d\n",
-                   pThread->GetThreadId(), this, GetId().m_dwId,
-                   GetFriendlyNameForLogging(), GetThreadEnterCount());
-#endif
-        }
-    }
-#endif // DACCESS_COMPILE
-
-    ULONG GetThreadEnterCount()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_dwThreadEnterCount;
-    }
-
-    BOOL OnlyOneThreadLeft()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_dwThreadEnterCount==1 || m_dwThreadsStillInAppDomain ==1;
-    }
-
-    Context *GetDefaultContext()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pDefaultContext;
-    }
-
-    BOOL CanLoadCode()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_Stage >= STAGE_READYFORMANAGEDCODE && m_Stage < STAGE_CLOSED;        
-    }
-
-    void SetAnonymouslyHostedDynamicMethodsAssembly(DomainAssembly * pDomainAssembly)
-    {
-        LIMITED_METHOD_CONTRACT;
-        _ASSERTE(pDomainAssembly != NULL);
-        _ASSERTE(m_anonymouslyHostedDynamicMethodsAssembly == NULL);
-        m_anonymouslyHostedDynamicMethodsAssembly = pDomainAssembly;
-    }
-
-    DomainAssembly * GetAnonymouslyHostedDynamicMethodsAssembly()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_anonymouslyHostedDynamicMethodsAssembly;
-    }
-
-    BOOL HasUnloadStarted()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_Stage>=STAGE_EXITED;
-    }
     static void RefTakerAcquire(AppDomain* pDomain)
     {
         WRAPPER_NO_CONTRACT;
@@ -3116,7 +2392,7 @@ public:
     {
         LIMITED_METHOD_DAC_CONTRACT;
 
-        return m_Stage >= STAGE_ACTIVE && m_Stage < STAGE_CLOSED;
+        return m_Stage >= STAGE_ACTIVE;
     }
     // Range for normal execution of code in the appdomain, currently used for
     // appdomain resource monitoring since we don't care to update resource usage
@@ -3137,7 +2413,7 @@ public:
         // There is no risk of races under DAC, so we will pretend to be unconditionally valid.
         return TRUE;
 #else
-        return m_Stage > STAGE_CREATING && m_Stage < STAGE_CLOSED;
+        return m_Stage > STAGE_CREATING;
 #endif
     }
 
@@ -3165,16 +2441,6 @@ public:
         _ASSERTE(m_dwCreationHolders > -1);
     }
 #endif
-    BOOL IsRunningIn(Thread* pThread);
-
-    BOOL IsUnloading()
-    {
-        LIMITED_METHOD_CONTRACT;
-        SUPPORTS_DAC;
-
-        return m_Stage > STAGE_UNLOAD_REQUESTED;
-    }
-
     BOOL NotReadyForManagedCode()
     {
         LIMITED_METHOD_CONTRACT;
@@ -3182,71 +2448,10 @@ public:
         return m_Stage < STAGE_READYFORMANAGEDCODE;
     }
 
-    void SetFinalized()
-    {
-        LIMITED_METHOD_CONTRACT;
-        SetStage(STAGE_FINALIZED);
-    }
-
-    BOOL IsFinalizing()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return m_Stage >= STAGE_FINALIZING;
-    }
-
-    BOOL IsFinalized()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return m_Stage >= STAGE_FINALIZED;
-    }
-
-    BOOL NoAccessToHandleTable()
-    {
-        LIMITED_METHOD_CONTRACT;
-        SUPPORTS_DAC;
-
-        return m_Stage >= STAGE_HANDLETABLE_NOACCESS;
-    }
-
-    // Checks whether the given thread can enter the app domain
-    BOOL CanThreadEnter(Thread *pThread);
-
-    // Following two are needed for the Holder
-    static void SetUnloadInProgress(AppDomain *pThis) PUB;
-    static void SetUnloadComplete(AppDomain *pThis) PUB;
-    // Predicates for GC asserts
-    BOOL ShouldHaveFinalization()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return ((DWORD) m_Stage) < STAGE_COLLECTED;
-    }
-    BOOL ShouldHaveCode()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return ((DWORD) m_Stage) < STAGE_COLLECTED;
-    }
-    BOOL ShouldHaveRoots()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return ((DWORD) m_Stage) < STAGE_CLEARED;
-    }
-    BOOL ShouldHaveInstances()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return ((DWORD) m_Stage) < STAGE_COLLECTED;
-    }
-
-
     static void RaiseExitProcessEvent();
     Assembly* RaiseResourceResolveEvent(DomainAssembly* pAssembly, LPCSTR szName);
     DomainAssembly* RaiseTypeResolveEventThrowing(DomainAssembly* pAssembly, LPCSTR szName, ASSEMBLYREF *pResultingAssemblyRef);
-    Assembly* RaiseAssemblyResolveEvent(AssemblySpec *pSpec, BOOL fIntrospection, BOOL fPreBind);
+    Assembly* RaiseAssemblyResolveEvent(AssemblySpec *pSpec);
 
 private:
     CrstExplicitInit    m_ReflectionCrst;
@@ -3256,7 +2461,6 @@ private:
     EEClassFactoryInfoHashTable *m_pRefClassFactHash;   // Hash table that maps a class factory info to a COM comp.
 #ifdef FEATURE_COMINTEROP
     DispIDCache *m_pRefDispIDCache;
-    COMorRemotingFlag m_COMorRemotingFlag;
     OBJECTHANDLE  m_hndMissing;     //Handle points to Missing.Value Object which is used for [Optional] arg scenario during IDispatch CCW Call
 
     MethodTable* m_rpCLRTypes[WinMDAdapter::RedirectedTypeIndex_Count];
@@ -3306,126 +2510,13 @@ public:
     PTR_LoaderHeap GetStubHeap();
     PTR_LoaderHeap GetLowFrequencyHeap();
     PTR_LoaderHeap GetHighFrequencyHeap();
-    virtual PTR_LoaderAllocator GetLoaderAllocator();
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    #define ARM_ETW_ALLOC_THRESHOLD (4 * 1024 * 1024)
-    // cache line size in ULONGLONG - 128 bytes which are 16 ULONGLONG's
-    #define ARM_CACHE_LINE_SIZE_ULL 16
-
-    inline ULONGLONG GetAllocBytes()
-    {
-        LIMITED_METHOD_CONTRACT;
-        ULONGLONG ullTotalAllocBytes = 0;
-
-        // Ensure that m_pullAllocBytes is non-null to avoid an AV in a race between GC and AD unload.
-        // A race can occur when a new appdomain is created, but an OOM is thrown when allocating for m_pullAllocBytes, causing the AD unload.
-        if(NULL != m_pullAllocBytes)
-        {
-            for (DWORD i = 0; i < m_dwNumHeaps; i++)
-            {
-                ullTotalAllocBytes += m_pullAllocBytes[i * ARM_CACHE_LINE_SIZE_ULL];
-            }
-        }
-        return ullTotalAllocBytes;
-    }
-
-    void RecordAllocBytes(size_t allocatedBytes, DWORD dwHeapNumber)
-    {
-        LIMITED_METHOD_CONTRACT;
-        _ASSERTE(dwHeapNumber < m_dwNumHeaps);
-        
-        // Ensure that m_pullAllocBytes is non-null to avoid an AV in a race between GC and AD unload.
-        // A race can occur when a new appdomain is created, but an OOM is thrown when allocating for m_pullAllocBytes, causing the AD unload.
-        if(NULL != m_pullAllocBytes)
-        {
-            m_pullAllocBytes[dwHeapNumber * ARM_CACHE_LINE_SIZE_ULL] += allocatedBytes;
-        }
-
-        ULONGLONG ullTotalAllocBytes = GetAllocBytes();
-
-        if ((ullTotalAllocBytes - m_ullLastEtwAllocBytes) >= ARM_ETW_ALLOC_THRESHOLD)
-        {
-            m_ullLastEtwAllocBytes = ullTotalAllocBytes;
-            FireEtwAppDomainMemAllocated((ULONGLONG)this, ullTotalAllocBytes, GetClrInstanceId());
-        }
-    }
-
-    inline ULONGLONG GetSurvivedBytes()
-    {
-        LIMITED_METHOD_CONTRACT;
-        ULONGLONG ullTotalSurvivedBytes = 0;
-
-        // Ensure that m_pullSurvivedBytes is non-null to avoid an AV in a race between GC and AD unload.
-        // A race can occur when a new appdomain is created, but an OOM is thrown when allocating for m_pullSurvivedBytes, causing the AD unload.
-        if(NULL != m_pullSurvivedBytes)
-        {
-            for (DWORD i = 0; i < m_dwNumHeaps; i++)
-            {
-                ullTotalSurvivedBytes += m_pullSurvivedBytes[i * ARM_CACHE_LINE_SIZE_ULL];
-            }
-        }
-        return ullTotalSurvivedBytes;
-    }
-
-    void RecordSurvivedBytes(size_t promotedBytes, DWORD dwHeapNumber)
-    {
-        WRAPPER_NO_CONTRACT;
-        _ASSERTE(dwHeapNumber < m_dwNumHeaps);
-   
-        // Ensure that m_pullSurvivedBytes is non-null to avoid an AV in a race between GC and AD unload.
-        // A race can occur when a new appdomain is created, but an OOM is thrown when allocating for m_pullSurvivedBytes, causing the AD unload.
-        if(NULL != m_pullSurvivedBytes)
-        {
-            m_pullSurvivedBytes[dwHeapNumber * ARM_CACHE_LINE_SIZE_ULL] += promotedBytes;
-        }
-    }
-
-    inline void ResetSurvivedBytes()
-    {
-        LIMITED_METHOD_CONTRACT;
-        
-        // Ensure that m_pullSurvivedBytes is non-null to avoid an AV in a race between GC and AD unload.
-        // A race can occur when a new appdomain is created, but an OOM is thrown when allocating for m_pullSurvivedBytes, causing the AD unload.
-        if(NULL != m_pullSurvivedBytes)
-        {
-            for (DWORD i = 0; i < m_dwNumHeaps; i++)
-            {
-                m_pullSurvivedBytes[i * ARM_CACHE_LINE_SIZE_ULL] = 0;
-            }
-        }
-    }
-
-    // Return the total processor time (user and kernel) used by threads executing in this AppDomain so far.
-    // The result is in 100ns units.
-    ULONGLONG QueryProcessorUsage();
-
-    // Add to the current count of processor time used by threads within this AppDomain. This API is called by
-    // threads transitioning between AppDomains.
-    void UpdateProcessorUsage(ULONGLONG ullAdditionalUsage);
-#endif //FEATURE_APPDOMAIN_RESOURCE_MONITORING
 
 private:
-    static void RaiseOneExitProcessEvent_Wrapper(AppDomainIterator* pi);
-    static void RaiseOneExitProcessEvent();
     size_t EstimateSize();
     EEClassFactoryInfoHashTable* SetupClassFactHash();
 #ifdef FEATURE_COMINTEROP
     DispIDCache* SetupRefDispIDCache();
-    COMorRemotingFlag GetPreferComInsteadOfManagedRemotingFromConfigFile();
 #endif // FEATURE_COMINTEROP
-
-    void InitializeDefaultDomainManager ();
-
-#ifdef FEATURE_CLICKONCE
-    void InitializeDefaultClickOnceDomain();
-#endif // FEATURE_CLICKONCE
-
-    void InitializeDefaultDomainSecurity();
-public:
-#ifdef FEATURE_CLICKONCE
-    BOOL IsClickOnceAppDomain();
-#endif // FEATURE_CLICKONCE
 
 protected:
     BOOL PostBindResolveAssembly(AssemblySpec  *pPrePolicySpec,
@@ -3441,65 +2532,32 @@ public:
 protected:
 #endif // FEATURE_COMINTEROP
 
-    LPWSTR m_pwDynamicDir;
-
 private:
     void RaiseLoadingAssemblyEvent(DomainAssembly* pAssembly);
 
     friend class DomainAssembly;
 
-public:
-    static void ProcessUnloadDomainEventOnFinalizeThread();
-    static BOOL HasWorkForFinalizerThread()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return s_pAppDomainToRaiseUnloadEvent != NULL;
-    }
-
 private:
-    static AppDomain* s_pAppDomainToRaiseUnloadEvent;
-    static BOOL s_fProcessUnloadDomainEvent;
+    BOOL RaiseUnhandledExceptionEvent(OBJECTREF *pThrowable, BOOL isTerminating);
 
-    void RaiseUnloadDomainEvent();
-    static void RaiseUnloadDomainEvent_Wrapper(LPVOID /* AppDomain * */);
-
-    BOOL RaiseUnhandledExceptionEvent(OBJECTREF *pSender, OBJECTREF *pThrowable, BOOL isTerminating);
-    BOOL HasUnhandledExceptionEventHandler();
-    BOOL RaiseUnhandledExceptionEventNoThrow(OBJECTREF *pSender, OBJECTREF *pThrowable, BOOL isTerminating);
-    
-    struct RaiseUnhandled_Args
-    {
-        AppDomain *pExceptionDomain;
-        AppDomain *pTargetDomain;
-        OBJECTREF *pSender;
-        OBJECTREF *pThrowable;
-        BOOL isTerminating;
-        BOOL *pResult;
-    };
-    #ifndef FEATURE_CORECLR 
-    static void RaiseUnhandledExceptionEvent_Wrapper(LPVOID /* RaiseUnhandled_Args * */);
-    #endif
-
-
-    static void AllowThreadEntrance(AppDomain *pApp);
-    static void RestrictThreadEntrance(AppDomain *pApp);
-
-    typedef Holder<AppDomain*,DoNothing<AppDomain*>,AppDomain::AllowThreadEntrance,NULL> RestrictEnterHolder;
-    
     enum Stage {
         STAGE_CREATING,
         STAGE_READYFORMANAGEDCODE,
         STAGE_ACTIVE,
         STAGE_OPEN,
-        STAGE_UNLOAD_REQUESTED,
-        STAGE_EXITING,
-        STAGE_EXITED,
-        STAGE_FINALIZING,
-        STAGE_FINALIZED,
-        STAGE_HANDLETABLE_NOACCESS,
-        STAGE_CLEARED,
-        STAGE_COLLECTED,
-        STAGE_CLOSED
+        // Don't delete the following *_DONOTUSE members and in case a new member needs to be added,
+        // add it at the end. The reason is that debugger stuff has its own copy of this enum and 
+        // it can use the members that are marked as *_DONOTUSE here when debugging older version 
+        // of the runtime.
+        STAGE_UNLOAD_REQUESTED_DONOTUSE,
+        STAGE_EXITING_DONOTUSE,
+        STAGE_EXITED_DONOTUSE,
+        STAGE_FINALIZING_DONOTUSE,
+        STAGE_FINALIZED_DONOTUSE,
+        STAGE_HANDLETABLE_NOACCESS_DONOTUSE,
+        STAGE_CLEARED_DONOTUSE,
+        STAGE_COLLECTED_DONOTUSE,
+        STAGE_CLOSED_DONOTUSE
     };
     void SetStage(Stage stage)
     {
@@ -3507,34 +2565,14 @@ private:
         {
             NOTHROW;
             GC_NOTRIGGER;
-            SO_TOLERANT;
             MODE_ANY;
         }
         CONTRACTL_END;
-        STRESS_LOG2(LF_APPDOMAIN, LL_INFO100,"Updating AD stage, ADID=%d, stage=%d\n",GetId().m_dwId,stage);
-        TESTHOOKCALL(AppDomainStageChanged(GetId().m_dwId,m_Stage,stage));
+        STRESS_LOG1(LF_APPDOMAIN, LL_INFO100,"Updating AD stage, stage=%d\n",stage);
         Stage lastStage=m_Stage;
         while (lastStage !=stage) 
             lastStage = (Stage)FastInterlockCompareExchange((LONG*)&m_Stage,stage,lastStage);
     };
-    void Exit(BOOL fRunFinalizers, BOOL fAsyncExit);
-    void Close();
-    void ClearGCRoots();
-    void ClearGCHandles();
-    void HandleAsyncPinHandles();
-    void UnwindThreads();
-    // Return TRUE if EE is stopped
-    // Return FALSE if more work is needed
-    BOOL StopEEAndUnwindThreads(unsigned int retryCount, BOOL *pFMarkUnloadRequestThread);
-
-    // Use Rude Abort to unload the domain.
-    BOOL m_fRudeUnload;
-
-    Thread *m_pUnloadRequestThread;
-    ADUnloadSink*   m_ADUnloadSink;
-    BOOL  m_bForceGCOnUnload;
-    BOOL  m_bUnloadingFromUnloadEvent;
-    AppDomainLoaderAllocator m_LoaderAllocator;
 
     // List of unloaded LoaderAllocators, protected by code:GetLoaderAllocatorReferencesLock (for now)
     LoaderAllocator * m_pDelayedLoaderAllocatorUnloadList;
@@ -3544,87 +2582,23 @@ public:
     // Register the loader allocator for deletion in code:ShutdownFreeLoaderAllocators.
     void RegisterLoaderAllocatorForDeletion(LoaderAllocator * pLoaderAllocator);
     
-    AppDomain * m_pNextInDelayedUnloadList;
-    
-    void SetForceGCOnUnload(BOOL bSet)
-    {
-        m_bForceGCOnUnload=bSet;
-    }
-
-    void SetUnloadingFromUnloadEvent()
-    {
-        m_bUnloadingFromUnloadEvent=TRUE;
-    }
-
-    BOOL IsUnloadingFromUnloadEvent()
-    {
-        return m_bUnloadingFromUnloadEvent;
-    }
-    
-    void SetRudeUnload()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_fRudeUnload = TRUE;
-    }
-
-    BOOL IsRudeUnload()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return m_fRudeUnload;
-    }
-
-    ADUnloadSink* GetADUnloadSink();
-    ADUnloadSink* GetADUnloadSinkForUnload();
-    void SetUnloadRequestThread(Thread *pThread)
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_pUnloadRequestThread = pThread;
-    }
-
-    Thread *GetUnloadRequestThread()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return m_pUnloadRequestThread;
-    }
-
 public:
     void SetGCRefPoint(int gccounter)
     {
         LIMITED_METHOD_CONTRACT;
-        m_LoaderAllocator.SetGCRefPoint(gccounter);
+        GetLoaderAllocator()->SetGCRefPoint(gccounter);
     }
     int  GetGCRefPoint()
     {
         LIMITED_METHOD_CONTRACT;
-        return m_LoaderAllocator.GetGCRefPoint();
+        return GetLoaderAllocator()->GetGCRefPoint();
     }
 
-    static USHORT GetOffsetOfId()
-    {
-        LIMITED_METHOD_CONTRACT;
-        size_t ofs = offsetof(class AppDomain, m_dwId);
-        _ASSERTE(FitsInI2(ofs));
-        return (USHORT)ofs;
-    }
-
-    
     void AddMemoryPressure();
     void RemoveMemoryPressure();
-    void Unload(BOOL fForceUnload);
-    static HRESULT UnloadById(ADID Id, BOOL fSync, BOOL fExceptionsPassThrough=FALSE);
-    static HRESULT UnloadWait(ADID Id, ADUnloadSink* pSink);
-#ifdef FEATURE_TESTHOOKS        
-    static HRESULT UnloadWaitNoCatch(ADID Id, ADUnloadSink* pSink);
-#endif
-    static void ResetUnloadRequestThread(ADID Id);
 
     void UnlinkClass(MethodTable *pMT);
 
-    typedef Holder<AppDomain *, AppDomain::SetUnloadInProgress, AppDomain::SetUnloadComplete> UnloadHolder;
     Assembly *GetRootAssembly()
     {
         LIMITED_METHOD_CONTRACT;
@@ -3640,6 +2614,9 @@ public:
 #endif
 
 private:
+    // The one and only AppDomain
+    SPTR_DECL(AppDomain, m_pTheAppDomain);
+
     SString         m_friendlyName;
     PTR_Assembly    m_pRootAssembly;
 
@@ -3649,21 +2626,6 @@ private:
     // When an application domain is created the ref count is artifically incremented
     // by one. For it to hit zero an explicit close must have happened.
     LONG        m_cRef;                    // Ref count.
-
-    PTR_IApplicationSecurityDescriptor m_pSecDesc;  // Application Security Descriptor
-
-    OBJECTHANDLE    m_ExposedObject;
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    // Indicates where assemblies will be loaded for
-    // this domain. By default all assemblies are loaded into the domain.
-    // There are two additional settings, all
-    // assemblies can be loaded into the shared domain or assemblies
-    // that are strong named are loaded into the shared area.
-    SharePolicy m_SharePolicy;
-#endif
-
-    IUnknown        *m_pComIPForExposedObject;
 
     // Hash table that maps a clsid to a type
     PtrHashMap          m_clsidHash;
@@ -3678,71 +2640,19 @@ private:
     // Hash table that remembers the last cached WinRT factory object per type per appdomain.
     WinRTFactoryCache   *m_pWinRTFactoryCache;
 
-    // The wrapper cache for this domain - it has its own CCacheLineAllocator on a per domain basis
-    // to allow the domain to go away and eventually kill the memory when all refs are gone
-    ComCallWrapperCache *m_pComCallWrapperCache;
-    
     // this cache stores the RCWs in this domain
     RCWCache *m_pRCWCache;
 
     // this cache stores the RCW -> CCW references in this domain
     RCWRefCache *m_pRCWRefCache;
-    
-    // The method table used for LicenseInteropHelper
-    MethodTable*    m_pLicenseInteropHelperMT;
 #endif // FEATURE_COMINTEROP
-
-    AssemblySink*      m_pAsyncPool;  // asynchronous retrival object pool (only one is kept)
-
-    // The index of this app domain among existing app domains (starting from 1)
-    ADIndex m_dwIndex;
 
     // The thread-pool index of this app domain among existing app domains (starting from 1)
     TPIndex m_tpIndex;
 
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    ULONGLONG* m_pullAllocBytes;
-    ULONGLONG* m_pullSurvivedBytes;
-    DWORD m_dwNumHeaps;
-    ULONGLONG m_ullLastEtwAllocBytes;
-    // Total processor time (user and kernel) utilized by threads running in this AppDomain so far. May not
-    // account for threads currently executing in the AppDomain until a call to QueryProcessorUsage() is
-    // made.
-    Volatile<ULONGLONG> m_ullTotalProcessorUsage;
-#endif //FEATURE_APPDOMAIN_RESOURCE_MONITORING
-
-#ifdef _DEBUG
-    struct ThreadTrackInfo;
-    typedef CDynArray<ThreadTrackInfo *> ThreadTrackInfoList;
-    ThreadTrackInfoList *m_pThreadTrackInfoList;
-    DWORD m_TrackSpinLock;
-#endif
-
-
-    // IL stub cache with fabricated MethodTable parented by a random module in this AD.
-    ILStubCache         m_ILStubCache;
-
-    // U->M thunks created in this domain and not associated with a delegate.
-    // The cache is keyed by MethodDesc pointers.
-    UMEntryThunkCache *m_pUMEntryThunkCache;
-
-    // The number of  times we have entered this AD
-    ULONG m_dwThreadEnterCount;
-    // The number of threads that have entered this AD, for ADU only
-    ULONG m_dwThreadsStillInAppDomain;
-
     Volatile<Stage> m_Stage;
 
-    // The default context for this domain
-    Context *m_pDefaultContext;
-
-    SString         m_applicationBase;
-    SString         m_privateBinPaths;
-    SString         m_configFile;
-
     ArrayList        m_failedAssemblies;
-
-    DomainAssembly * m_anonymouslyHostedDynamicMethodsAssembly;
 
 #ifdef _DEBUG
     Volatile<LONG> m_dwIterHolders;
@@ -3798,99 +2708,23 @@ private:
     // Stub caches for Method stubs
     //---------------------------------------------------------
 
-#ifdef FEATURE_FUSION
-    void TurnOnBindingRedirects();
-#endif
 public:
-
-#if defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
-private:
-    Volatile<BOOL> m_fIsBindingModelLocked;
-public:
-    BOOL IsHostAssemblyResolverInUse();
-    BOOL IsBindingModelLocked();
-    BOOL LockBindingModel();
-#endif // defined(FEATURE_HOST_ASSEMBLY_RESOLVER)
-
-    UMEntryThunkCache *GetUMEntryThunkCache();
-
-    ILStubCache* GetILStubCache()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return &m_ILStubCache;
-    }
-
-    static AppDomain* GetDomain(ILStubCache* pILStubCache)
-    {
-        return CONTAINING_RECORD(pILStubCache, AppDomain, m_ILStubCache);
-    }
 
     enum {
         CONTEXT_INITIALIZED =               0x0001,
-        USER_CREATED_DOMAIN =               0x0002, // created by call to AppDomain.CreateDomain
-        ALLOCATEDCOM =                      0x0008,
         LOAD_SYSTEM_ASSEMBLY_EVENT_SENT =   0x0040,
-        REMOTING_CONFIGURED_FOR_DOMAIN =    0x0100,
         COMPILATION_DOMAIN =                0x0400, // Are we ngenning?
-        APP_DOMAIN_CAN_BE_UNLOADED =        0x0800, // if need extra bits, can derive this at runtime
-        ORPHANED_LOCKS =                    0x1000, // Orphaned locks exist in this appdomain.
-        PASSIVE_DOMAIN =                    0x2000, // Can we execute code in this AppDomain
-        VERIFICATION_DOMAIN =               0x4000, // This is a verification domain
-        ILLEGAL_VERIFICATION_DOMAIN =       0x8000, // This can't be a verification domain
         IGNORE_UNHANDLED_EXCEPTIONS =      0x10000, // AppDomain was created using the APPDOMAIN_IGNORE_UNHANDLED_EXCEPTIONS flag
-        ENABLE_PINVOKE_AND_CLASSIC_COMINTEROP    =      0x20000, // AppDomain was created using the APPDOMAIN_ENABLE_PINVOKE_AND_CLASSIC_COMINTEROP flag
-#ifdef FEATURE_CORECLR
-        ENABLE_SKIP_PLAT_CHECKS         = 0x200000, // Skip various assembly checks (like platform check)
-        ENABLE_ASSEMBLY_LOADFILE        = 0x400000, // Allow Assembly.LoadFile in CoreCLR
-        DISABLE_TRANSPARENCY_ENFORCEMENT= 0x800000, // Disable enforcement of security transparency rules
-#endif        
     };
-
-    SecurityContext *m_pSecContext;
 
     AssemblySpecBindingCache  m_AssemblyCache;
     DomainAssemblyCache       m_UnmanagedCache;
     size_t                    m_MemoryPressure;
 
-    SString m_AppDomainManagerAssembly;
-    SString m_AppDomainManagerType;
-    BOOL    m_fAppDomainManagerSetInConfig;
-    EInitializeNewDomainFlags m_dwAppDomainManagerInitializeDomainFlags;
-
-#ifdef FEATURE_CORECLR 
     ArrayList m_NativeDllSearchDirectories;
-#endif
-    BOOL m_ReversePInvokeCanEnter;
     bool m_ForceTrivialWaitOperations;
-    // Section to support AD unload due to escalation
+
 public:
-    static void CreateADUnloadWorker();
-
-    static void CreateADUnloadStartEvent();
-
-    static DWORD WINAPI ADUnloadThreadStart(void *args);
-
-    // Default is safe unload with test hook
-    void EnableADUnloadWorker();
-
-    // If called to handle stack overflow, we can not set event, since the thread has limit stack.
-    void EnableADUnloadWorker(EEPolicy::AppDomainUnloadTypes type, BOOL fHasStack = TRUE);
-
-    static void EnableADUnloadWorkerForThreadAbort();
-    static void EnableADUnloadWorkerForFinalizer();
-    static void EnableADUnloadWorkerForCollectedADCleanup();
-
-    BOOL IsUnloadRequested()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return (m_Stage == STAGE_UNLOAD_REQUESTED);
-    }
-
-#ifdef FEATURE_CORECLR
-    BOOL IsImageFromTrustedPath(PEImage* pImage);
-    BOOL IsImageFullyTrusted(PEImage* pImage);
-#endif
 
 #ifdef FEATURE_TYPEEQUIVALENCE
 private:
@@ -3901,8 +2735,6 @@ public:
 #endif
 
     private:
-    static void ADUnloadWorkerHelper(AppDomain *pDomain);
-    static CLREvent * g_pUnloadStartEvent;
 
 #ifdef DACCESS_COMPILE
 public:
@@ -3925,130 +2757,27 @@ public:
 
 #endif
 
+#if defined(FEATURE_TIERED_COMPILATION)
+
+public:
+    TieredCompilationManager * GetTieredCompilationManager()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return &m_tieredCompilationManager;
+    }
+
+private:
+    TieredCompilationManager m_tieredCompilationManager;
+
+#endif
+
 #ifdef FEATURE_COMINTEROP
 
 private:
-#ifdef FEATURE_REFLECTION_ONLY_LOAD
-    // ReflectionOnly WinRT binder and its TypeCache (only in classic = non-AppX; the scenario is not supported in AppX)
-    CLRPrivBinderReflectionOnlyWinRT *    m_pReflectionOnlyWinRtBinder;
-    CLRPrivTypeCacheReflectionOnlyWinRT * m_pReflectionOnlyWinRtTypeCache;
-#endif // FEATURE_REFLECTION_ONLY_LOAD
 
 #endif //FEATURE_COMINTEROP
 
 public:
-#ifndef FEATURE_CORECLR
-    BOOL m_bUseOsSorting;
-    DWORD m_sortVersion;
-    COMNlsCustomSortLibrary *m_pCustomSortLibrary;
-#if _DEBUG
-    BOOL m_bSortingInitialized;
-#endif // _DEBUG
-    COMNlsHashProvider *m_pNlsHashProvider;
-#endif // !FEATURE_CORECLR
-
-private:
-    // This is the root-level default load context root binder. If null, then
-    // the Fusion binder is used; otherwise this binder is used.
-    ReleaseHolder<ICLRPrivBinder> m_pLoadContextHostBinder;
-
-    // -------------------------
-    // IMPORTANT!
-    // The shared and designer context binders are ONLY to be used in tool
-    // scenarios. There are known issues where use of these binders will
-    // cause application crashes, and interesting behaviors.
-    // -------------------------
-    
-    // This is the default designer shared context root binder.
-    // This is used as the parent binder for ImmersiveDesignerContextBinders
-    ReleaseHolder<ICLRPrivBinder> m_pSharedContextHostBinder;
-
-    // This is the current context root binder.
-    // Normally, this variable is immutable for appdomain lifetime, but in designer scenarios
-    // it may be replaced by designer context binders
-    Volatile<ICLRPrivBinder *>    m_pCurrentContextHostBinder;
-
-public:
-    // Returns the current hosted binder, or null if none available.
-    inline
-    ICLRPrivBinder * GetCurrentLoadContextHostBinder() const
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pCurrentContextHostBinder;
-    }
-
-    // Returns the shared context binder, or null if none available.
-    inline
-    ICLRPrivBinder * GetSharedContextHostBinder() const
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pSharedContextHostBinder;
-    }
-
-    // Returns the load context binder, or null if none available.
-    inline
-    ICLRPrivBinder * GetLoadContextHostBinder() const
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pLoadContextHostBinder;
-    }
-
-#ifndef DACCESS_COMPILE
-
-    // This is only called from the ImmersiveDesignerContext code
-    // It is protected with a managed monitor lock
-    inline
-    void SetSharedContextHostBinder(ICLRPrivBinder * pBinder)
-    {
-        LIMITED_METHOD_CONTRACT;
-        pBinder->AddRef();
-        m_pSharedContextHostBinder = pBinder;
-    }
-
-    // This is called from CorHost2's implementation of ICLRPrivRuntime::CreateAppDomain.
-    // Should only be called during AppDomain creation.
-    inline
-    void SetLoadContextHostBinder(ICLRPrivBinder * pBinder)
-    {
-        LIMITED_METHOD_CONTRACT;
-        pBinder->AddRef();
-        m_pLoadContextHostBinder = m_pCurrentContextHostBinder = pBinder;
-    }
-
-    inline
-    void SetCurrentContextHostBinder(ICLRPrivBinder * pBinder)
-    {
-        CONTRACTL
-        {
-            THROWS;
-            GC_TRIGGERS;
-        }
-        CONTRACTL_END;
-
-        LockHolder lh(this);
-
-#ifdef FEATURE_COMINTEROP
-        if (m_pNameToTypeMap != nullptr)
-        {
-            delete m_pNameToTypeMap;
-            m_pNameToTypeMap = nullptr;
-        }
-
-        m_vNameToTypeMapVersion++;
-#endif
-
-        m_pCurrentContextHostBinder = pBinder;
-    }
-
-#endif // DACCESS_COMPILE
-
-    // Indicates that a hosted binder is present.
-    inline
-    bool HasLoadContextHostBinder()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pLoadContextHostBinder != nullptr;
-    }
 
     class ComInterfaceReleaseList
     {
@@ -4104,8 +2833,8 @@ private:
             return (count_t)(dac_cast<TADDR>(key));
         }
         
-        static const element_t Null() { return NULL; }
-        static const element_t Deleted() { return (element_t)(TADDR)-1; }
+        static element_t Null() { return NULL; }
+        static element_t Deleted() { return (element_t)(TADDR)-1; }
         static bool IsNull(const element_t & e) { return e == NULL; }
         static bool IsDeleted(const element_t & e) { return dac_cast<TADDR>(e) == (TADDR)-1; }
     };
@@ -4171,50 +2900,6 @@ typedef Wrapper<AppDomain*,AppDomain::RefTakerAcquire,AppDomain::RefTakerRelease
 // Just a ref holder
 typedef ReleaseHolder<AppDomain> AppDomainRefHolder;
 
-// This class provides a way to access AppDomain by ID
-// without risking the appdomain getting invalid in the process
-class AppDomainFromIDHolder
-{
-public:
-    enum SyncType  
-    {
-        SyncType_GC,     // Prevents AD from being unloaded by forbidding GC for the lifetime of the object
-        SyncType_ADLock  // Prevents AD from being unloaded by requiring ownership of DomainLock for the lifetime of the object
-    };
-protected:    
-    AppDomain* m_pDomain;
-#ifdef _DEBUG    
-    BOOL       m_bAcquired;
-    BOOL       m_bChecked;
-    SyncType   m_type;
-#endif
-public:
-    DEBUG_NOINLINE AppDomainFromIDHolder(ADID adId, BOOL bUnsafePoint, SyncType synctype=SyncType_GC);
-    DEBUG_NOINLINE AppDomainFromIDHolder(SyncType synctype=SyncType_GC);
-    DEBUG_NOINLINE ~AppDomainFromIDHolder();
-
-	void* GetAddress() { return m_pDomain; } 	// Used to get an identfier for ETW
-    void Assign(ADID adId, BOOL bUnsafePoint);
-    void ThrowIfUnloaded();
-    void Release();
-    BOOL IsUnloaded() 
-    {
-        LIMITED_METHOD_CONTRACT;
-#ifdef _DEBUG
-        m_bChecked=TRUE; 
-        if (m_pDomain==NULL)
-        {
-            // no need to enforce anything
-            Release(); 
-        }
-#endif
-        return m_pDomain==NULL;
-    };
-    AppDomain* operator->();
-};  // class AppDomainFromIDHolder
-
-
-
 typedef VPTR(class SystemDomain) PTR_SystemDomain;
 
 class SystemDomain : public BaseDomain
@@ -4223,37 +2908,13 @@ class SystemDomain : public BaseDomain
     friend class AppDomainIterator;
     friend class UnsafeAppDomainIterator;
     friend class ClrDataAccess;
-    friend class AppDomainFromIDHolder;
-    friend Frame *Thread::IsRunningIn(AppDomain* pDomain, int *count);
 
     VPTR_VTABLE_CLASS(SystemDomain, BaseDomain)
     VPTR_UNIQUE(VPTR_UNIQUE_SystemDomain)
-    static AppDomain *GetAppDomainAtId(ADID indx);
 
 public:  
     static PTR_LoaderAllocator GetGlobalLoaderAllocator();
-    virtual PTR_LoaderAllocator GetLoaderAllocator() { WRAPPER_NO_CONTRACT; return GetGlobalLoaderAllocator(); }
-    static AppDomain* GetAppDomainFromId(ADID indx,DWORD ADValidityKind)
-    {
-        CONTRACTL
-        {
-            NOTHROW;
-            GC_NOTRIGGER;
-            MODE_COOPERATIVE;
-        }
-        CONTRACTL_END;
-        AppDomain* pRetVal;
-        if (indx.m_dwId==DefaultADID)
-            pRetVal= SystemDomain::System()->DefaultDomain();
-        else
-            pRetVal= GetAppDomainAtId(indx);
-#ifdef _DEBUG
-        // Only call CheckADValidity in DEBUG builds for non-NULL return values
-        if (pRetVal != NULL)
-            CheckADValidity(pRetVal, ADValidityKind);
-#endif        
-        return pRetVal;
-    }
+
     //****************************************************************************************
     //
     // To be run during the initial start up of the EE. This must be
@@ -4284,7 +2945,6 @@ public:
 #endif
     void Init();
     void Stop();
-    void Terminate();
     static void LazyInitGlobalStringLiteralMap();
 
     //****************************************************************************************
@@ -4297,7 +2957,7 @@ public:
     {
         LIMITED_METHOD_DAC_CONTRACT;
 
-        return m_pDefaultDomain;
+        return AppDomain::GetCurrentDomain();
     }
 
     // Notification when an assembly is loaded into the system domain
@@ -4363,43 +3023,19 @@ public:
     }
 #endif // DACCESS_COMPILE
 
-#ifndef FEATURE_CORECLR    
-	static void ExecuteMainMethod(HMODULE hMod, __in_opt LPWSTR path = NULL);
-#endif
-    static void ActivateApplication(int *pReturnValue);
-
-    static void InitializeDefaultDomain(BOOL allowRedirects, ICLRPrivBinder * pBinder = NULL);
-    static void SetupDefaultDomain();
-    static HRESULT SetupDefaultDomainNoThrow();
-
 #if defined(FEATURE_COMINTEROP_APARTMENT_SUPPORT) && !defined(CROSSGEN_COMPILE)
     static Thread::ApartmentState GetEntryPointThreadAptState(IMDInternalImport* pScope, mdMethodDef mdMethod);
-    static void SetThreadAptState(IMDInternalImport* pScope, Thread::ApartmentState state);
+    static void SetThreadAptState(Thread::ApartmentState state);
 #endif
-    static BOOL SetGlobalSharePolicyUsingAttribute(IMDInternalImport* pScope, mdMethodDef mdMethod);
-
-#ifdef FEATURE_MIXEDMODE
-    static HRESULT RunDllMain(HINSTANCE hInst, DWORD dwReason, LPVOID lpReserved);
-#endif // FEATURE_MIXEDMODE
 
     //****************************************************************************************
     //
     // Use an already exising & inited Application Domain (e.g. a subclass).
     static void LoadDomain(AppDomain     *pDomain);
 
-#ifndef DACCESS_COMPILE
-    static void MakeUnloadable(AppDomain* pApp)
-    {
-        WRAPPER_NO_CONTRACT;
-        System()->AddDomain(pApp);
-        pApp->SetCanUnload();
-    }
-#endif // DACCESS_COMPILE
-
     //****************************************************************************************
     // Methods used to get the callers module and hence assembly and app domain.
-    __declspec(deprecated("This method is deprecated, use the version that takes a StackCrawlMark instead"))
-    static Module* GetCallersModule(int skip);
+
     static MethodDesc* GetCallersMethod(StackCrawlMark* stackMark, AppDomain **ppAppDomain = NULL);
     static MethodTable* GetCallersType(StackCrawlMark* stackMark, AppDomain **ppAppDomain = NULL);
     static Module* GetCallersModule(StackCrawlMark* stackMark, AppDomain **ppAppDomain = NULL);
@@ -4440,104 +3076,11 @@ public:
     static HRESULT NotifyProfilerShutdown();
 #endif // PROFILING_SUPPORTED
 
-    //****************************************************************************************
-    // return the dev path
-#ifdef FEATURE_FUSION    
-    void GetDevpathW(__out_ecount_opt(1) LPWSTR* pPath, DWORD* pSize);
-#endif
-
-#ifndef DACCESS_COMPILE
-    void IncrementNumAppDomains ()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        s_dNumAppDomains++;
-    }
-
-    void DecrementNumAppDomains ()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        s_dNumAppDomains--;
-    }
-
-    ULONG GetNumAppDomains ()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return s_dNumAppDomains;
-    }
-#endif // DACCESS_COMPILE
-
-    //
-    // AppDomains currently have both an index and an ID.  The
-    // index is "densely" assigned; indices are reused as domains
-    // are unloaded.  The Id's on the other hand, are not reclaimed
-    // so may be sparse.
-    //
-    // Another important difference - it's OK to call GetAppDomainAtId for
-    // an unloaded domain (it will return NULL), while GetAppDomainAtIndex
-    // will assert if the domain is unloaded.
-    //<TODO>
-    // @todo:
-    // I'm not really happy with this situation, but
-    //  (a) we need an ID for a domain which will last the process lifetime for the
-    //      remoting code.
-    //  (b) we need a dense ID, for the handle table index.
-    // So for now, I'm leaving both, but hopefully in the future we can come up
-    // with something better.
-    //</TODO>
-
-    static ADIndex GetNewAppDomainIndex(AppDomain * pAppDomain);
-    static void ReleaseAppDomainIndex(ADIndex indx);
-    static PTR_AppDomain GetAppDomainAtIndex(ADIndex indx);
-    static PTR_AppDomain TestGetAppDomainAtIndex(ADIndex indx);
-    static DWORD GetCurrentAppDomainMaxIndex()
-    {
-        WRAPPER_NO_CONTRACT;
-
-        ArrayListStatic* list = (ArrayListStatic *)&m_appDomainIndexList;
-        PREFIX_ASSUME(list!=NULL);
-        return list->GetCount();
-    }
-
-    static ADID GetNewAppDomainId(AppDomain *pAppDomain);
-    static void ReleaseAppDomainId(ADID indx);
-    
-#ifndef DACCESS_COMPILE
-    static ADID GetCurrentAppDomainMaxId() { ADID id; id.m_dwId=m_appDomainIdList.GetCount(); return id;}
-#endif // DACCESS_COMPILE
-
-
 #ifndef DACCESS_COMPILE
     DWORD RequireAppDomainCleanup()
     {
         LIMITED_METHOD_CONTRACT;
-        return m_pDelayedUnloadList != 0 || m_pDelayedUnloadListOfLoaderAllocators != 0;
-    }
-
-    void AddToDelayedUnloadList(AppDomain* pDomain, BOOL bAsync)
-    {
-        CONTRACTL
-        {
-            NOTHROW;
-            GC_NOTRIGGER;
-            MODE_COOPERATIVE;
-        }
-        CONTRACTL_END;
-        m_UnloadIsAsync = bAsync;
-        
-        CrstHolder lh(&m_DelayedUnloadCrst);
-        pDomain->m_pNextInDelayedUnloadList=m_pDelayedUnloadList;
-        m_pDelayedUnloadList=pDomain;
-        if (m_UnloadIsAsync)
-        {
-            pDomain->AddRef();
-            int iGCRefPoint=GCHeap::GetGCHeap()->CollectionCount(GCHeap::GetGCHeap()->GetMaxGeneration());
-            if (GCHeap::GetGCHeap()->IsGCInProgress())
-                iGCRefPoint++;
-            pDomain->SetGCRefPoint(iGCRefPoint);
-        }
+        return m_pDelayedUnloadListOfLoaderAllocators != 0;
     }
 
     void AddToDelayedUnloadList(LoaderAllocator * pAllocator)
@@ -4554,96 +3097,17 @@ public:
         pAllocator->m_pLoaderAllocatorDestroyNext=m_pDelayedUnloadListOfLoaderAllocators;
         m_pDelayedUnloadListOfLoaderAllocators=pAllocator;
 
-        int iGCRefPoint=GCHeap::GetGCHeap()->CollectionCount(GCHeap::GetGCHeap()->GetMaxGeneration());
-        if (GCHeap::GetGCHeap()->IsGCInProgress())
+        int iGCRefPoint=GCHeapUtilities::GetGCHeap()->CollectionCount(GCHeapUtilities::GetGCHeap()->GetMaxGeneration());
+        if (GCHeapUtilities::IsGCInProgress())
             iGCRefPoint++;
         pAllocator->SetGCRefPoint(iGCRefPoint);
     }
 
-    void ClearCollectedDomains();
-    void ProcessClearingDomains();
-    void ProcessDelayedUnloadDomains();
+    void ProcessDelayedUnloadLoaderAllocators();
     
-    static void SetUnloadInProgress(AppDomain *pDomain)
-    {
-        WRAPPER_NO_CONTRACT;
-
-        _ASSERTE(m_pAppDomainBeingUnloaded == NULL);
-        m_pAppDomainBeingUnloaded = pDomain;
-        m_dwIndexOfAppDomainBeingUnloaded = pDomain->GetIndex();
-    }
-
-    static void SetUnloadDomainCleared()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        // about to delete, so clear this pointer so nobody uses it
-        m_pAppDomainBeingUnloaded = NULL;
-    }
-    static void SetUnloadComplete()
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        // should have already cleared the AppDomain* prior to delete
-        // either we succesfully unloaded and cleared or we failed and restored the ID
-        _ASSERTE(m_pAppDomainBeingUnloaded == NULL && m_dwIndexOfAppDomainBeingUnloaded.m_dwIndex != 0
-            || m_pAppDomainBeingUnloaded && SystemDomain::GetAppDomainAtId(m_pAppDomainBeingUnloaded->GetId()) != NULL);
-        m_pAppDomainBeingUnloaded = NULL;
-        m_pAppDomainUnloadingThread = NULL;
-    }
-
-    static AppDomain *AppDomainBeingUnloaded()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pAppDomainBeingUnloaded;
-    }
-
-    static ADIndex IndexOfAppDomainBeingUnloaded()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_dwIndexOfAppDomainBeingUnloaded;
-    }
-
-    static void SetUnloadRequestingThread(Thread *pRequestingThread)
-    {
-        LIMITED_METHOD_CONTRACT;
-        m_pAppDomainUnloadRequestingThread = pRequestingThread;
-    }
-
-    static Thread *GetUnloadRequestingThread()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pAppDomainUnloadRequestingThread;
-    }
-
-    static void SetUnloadingThread(Thread *pUnloadingThread)
-    {
-        LIMITED_METHOD_CONTRACT;
-        m_pAppDomainUnloadingThread = pUnloadingThread;
-    }
-
-    static Thread *GetUnloadingThread()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_pAppDomainUnloadingThread;
-    }
-
     static void EnumAllStaticGCRefs(promote_func* fn, ScanContext* sc);
 
 #endif // DACCESS_COMPILE
-
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    // The *AD* methods are what we got from tracing through EE roots.
-    // RecordTotalSurvivedBytes is the total promoted from a GC.
-    static void ResetADSurvivedBytes();
-    static ULONGLONG GetADSurvivedBytes();
-    static void RecordTotalSurvivedBytes(size_t totalSurvivedBytes);
-    static ULONGLONG GetTotalSurvivedBytes()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return m_totalSurvivedBytes;
-    }
-#endif //FEATURE_APPDOMAIN_RESOURCE_MONITORING
 
     //****************************************************************************************
     // Routines to deal with the base library (currently mscorlib.dll)
@@ -4660,13 +3124,12 @@ public:
         WRAPPER_NO_CONTRACT;
 
         // See if it is the installation path to mscorlib
-        if (path.EqualsCaseInsensitive(m_BaseLibrary, PEImage::GetFileSystemLocale()))
+        if (path.EqualsCaseInsensitive(m_BaseLibrary))
             return TRUE;
 
         // Or, it might be the GAC location of mscorlib
         if (System()->SystemAssembly() != NULL
-            && path.EqualsCaseInsensitive(System()->SystemAssembly()->GetManifestFile()->GetPath(),
-                                          PEImage::GetFileSystemLocale()))
+            && path.EqualsCaseInsensitive(System()->SystemAssembly()->GetManifestFile()->GetPath()))
             return TRUE;
 
         return FALSE;
@@ -4678,19 +3141,8 @@ public:
 
         // See if it is the installation path to mscorlib.resources
         SString s(SString::Ascii,g_psBaseLibrarySatelliteAssemblyName);
-        if (path.EqualsCaseInsensitive(s, PEImage::GetFileSystemLocale()))
+        if (path.EqualsCaseInsensitive(s))
             return TRUE;
-
-        // workaround!  Must implement some code to do this string comparison for
-        // mscorlib.resources in a culture-specific directory in the GAC.
-
-        /*
-        // Or, it might be the GAC location of mscorlib.resources
-        if (System()->SystemAssembly() != NULL
-            && path.EqualsCaseInsensitive(System()->SystemAssembly()->GetManifestFile()->GetPath(),
-                                          PEImage::GetFileSystemLocale()))
-            return TRUE;
-        */
 
         return FALSE;
     }
@@ -4729,10 +3181,7 @@ private:
     {
         STANDARD_VM_CONTRACT;
 
-        m_pDefaultDomain = NULL;
-        m_pDelayedUnloadList=NULL;
         m_pDelayedUnloadListOfLoaderAllocators=NULL;
-        m_UnloadIsAsync = FALSE;
 
         m_GlobalAllocator.Init(this);
     }
@@ -4740,26 +3189,13 @@ private:
 
     PTR_PEAssembly  m_pSystemFile;      // Single assembly (here for quicker reference);
     PTR_Assembly    m_pSystemAssembly;  // Single assembly (here for quicker reference);
-    PTR_AppDomain   m_pDefaultDomain;   // Default domain for COM+ classes exposed through IClassFactory.
 
     GlobalLoaderAllocator m_GlobalAllocator;
 
 
     InlineSString<100>  m_BaseLibrary;
 
-#ifdef FEATURE_VERSIONING
-
     InlineSString<100>  m_SystemDirectory;
-
-#else
-
-    LPCWSTR             m_SystemDirectory;
-
-#endif
-
-    LPWSTR      m_pwDevpath;
-    DWORD       m_dwDevpath;
-    BOOL        m_fDevpath;  // have we searched the environment
 
     // <TODO>@TODO: CTS, we can keep the com modules in a single assembly or in different assemblies.
     // We are currently using different assemblies but this is potentitially to slow...</TODO>
@@ -4767,37 +3203,11 @@ private:
     // Global domain that every one uses
     SPTR_DECL(SystemDomain, m_pSystemDomain);
 
-    AppDomain* m_pDelayedUnloadList;
-    BOOL m_UnloadIsAsync;
-
     LoaderAllocator * m_pDelayedUnloadListOfLoaderAllocators;
 
-#ifdef FEATURE_APPDOMAIN_RESOURCE_MONITORING
-    // This is what gets promoted for the whole GC heap.
-    static size_t m_totalSurvivedBytes;
-#endif //FEATURE_APPDOMAIN_RESOURCE_MONITORING
-
-    SVAL_DECL(ArrayListStatic, m_appDomainIndexList);
 #ifndef DACCESS_COMPILE
     static CrstStatic m_DelayedUnloadCrst;
     static CrstStatic       m_SystemDomainCrst;
-
-
-    static ArrayListStatic  m_appDomainIdList;
-
-    // only one ad can be unloaded at a time
-    static AppDomain*   m_pAppDomainBeingUnloaded;
-    // need this so can determine AD being unloaded after it has been deleted
-    static ADIndex      m_dwIndexOfAppDomainBeingUnloaded;
-
-    // if had to spin off a separate thread to do the unload, this is the original thread.
-    // allows us to delay aborting it until it's the last one so that it can receive
-    // notification of an unload failure
-    static Thread *m_pAppDomainUnloadRequestingThread;
-
-    // this is the thread doing the actual unload. He's allowed to enter the domain
-    // even if have started unloading.
-    static Thread *m_pAppDomainUnloadingThread;
 
     static GlobalStringLiteralMap *m_pGlobalStringLiteralMap;
 
@@ -4806,6 +3216,7 @@ private:
     static DWORD        m_dwLowestFreeIndex;
 #endif // DACCESS_COMPILE
 
+#ifdef FEATURE_PREJIT
 protected:
 
     // These flags let the correct native image of mscorlib to be loaded.
@@ -4814,6 +3225,7 @@ protected:
     SVAL_DECL(BOOL, s_fForceDebug);
     SVAL_DECL(BOOL, s_fForceProfiling);
     SVAL_DECL(BOOL, s_fForceInstrument);
+#endif
 
 public:
     static void     SetCompilationOverrides(BOOL fForceDebug,
@@ -4863,6 +3275,7 @@ public:
 // start & end of the iteration. This iterator is considered unsafe because it does not
 // reference count the various appdomains, and can only be used when the runtime is stopped,
 // or external synchronization is used. (and therefore no other thread may cause the appdomain list to change.)
+// In CoreCLR, this iterator doesn't use a list as there is at most 1 AppDomain, and instead will find the only AppDomain, or not.
 //
 class UnsafeAppDomainIterator
 {
@@ -4876,18 +3289,7 @@ public:
     void Init()
     {
         LIMITED_METHOD_CONTRACT;
-        SystemDomain* sysDomain = SystemDomain::System();
-        if (sysDomain)
-        {
-            ArrayListStatic* list = &sysDomain->m_appDomainIndexList;
-            PREFIX_ASSUME(list != NULL);
-            m_i = list->Iterate();
-        }
-        else
-        {
-            m_i.SetEmpty();
-        }
-
+        m_iterationCount = 0;
         m_pCurrent = NULL;
     }
 
@@ -4895,9 +3297,10 @@ public:
     {
         WRAPPER_NO_CONTRACT;
 
-        while (m_i.Next())
+        if (m_iterationCount == 0)
         {
-            m_pCurrent = dac_cast<PTR_AppDomain>(m_i.GetElement());
+            m_iterationCount++;
+            m_pCurrent = AppDomain::GetCurrentDomain();
             if (m_pCurrent != NULL &&
                 (m_bOnlyActive ?
                  m_pCurrent->IsActive() : m_pCurrent->IsValid()))
@@ -4919,7 +3322,7 @@ public:
 
   private:
 
-    ArrayList::Iterator m_i;
+    int                 m_iterationCount;
     AppDomain *         m_pCurrent;
     BOOL                m_bOnlyActive;
 };  // class UnsafeAppDomainIterator
@@ -4990,302 +3393,6 @@ class AppDomainIterator : public UnsafeAppDomainIterator
     }
 };  // class AppDomainIterator
 
-typedef VPTR(class SharedDomain) PTR_SharedDomain;
-
-class SharedDomain : public BaseDomain
-{
-    VPTR_VTABLE_CLASS_AND_CTOR(SharedDomain, BaseDomain)
-
-public:
-
-    static void Attach();
-    static void Detach();
-
-    virtual BOOL IsSharedDomain() { LIMITED_METHOD_DAC_CONTRACT; return TRUE; }
-    virtual PTR_LoaderAllocator GetLoaderAllocator() { WRAPPER_NO_CONTRACT; return SystemDomain::GetGlobalLoaderAllocator(); }
-
-    virtual PTR_AppDomain AsAppDomain()
-    {
-        LIMITED_METHOD_CONTRACT;
-        STATIC_CONTRACT_SO_TOLERANT;
-        _ASSERTE(!"Not an AppDomain");
-        return NULL;
-    }
-
-    static SharedDomain * GetDomain();
-
-    void Init();
-    void Terminate();
-
-    // This will also set the tenured bit if and only if the add was successful,
-    // and will make sure that the bit appears atomically set to all readers that
-    // might be accessing the hash on another thread.
-    MethodTable * FindIndexClass(SIZE_T index);
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    void AddShareableAssembly(Assembly * pAssembly);
-
-    class SharedAssemblyIterator
-    {
-        PtrHashMap::PtrIterator i;
-        Assembly * m_pAssembly;
-
-      public:
-        SharedAssemblyIterator() :
-          i(GetDomain() ? GetDomain()->m_assemblyMap.firstBucket() : NULL)
-        { LIMITED_METHOD_DAC_CONTRACT; }
-
-        BOOL Next()
-        {
-            WRAPPER_NO_CONTRACT;
-            SUPPORTS_DAC;
-
-            if (i.end())
-                return FALSE;
-
-            m_pAssembly = PTR_Assembly(dac_cast<TADDR>(i.GetValue()));
-            ++i;
-            return TRUE;
-        }
-
-        Assembly * GetAssembly()
-        {
-            LIMITED_METHOD_DAC_CONTRACT;
-
-            return m_pAssembly;
-        }
-
-      private:
-        friend class SharedDomain;
-    };
-    
-    Assembly * FindShareableAssembly(SharedAssemblyLocator * pLocator);
-    SIZE_T GetShareableAssemblyCount();
-#endif //FEATURE_LOADER_OPTIMIZATION
-
-private:
-    friend class SharedAssemblyIterator;
-    friend class SharedFileLockHolder;
-    friend class ClrDataAccess;
-
-#ifndef DACCESS_COMPILE
-    void *operator new(size_t size, void *pInPlace);
-    void operator delete(void *pMem);
-#endif
-
-    SPTR_DECL(SharedDomain, m_pSharedDomain);
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    PEFileListLock          m_FileCreateLock;
-    SIZE_T                  m_nextClassIndex;
-    PtrHashMap              m_assemblyMap;
-#endif
-    
-public:
-#ifdef DACCESS_COMPILE
-    virtual void EnumMemoryRegions(CLRDataEnumMemoryFlags flags,
-                                   bool enumThis);
-#endif
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-    // Hash map comparison function`
-    static BOOL CompareSharedAssembly(UPTR u1, UPTR u2);
-#endif
-};
-
-#ifdef FEATURE_LOADER_OPTIMIZATION
-class SharedFileLockHolderBase : protected HolderBase<PEFile *>
-{
-  protected:
-    PEFileListLock      *m_pLock;
-    ListLockEntry   *m_pLockElement;
-
-    SharedFileLockHolderBase(PEFile *value)
-      : HolderBase<PEFile *>(value)
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        m_pLock = NULL;
-        m_pLockElement = NULL;
-    }
-
-#ifndef DACCESS_COMPILE
-    void DoAcquire()
-    {
-        STATIC_CONTRACT_THROWS;
-        STATIC_CONTRACT_GC_TRIGGERS;
-        STATIC_CONTRACT_FAULT;
-
-        PEFileListLockHolder lockHolder(m_pLock);
-
-        m_pLockElement = m_pLock->FindFileLock(m_value);
-        if (m_pLockElement == NULL)
-        {
-            m_pLockElement = new ListLockEntry(m_pLock, m_value);
-            m_pLock->AddElement(m_pLockElement);
-        }
-        else
-            m_pLockElement->AddRef();
-
-        lockHolder.Release();
-
-        m_pLockElement->Enter();
-    }
-
-    void DoRelease()
-    {
-        STATIC_CONTRACT_NOTHROW;
-        STATIC_CONTRACT_GC_TRIGGERS;
-        STATIC_CONTRACT_FORBID_FAULT;
-
-        m_pLockElement->Leave();
-        m_pLockElement->Release();
-        m_pLockElement = NULL;
-    }
-#endif // DACCESS_COMPILE
-};
-
-class SharedFileLockHolder : public BaseHolder<PEFile *, SharedFileLockHolderBase>
-{
-  public:
-    DEBUG_NOINLINE SharedFileLockHolder(SharedDomain *pDomain, PEFile *pFile, BOOL Take = TRUE)
-      : BaseHolder<PEFile *, SharedFileLockHolderBase>(pFile, FALSE)
-    {
-        STATIC_CONTRACT_THROWS;
-        STATIC_CONTRACT_GC_TRIGGERS;
-        STATIC_CONTRACT_FAULT;
-        ANNOTATION_SPECIAL_HOLDER_CALLER_NEEDS_DYNAMIC_CONTRACT;
-
-        m_pLock = &pDomain->m_FileCreateLock;
-        if (Take)
-            Acquire();
-    }
-};
-#endif // FEATURE_LOADER_OPTIMIZATION
-
-inline BOOL BaseDomain::IsDefaultDomain()
-{ 
-    LIMITED_METHOD_DAC_CONTRACT; 
-    return (SystemDomain::System()->DefaultDomain() == this);
-}
-
 #include "comreflectioncache.inl"
-
-#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
-// holds an extra reference so needs special Extract() and should not have SuppressRelease()
-// Holders/Wrappers have nonvirtual methods so cannot use them as the base class
-template <class AppDomainType>
-class AppDomainCreationHolder 
-{
-private:
-    // disable the copy ctor
-    AppDomainCreationHolder(const AppDomainCreationHolder<AppDomainType>&) {}
-
-protected:
-    AppDomainType* m_pDomain;
-    BOOL       m_bAcquired;
-    void ReleaseAppDomainDuringCreation()
-    {
-        CONTRACTL
-        {
-            NOTHROW;
-            WRAPPER(GC_TRIGGERS);
-            PRECONDITION(m_bAcquired);
-            PRECONDITION(CheckPointer(m_pDomain));
-        }
-        CONTRACTL_END;
-
-        if (m_pDomain->NotReadyForManagedCode())
-        {
-            m_pDomain->Release();
-        }
-        else
-        {
-            STRESS_LOG2 (LF_APPDOMAIN, LL_INFO100, "Unload domain during creation [%d] %p\n", m_pDomain->GetId().m_dwId, m_pDomain);
-            SystemDomain::MakeUnloadable(m_pDomain);
-#ifdef _DEBUG
-            DWORD hostTestADUnload = g_pConfig->GetHostTestADUnload();
-            m_pDomain->EnableADUnloadWorker(hostTestADUnload != 2?EEPolicy::ADU_Safe:EEPolicy::ADU_Rude);
-#else
-            m_pDomain->EnableADUnloadWorker(EEPolicy::ADU_Safe);
-#endif
-        }
-    };
-    
-public:
-    AppDomainCreationHolder() 
-    {
-        m_pDomain=NULL;
-        m_bAcquired=FALSE;
-    };
-    ~AppDomainCreationHolder()
-    {
-        if (m_bAcquired) 
-        {
-            Release();
-        }
-    };
-    void Assign(AppDomainType* pDomain)
-    {
-        if(m_bAcquired)
-            Release();
-        m_pDomain=pDomain;
-        if(m_pDomain)
-        {
-            AppDomain::RefTakerAcquire(m_pDomain);
-#ifdef _DEBUG
-            m_pDomain->IncCreationCount();
-#endif // _DEBUG
-        }
-        m_bAcquired=TRUE;
-    };
-    
-    void Release()
-    {
-        _ASSERTE(m_bAcquired);
-        if(m_pDomain)
-        {
-#ifdef _DEBUG
-            m_pDomain->DecCreationCount();
-#endif // _DEBUG
-            if(!m_pDomain->IsDefaultDomain())
-                ReleaseAppDomainDuringCreation();
-            AppDomain::RefTakerRelease(m_pDomain);
-        };
-        m_bAcquired=FALSE;
-    };
-
-    AppDomainType* Extract()
-    {
-        _ASSERTE(m_bAcquired);
-        if(m_pDomain)
-        {
-#ifdef _DEBUG
-            m_pDomain->DecCreationCount();
-#endif // _DEBUG
-            AppDomain::RefTakerRelease(m_pDomain);
-        }
-        m_bAcquired=FALSE;
-        return m_pDomain;
-    };
-
-    AppDomainType* operator ->()
-    {
-        _ASSERTE(m_bAcquired);
-        return m_pDomain;
-    }
-
-    operator AppDomainType*()
-    {
-        _ASSERTE(m_bAcquired);
-        return m_pDomain;
-    }
-
-    void DoneCreating()
-    {
-        Extract();
-    }
-};
-#endif // !DACCESS_COMPILE && !CROSSGEN_COMPILE
 
 #endif

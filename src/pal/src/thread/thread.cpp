@@ -18,6 +18,9 @@ Abstract:
 
 --*/
 
+#include "pal/dbgmsg.h"
+SET_DEFAULT_DEBUG_CHANNEL(THREAD); // some headers have code with asserts, so do this first
+
 #include "pal/corunix.hpp"
 #include "pal/context.h"
 #include "pal/thread.hpp"
@@ -25,13 +28,15 @@ Abstract:
 #include "pal/handlemgr.hpp"
 #include "pal/cs.hpp"
 #include "pal/seh.hpp"
+#include "pal/signal.hpp"
 
 #include "procprivate.hpp"
 #include "pal/process.h"
 #include "pal/module.h"
-#include "pal/dbgmsg.h"
 #include "pal/environ.h"
 #include "pal/init.h"
+#include "pal/utils.h"
+#include "pal/virtual.h"
 
 #if defined(__NetBSD__) && !HAVE_PTHREAD_GETCPUCLOCKID
 #include <sys/cdefs.h>
@@ -49,6 +54,7 @@ Abstract:
 #include <errno.h>
 #include <stddef.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #if HAVE_MACH_THREADS
 #include <mach/mach.h>
 #endif // HAVE_MACH_THREADS
@@ -58,6 +64,7 @@ Abstract:
 #include "pal/fakepoll.h"
 #endif  // HAVE_POLL
 #include <limits.h>
+#include <algorithm>
 
 #if HAVE_SYS_LWP_H
 #include <sys/lwp.h>
@@ -70,18 +77,14 @@ Abstract:
 extern "C" int _lwp_self ();
 #endif
 
+#if HAVE_CPUSET_T
+typedef cpuset_t cpu_set_t;
+#endif
+
 using namespace CorUnix;
 
 
 /* ------------------- Definitions ------------------------------*/
-SET_DEFAULT_DEBUG_CHANNEL(THREAD);
-
-// The default stack size of a newly created thread (currently 256KB)
-// when the dwStackSize parameter of PAL_CreateThread()
-// is zero. This value can be set by setting the
-// environment variable PAL_THREAD_DEFAULT_STACK_SIZE
-// (the value should be in bytes and in hex).
-DWORD CPalThread::s_dwDefaultThreadStackSize = 256*1024; 
 
 /* list of free CPalThread objects */
 static Volatile<CPalThread*> free_threads_list = NULL;
@@ -90,7 +93,7 @@ static Volatile<CPalThread*> free_threads_list = NULL;
 /* NOTE: can't use a CRITICAL_SECTION here (see comment in FreeTHREAD) */
 int free_threads_spinlock = 0;
 
-/* lock to access iEndingThreads counter, condition variable to signal shutdown 
+/* lock to access iEndingThreads counter, condition variable to signal shutdown
 thread when any remaining threads have died, and count of exiting threads that
 can't be suspended. */
 pthread_mutex_t ptmEndThread;
@@ -119,12 +122,12 @@ ThreadInitializationRoutine(
     void *pProcessLocalData
     );
 
-void 
+void
 IncrementEndingThreadCount(
     void
     );
 
-void 
+void
 DecrementEndingThreadCount(
     void
     );
@@ -133,10 +136,13 @@ CObjectType CorUnix::otThread(
                 otiThread,
                 ThreadCleanupRoutine,
                 ThreadInitializationRoutine,
-                0, //sizeof(CThreadImmutableData),
+                0,      // sizeof(CThreadImmutableData),
+                NULL,   // No immutable data copy routine
+                NULL,   // No immutable data cleanup routine
                 sizeof(CThreadProcessLocalData),
-                0, //sizeof(CThreadSharedData),
-                0, // THREAD_ALL_ACCESS,
+                NULL,   // No process local data cleanup routine
+                0,      // sizeof(CThreadSharedData),
+                0,      // THREAD_ALL_ACCESS,
                 CObjectType::SecuritySupported,
                 CObjectType::SecurityInfoNotPersisted,
                 CObjectType::UnnamedObject,
@@ -170,12 +176,16 @@ static void InternalEndCurrentThreadWrapper(void *arg)
     // actually is the current PAL thread, put it back in TLS temporarily.
     pthread_setspecific(thObjKey, pThread);
     (void)PAL_Enter(PAL_BoundaryTop);
-    
+
     /* Call entry point functions of every attached modules to
        indicate the thread is exiting */
-    /* note : no need to enter a critical section for serialization, the loader 
+    /* note : no need to enter a critical section for serialization, the loader
        will lock its own critical section */
     LOADCallDllMain(DLL_THREAD_DETACH, NULL);
+
+#if !HAVE_MACH_EXCEPTIONS
+    pThread->FreeSignalAlternateStack();
+#endif // !HAVE_MACH_EXCEPTIONS
 
     // PAL_Leave will be called just before we release the thread reference
     // in InternalEndCurrentThread.
@@ -223,7 +233,7 @@ Function:
 
 Abstract:
     Allocate CPalThread instance
-  
+
 Return:
     The fresh thread structure, NULL otherwise
 --*/
@@ -261,7 +271,7 @@ Function:
 
 Abstract:
     Free THREAD structure
-  
+
 --*/
 static void FreeTHREAD(CPalThread *pThread)
 {
@@ -276,15 +286,15 @@ static void FreeTHREAD(CPalThread *pThread)
     // check against pThread->dwGuard when getting the current thread's data.
     memset((void*)pThread, 0xcc, sizeof(*pThread));
 #endif
-    
-    // We SHOULD be doing the following, but it causes massive problems. See the 
+
+    // We SHOULD be doing the following, but it causes massive problems. See the
     // comment below.
     //pthread_setspecific(thObjKey, NULL); // Make sure any TLS entry is removed.
 
     //
-    // Never actually free the THREAD structure to make the TLS lookaside cache work. 
-    // THREAD* for terminated thread can be stuck in the lookaside cache code for an 
-    // arbitrary amount of time. The unused THREAD* structures has to remain in a 
+    // Never actually free the THREAD structure to make the TLS lookaside cache work.
+    // THREAD* for terminated thread can be stuck in the lookaside cache code for an
+    // arbitrary amount of time. The unused THREAD* structures has to remain in a
     // valid memory and thus can't be returned to the heap.
     //
     // TODO: is this really true? Why would the entry remain in the cache for
@@ -292,12 +302,12 @@ static void FreeTHREAD(CPalThread *pThread)
     //
 
     /* NOTE: can't use a CRITICAL_SECTION here: EnterCriticalSection(&cs,TRUE) and
-       LeaveCriticalSection(&cs,TRUE) need to access the thread private data 
-       stored in the very THREAD structure that we just destroyed. Entering and 
+       LeaveCriticalSection(&cs,TRUE) need to access the thread private data
+       stored in the very THREAD structure that we just destroyed. Entering and
        leaving the critical section with internal==FALSE leads to possible hangs
-       in the PROCSuspendOtherThreads logic, at shutdown time 
+       in the PROCSuspendOtherThreads logic, at shutdown time
 
-       Update: [TODO] PROCSuspendOtherThreads has been removed. Can this 
+       Update: [TODO] PROCSuspendOtherThreads has been removed. Can this
        code be changed?*/
 
     /* Get the lock */
@@ -317,7 +327,7 @@ Function:
 
 returns the process owner ID of the indicated hThread
 --*/
-DWORD 
+DWORD
 THREADGetThreadProcessId(
     HANDLE hThread
     // UNIXTODO Should take pThread parameter here (modify callers)
@@ -327,7 +337,7 @@ THREADGetThreadProcessId(
     CPalThread *pTargetThread;
     IPalObject *pobjThread = NULL;
     PAL_ERROR palError = NO_ERROR;
-    
+
     DWORD dwProcessId = 0;
 
     pThread = InternalGetCurrentThread();
@@ -361,7 +371,7 @@ THREADGetThreadProcessId(
         ERROR("Couldn't retreive the hThread:%p pid owner !\n", hThread);
     }
 
-    
+
     return dwProcessId;
 }
 
@@ -386,15 +396,40 @@ GetCurrentThreadId(
     // with calling InternalGetCurrentThread (i.e., is our lookaside
     // cache faster on average than pthread_self?)
     //
-    
+
     dwThreadId = (DWORD)THREADSilentGetCurrentThreadId();
-    
-    LOGEXIT("GetCurrentThreadId returns DWORD %#x\n", dwThreadId);    
+
+    LOGEXIT("GetCurrentThreadId returns DWORD %#x\n", dwThreadId);
     PERF_EXIT(GetCurrentThreadId);
-    
+
     return dwThreadId;
 }
 
+/*++
+Function:
+  PAL_GetCurrentOSThreadId
+
+Returns the current thread's OS thread ID.
+This API is functionally equivalent to GetCurrentThreadId, but does not truncate the return value to 32-bits.
+This is needed to ensure that we can provide the correct OS thread ID on platforms such as OSX that have a 64-bit thread ID.
+--*/
+size_t
+PALAPI
+PAL_GetCurrentOSThreadId(
+            VOID)
+{
+    size_t threadId;
+
+    PERF_ENTRY(PAL_GetCurrentOSThreadId);
+    ENTRY("PAL_GetCurrentOSThreadId()\n");
+
+    threadId = THREADSilentGetCurrentThreadId();
+
+    LOGEXIT("PAL_GetCurrentOSThreadId returns %p\n", threadId);
+    PERF_EXIT(GetCurrentThreadId);
+
+    return threadId;
+}
 
 
 /*++
@@ -410,7 +445,7 @@ PAL_GetCurrentThread(
 {
     PERF_ENTRY(GetCurrentThread);
     ENTRY("GetCurrentThread()\n");
-    
+
     LOGEXIT("GetCurrentThread returns HANDLE %p\n", hPseudoCurrentThread);
     PERF_EXIT(GetCurrentThread);
 
@@ -434,7 +469,7 @@ SwitchToThread(
     PERF_ENTRY(SwitchToThread);
     ENTRY("SwitchToThread(VOID)\n");
 
-    /* sched_yield yields to another thread in the current process. This implementation 
+    /* sched_yield yields to another thread in the current process. This implementation
        won't work well for cross-process synchronization. */
     ret = (sched_yield() == 0);
 
@@ -467,7 +502,7 @@ CreateThread(
     PAL_ERROR palError;
     CPalThread *pThread;
     HANDLE hNewThread = NULL;
-    
+
     PERF_ENTRY(CreateThread);
     ENTRY("CreateThread(lpThreadAttr=%p, dwStackSize=%u, lpStartAddress=%p, "
           "lpParameter=%p, dwFlags=%#x, lpThreadId=%#x)\n",
@@ -475,7 +510,7 @@ CreateThread(
           dwCreationFlags, lpThreadId);
 
     pThread = InternalGetCurrentThread();
-
+    SIZE_T osThreadId = 0;
     palError = InternalCreateThread(
         pThread,
         lpThreadAttributes,
@@ -484,17 +519,75 @@ CreateThread(
         lpParameter,
         dwCreationFlags,
         UserCreatedThread,
-        lpThreadId,
+        &osThreadId,
         &hNewThread
         );
 
     if (NO_ERROR != palError)
     {
         pThread->SetLastError(palError);
-    }    
-
+    }
+    if(lpThreadId != nullptr)
+    {
+        *lpThreadId = (DWORD)osThreadId;
+    }
     LOGEXIT("CreateThread returns HANDLE %p\n", hNewThread);
     PERF_EXIT(CreateThread);
+
+    return hNewThread;
+}
+
+/*++
+Function:
+  PAL_CreateThread64
+  Similar to CreateThread but passes out a 64 bit thread id on platforms which use one.
+
+Note:
+  lpThreadAttributes could be ignored.
+
+See MSDN doc.
+
+--*/
+HANDLE
+PALAPI
+PAL_CreateThread64(
+    IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    IN DWORD dwStackSize,
+    IN LPTHREAD_START_ROUTINE lpStartAddress,
+    IN LPVOID lpParameter,
+    IN DWORD dwCreationFlags,
+    OUT SIZE_T* pThreadId)
+{
+    PAL_ERROR palError;
+    CPalThread *pThread;
+    HANDLE hNewThread = NULL;
+
+    PERF_ENTRY(PAL_CreateThread64);
+    ENTRY("PAL_CreateThread64(lpThreadAttr=%p, dwStackSize=%u, lpStartAddress=%p, "
+        "lpParameter=%p, dwFlags=%#x, pThreadId=%p)\n",
+        lpThreadAttributes, dwStackSize, lpStartAddress, lpParameter,
+        dwCreationFlags, pThreadId);
+
+    pThread = InternalGetCurrentThread();
+    palError = InternalCreateThread(
+        pThread,
+        lpThreadAttributes,
+        dwStackSize,
+        lpStartAddress,
+        lpParameter,
+        dwCreationFlags,
+        UserCreatedThread,
+        pThreadId,
+        &hNewThread
+    );
+
+    if (NO_ERROR != palError)
+    {
+        pThread->SetLastError(palError);
+    }
+
+    LOGEXIT("PAL_CreateThread64 returns HANDLE %p\n", hNewThread);
+    PERF_EXIT(PAL_CreateThread64);
 
     return hNewThread;
 }
@@ -508,7 +601,7 @@ CorUnix::InternalCreateThread(
     LPVOID lpParameter,
     DWORD dwCreationFlags,
     PalThreadType eThreadType,
-    LPDWORD lpThreadId,
+    SIZE_T* pThreadId,
     HANDLE *phThread
     )
 {
@@ -518,7 +611,7 @@ CorUnix::InternalCreateThread(
     bool fAttributesInitialized = FALSE;
     bool fThreadDataAddedToProcessList = FALSE;
     HANDLE hNewThread = NULL;
-    
+
     pthread_t pthread;
     pthread_attr_t pthreadAttr;
     size_t pthreadStackSize;
@@ -527,6 +620,7 @@ CorUnix::InternalCreateThread(
 #endif  // PTHREAD_CREATE_MODIFIES_ERRNO
     BOOL fHoldingProcessLock = FALSE;
     int iError = 0;
+    size_t alignedStackSize;
 
     if (0 != terminator)
     {
@@ -541,7 +635,7 @@ CorUnix::InternalCreateThread(
         // which could occur if a DllMain PROCESS_DETACH handler tried to
         // create a new thread for some odd reason).
         //
-        
+
         ERROR("process is terminating, can't create new thread.\n");
 
         if (pThread->GetThreadId() != static_cast<DWORD>(terminator))
@@ -557,7 +651,7 @@ CorUnix::InternalCreateThread(
             //
             // This is the shutdown thread, so just return an error
             //
-            
+
             palError = ERROR_PROCESS_ABORTED;
             goto EXIT;
         }
@@ -567,15 +661,32 @@ CorUnix::InternalCreateThread(
 
     if (lpThreadAttributes != NULL)
     {
-        ASSERT("lpThreadAttributes parameter must be NULL (%p)\n", 
+        ASSERT("lpThreadAttributes parameter must be NULL (%p)\n",
                lpThreadAttributes);
         palError = ERROR_INVALID_PARAMETER;
         goto EXIT;
     }
-    
+
+    alignedStackSize = dwStackSize;
+    if (alignedStackSize != 0)
+    {
+        // Some systems require the stack size to be aligned to the page size
+        if (sizeof(alignedStackSize) <= sizeof(dwStackSize) && alignedStackSize + (GetVirtualPageSize() - 1) < alignedStackSize)
+        {
+            // When coming here from the public API surface, the incoming value is originally a nonnegative signed int32, so
+            // this shouldn't happen
+            ASSERT(
+                "Couldn't align the requested stack size (%Iu) to the page size because the stack size was too large\n",
+                alignedStackSize);
+            palError = ERROR_INVALID_PARAMETER;
+            goto EXIT;
+        }
+        alignedStackSize = ALIGN_UP(alignedStackSize, GetVirtualPageSize());
+    }
+
     // Ignore the STACK_SIZE_PARAM_IS_A_RESERVATION flag
     dwCreationFlags &= ~STACK_SIZE_PARAM_IS_A_RESERVATION;
-    
+
     if ((dwCreationFlags != 0) && (dwCreationFlags != CREATE_SUSPENDED))
     {
         ASSERT("dwCreationFlags parameter is invalid (%#x)\n", dwCreationFlags);
@@ -609,48 +720,46 @@ CorUnix::InternalCreateThread(
     {
         ERROR("couldn't initialize pthread attributes\n");
         palError = ERROR_INTERNAL_ERROR;
-        goto EXIT;        
+        goto EXIT;
     }
 
     fAttributesInitialized = TRUE;
 
+    if (alignedStackSize == 0)
+    {
+        // The thread is to be created with default stack size. Use the default stack size
+        // override that was determined during the PAL initialization.
+        alignedStackSize = g_defaultStackSize;
+    }
+
     /* adjust the stack size if necessary */
-    if (0 != pthread_attr_getstacksize(&pthreadAttr, &pthreadStackSize))
+    if (alignedStackSize != 0)
     {
-        ERROR("couldn't set thread stack size\n");
-        palError = ERROR_INTERNAL_ERROR;
-        goto EXIT;        
-    }
-
-    TRACE("default pthread stack size is %d, caller requested %d (default is %d)\n",
-          pthreadStackSize, dwStackSize, CPalThread::s_dwDefaultThreadStackSize);
-
-    if (0 == dwStackSize)
-    {
-        dwStackSize = CPalThread::s_dwDefaultThreadStackSize;
-    }
-
 #ifdef PTHREAD_STACK_MIN
-    if (PTHREAD_STACK_MIN > pthreadStackSize)
-    {
-        WARN("default stack size is reported as %d, but PTHREAD_STACK_MIN is "
-             "%d\n", pthreadStackSize, PTHREAD_STACK_MIN);
-    }
-#endif
-    
-    if (pthreadStackSize < dwStackSize)
-    {
-        TRACE("setting thread stack size to %d\n", dwStackSize);
-        if (0 != pthread_attr_setstacksize(&pthreadAttr, dwStackSize))
+        size_t MinStackSize = ALIGN_UP(PTHREAD_STACK_MIN, GetVirtualPageSize());
+#else // !PTHREAD_STACK_MIN
+        size_t MinStackSize = 64 * 1024; // this value is typically accepted by pthread_attr_setstacksize()
+#endif // PTHREAD_STACK_MIN
+        if (alignedStackSize < MinStackSize)
         {
-            ERROR("couldn't set pthread stack size to %d\n", dwStackSize);
+            // Adjust the stack size to a minimum value that is likely to be accepted by pthread_attr_setstacksize(). If this
+            // function fails, typically the caller will end up throwing OutOfMemoryException under the assumption that the
+            // requested stack size is too large or the system does not have sufficient memory to create a thread. Try to
+            // prevent failing just just because the stack size value is too low.
+            alignedStackSize = MinStackSize;
+        }
+
+        TRACE("setting thread stack size to %Iu\n", alignedStackSize);
+        if (0 != pthread_attr_setstacksize(&pthreadAttr, alignedStackSize))
+        {
+            ERROR("couldn't set pthread stack size to %Iu\n", alignedStackSize);
             palError = ERROR_INTERNAL_ERROR;
             goto EXIT;
         }
     }
     else
     {
-        TRACE("using the system default thread stack size of %d\n", pthreadStackSize);
+        TRACE("using the system default thread stack size\n");
     }
 
 #if HAVE_THREAD_SELF || HAVE__LWP_SELF
@@ -684,10 +793,10 @@ CorUnix::InternalCreateThread(
     // Add the thread to the process list
     //
 
-    // 
+    //
     // We use the process lock to ensure that we're not interrupted
     // during the creation process. After adding the CPalThread reference
-    // to the process list, we want to make sure the actual thread has been 
+    // to the process list, we want to make sure the actual thread has been
     // started. Otherwise, there's a window where the thread can be found
     // in the process list but doesn't yet exist in the system.
     //
@@ -709,6 +818,42 @@ CorUnix::InternalCreateThread(
 #ifdef FEATURE_PAL_SXS
     _ASSERT_MSG(pNewThread->IsInPal(), "New threads we're about to spawn should always be in the PAL.\n");
 #endif // FEATURE_PAL_SXS
+
+#if HAVE_PTHREAD_ATTR_SETAFFINITY_NP && HAVE_SCHED_GETAFFINITY
+    {
+        // Threads inherit their parent's affinity mask on Linux. This is not desired, so we reset
+        // the current thread's affinity mask to the mask of the current process.
+        cpu_set_t cpuSet;
+        CPU_ZERO(&cpuSet);
+
+        int st = sched_getaffinity(gPID, sizeof(cpu_set_t), &cpuSet);
+        if (st != 0)
+        {
+            ASSERT("sched_getaffinity failed!\n");
+            // the sched_getaffinity should never fail for getting affinity of the current process
+            palError = ERROR_INTERNAL_ERROR;
+            goto EXIT;
+        }
+
+        st = pthread_attr_setaffinity_np(&pthreadAttr, sizeof(cpu_set_t), &cpuSet);
+        if (st != 0)
+        {
+            if (st == ENOMEM)
+            {
+                palError = ERROR_NOT_ENOUGH_MEMORY;
+            }
+            else
+            {
+                ASSERT("pthread_attr_setaffinity_np failed!\n");
+                // The pthread_attr_setaffinity_np should never fail except of OOM when
+                // passed the mask extracted using sched_getaffinity.
+                palError = ERROR_INTERNAL_ERROR;
+            }
+            goto EXIT;
+        }
+    }
+#endif // HAVE_PTHREAD_GETAFFINITY_NP && HAVE_SCHED_GETAFFINITY
+
     iError = pthread_create(&pthread, &pthreadAttr, CPalThread::ThreadEntry, pNewThread);
 
 #if PTHREAD_CREATE_MODIFIES_ERRNO
@@ -725,7 +870,7 @@ CorUnix::InternalCreateThread(
         palError = ERROR_NOT_ENOUGH_MEMORY;
         goto EXIT;
     }
-       
+
     //
     // Wait for the new thread to finish its initial startup tasks
     // (i.e., the ones that might fail)
@@ -737,10 +882,10 @@ CorUnix::InternalCreateThread(
         // the thread's ID in the out params
         //
         *phThread = hNewThread;
-        
-        if (NULL != lpThreadId)
+
+        if (NULL != pThreadId)
         {
-            *lpThreadId = pNewThread->GetThreadId();
+            *pThreadId = pNewThread->GetThreadId();
         }
     }
     else
@@ -780,7 +925,7 @@ EXIT:
         {
             PROCRemoveThread(pThread, pNewThread);
         }
-        // 
+        //
         // Once we remove the thread from the process list, we can call
         // PROCProcessUnlock.
         //
@@ -811,7 +956,7 @@ ExitThread(
        IN DWORD dwExitCode)
 {
     CPalThread *pThread;
-      
+
     ENTRY("ExitThread(dwExitCode=%u)\n", dwExitCode);
     PERF_ENTRY_ONLY(ExitThread);
 
@@ -828,84 +973,10 @@ ExitThread(
 
     /* kill the thread (itself), resulting in a call to InternalEndCurrentThread */
     pthread_exit(NULL);
-    
+
     ASSERT("pthread_exit should not return!\n");
     for (;;);
 }
-
-/*++
-Function:
-  GetExitCodeThread
-
-See MSDN doc.
---*/
-BOOL
-PALAPI
-GetExitCodeThread(
-           IN HANDLE hThread,
-           IN LPDWORD lpExitCode)
-{
-    PAL_ERROR palError = NO_ERROR;
-    CPalThread *pthrCurrent = NULL;
-    CPalThread *pthrTarget = NULL;
-    IPalObject *pobjThread = NULL;
-    BOOL fExitCodeSet;
-
-    PERF_ENTRY(GetExitCodeThread);
-    ENTRY("GetExitCodeThread(hThread = %p, lpExitCode = %p)\n",
-          hThread, lpExitCode);
-
-    if (NULL == lpExitCode)
-    {
-        WARN("Got NULL lpExitCode\n");
-        palError = ERROR_INVALID_PARAMETER;
-        goto done;
-    }
-
-    pthrCurrent = InternalGetCurrentThread();
-    palError = InternalGetThreadDataFromHandle(
-        pthrCurrent,
-        hThread,
-        0,
-        &pthrTarget,
-        &pobjThread
-        );
-
-    pthrTarget->Lock(pthrCurrent);
-
-    fExitCodeSet = pthrTarget->GetExitCode(lpExitCode);
-    if (!fExitCodeSet)
-    {
-        if (TS_DONE == pthrTarget->synchronizationInfo.GetThreadState())
-        {
-#ifdef FEATURE_PAL_SXS
-            // The thread exited without ever calling ExitThread.
-            // It must have wandered in.
-            *lpExitCode = 0;
-#else // FEATURE_PAL_SXS
-            ASSERT("exit code not set but thread is dead\n");
-#endif // FEATURE_PAL_SXS
-        }
-        else
-        {
-            *lpExitCode = STILL_ACTIVE;
-        }
-    }
-
-    pthrTarget->Unlock(pthrCurrent);
-
-done:
-    if (NULL != pobjThread)
-    {
-        pobjThread->ReleaseReference(pthrCurrent);
-    }
-
-    LOGEXIT("GetExitCodeThread returns BOOL %d\n", NO_ERROR == palError);
-    PERF_EXIT(GetExitCodeThread);
-    
-    return NO_ERROR == palError;
-}
-
 
 /*++
 Function:
@@ -922,7 +993,7 @@ CorUnix::InternalEndCurrentThread(
 {
     PAL_ERROR palError = NO_ERROR;
     ISynchStateController *pSynchStateController = NULL;
-    
+
 #ifdef PAL_PERF
     PERFDisableThreadProfile(UserCreatedThread != pThread->GetThreadType());
 #endif
@@ -942,7 +1013,7 @@ CorUnix::InternalEndCurrentThread(
     }
 
     //
-    // Need to synchronize setting the thread state to TS_DONE since 
+    // Need to synchronize setting the thread state to TS_DONE since
     // this is checked for in InternalSuspendThreadFromData.
     // TODO: Is this still needed after removing InternalSuspendThreadFromData?
     //
@@ -1006,10 +1077,10 @@ CorUnix::InternalEndCurrentThread(
 
         pThread->GetThreadObject()->ReleaseReference(pThread);
 
-        /* Remove thread for the thread list of the process 
+        /* Remove thread for the thread list of the process
            (don't do if this is the last thread -> gets handled by
             TerminateProcess->PROCCleanupProcess->PROCTerminateOtherThreads) */
-        
+
         PROCRemoveThread(pThread, pThread);
 
 #ifdef FEATURE_PAL_SXS
@@ -1017,8 +1088,8 @@ CorUnix::InternalEndCurrentThread(
         SEHDisable(pThread);
         PAL_Leave(PAL_BoundaryTop);
 #endif // FEATURE_PAL_SXS
-        
-        
+
+
         //
         // Now release our reference to the thread data. We cannot touch
         // it after this point
@@ -1026,7 +1097,7 @@ CorUnix::InternalEndCurrentThread(
 
         pThread->ReleaseThreadReference();
         DecrementEndingThreadCount();
-        
+
     }
 }
 
@@ -1044,7 +1115,7 @@ GetThreadPriority(
     CPalThread *pThread;
     PAL_ERROR palError;
     int iPriority = THREAD_PRIORITY_ERROR_RETURN;
-    
+
     PERF_ENTRY(GetThreadPriority);
     ENTRY("GetThreadPriority(hThread=%p)\n", hThread);
 
@@ -1063,7 +1134,7 @@ GetThreadPriority(
 
     LOGEXIT("GetThreadPriorityExit returns int %d\n", iPriority);
     PERF_EXIT(GetThreadPriority);
-    
+
     return iPriority;
 }
 
@@ -1077,7 +1148,7 @@ CorUnix::InternalGetThreadPriority(
     PAL_ERROR palError = NO_ERROR;
     CPalThread *pTargetThread;
     IPalObject *pobjThread = NULL;
-    
+
     palError = InternalGetThreadDataFromHandle(
         pThread,
         hThread,
@@ -1090,7 +1161,7 @@ CorUnix::InternalGetThreadPriority(
     {
         goto InternalGetThreadPriorityExit;
     }
-    
+
     pTargetThread->Lock(pThread);
 
     *piPriority = pTargetThread->GetThreadPriority();
@@ -1122,7 +1193,7 @@ SetThreadPriority(
 {
     CPalThread *pThread;
     PAL_ERROR palError = NO_ERROR;
-    
+
     PERF_ENTRY(SetThreadPriority);
     ENTRY("SetThreadPriority(hThread=%p, nPriority=%#x)\n", hThread, nPriority);
 
@@ -1141,7 +1212,7 @@ SetThreadPriority(
 
     LOGEXIT("SetThreadPriority returns BOOL %d\n", NO_ERROR == palError);
     PERF_EXIT(SetThreadPriority);
-    
+
     return NO_ERROR == palError;
 }
 
@@ -1155,7 +1226,8 @@ CorUnix::InternalSetThreadPriority(
     PAL_ERROR palError = NO_ERROR;
     CPalThread *pTargetThread = NULL;
     IPalObject *pobjThread = NULL;
-    
+
+    int st;
     int policy;
     struct sched_param schedParam;
     int max_priority;
@@ -1189,12 +1261,12 @@ CorUnix::InternalSetThreadPriority(
     case THREAD_PRIORITY_ABOVE_NORMAL:  /* fall through */
     case THREAD_PRIORITY_NORMAL:        /* fall through */
     case THREAD_PRIORITY_BELOW_NORMAL:  /* fall through */
-    case THREAD_PRIORITY_LOWEST:        
+    case THREAD_PRIORITY_LOWEST:
 #if PAL_IGNORE_NORMAL_THREAD_PRIORITY
         /* We aren't going to set the thread priority. Just record what it is,
            and exit */
         pTargetThread->m_iThreadPriority = iNewPriority;
-        goto InternalSetThreadPriorityExit;        
+        goto InternalSetThreadPriorityExit;
 #endif
         break;
 
@@ -1202,22 +1274,22 @@ CorUnix::InternalSetThreadPriority(
         ASSERT("Priority %d not supported\n", iNewPriority);
         palError = ERROR_INVALID_PARAMETER;
         goto InternalSetThreadPriorityExit;
-    }  
+    }
 
     /* check if the thread is still running */
     if (TS_DONE == pTargetThread->synchronizationInfo.GetThreadState())
     {
-        /* the thread has exited, set the priority in the thread structure 
+        /* the thread has exited, set the priority in the thread structure
            and exit */
         pTargetThread->m_iThreadPriority = iNewPriority;
-        goto InternalSetThreadPriorityExit;        
+        goto InternalSetThreadPriorityExit;
     }
 
-    /* get the previous thread schedule parameters.  We need to know the 
+    /* get the previous thread schedule parameters.  We need to know the
        scheduling policy to determine the priority range */
     if (pthread_getschedparam(
             pTargetThread->GetPThreadSelf(),
-            &policy, 
+            &policy,
             &schedParam
             ) != 0)
     {
@@ -1242,7 +1314,7 @@ CorUnix::InternalSetThreadPriority(
     min_priority = sched_get_priority_min(policy);
     if( -1 == max_priority || -1 == min_priority)
     {
-        ASSERT("sched_get_priority_min/max failed; error is %d (%s)\n", 
+        ASSERT("sched_get_priority_min/max failed; error is %d (%s)\n",
                errno, strerror(errno));
         palError = ERROR_INTERNAL_ERROR;
         goto InternalSetThreadPriorityExit;
@@ -1252,28 +1324,28 @@ CorUnix::InternalSetThreadPriority(
     min_priority = PAL_THREAD_PRIORITY_MIN;
 #endif
 
-    TRACE("Pthread priorities for policy %d must be in the range %d to %d\n", 
+    TRACE("Pthread priorities for policy %d must be in the range %d to %d\n",
           policy, min_priority, max_priority);
 
     /* explanation for fancy maths below :
-       POSIX doesn't specify the range of thread priorities that can be used 
+       POSIX doesn't specify the range of thread priorities that can be used
        with pthread_setschedparam. Instead, one must use sched_get_priority_min
        and sched_get_priority_max to obtain the lower and upper bounds of this
-       range. Since the PAL also uses a range of values (from Idle [-15] to 
-       Time Critical [+15]), we have to do a mapping from a known range to an 
-       unknown (at compilation) range. 
+       range. Since the PAL also uses a range of values (from Idle [-15] to
+       Time Critical [+15]), we have to do a mapping from a known range to an
+       unknown (at compilation) range.
        We do this by :
-       -substracting the minimal PAL priority from the desired priority. this 
+       -substracting the minimal PAL priority from the desired priority. this
         gives a value between 0 and the PAL priority range
-       -dividing this value by the PAL priority range. this allows us to 
+       -dividing this value by the PAL priority range. this allows us to
         express the desired priority as a floating-point value between 0 and 1
-       -multiplying this value by the PTHREAD priority range. This gives a 
+       -multiplying this value by the PTHREAD priority range. This gives a
         value between 0 and the PTHREAD priority range
-       -adding the minimal PTHREAD priority range. This will give us a value 
-        between the minimal and maximla pthread priority, which should be 
-        equivalent to the original PAL value. 
-        
-        example : suppose a pthread range 100 to 200, and a desired priority 
+       -adding the minimal PTHREAD priority range. This will give us a value
+        between the minimal and maximla pthread priority, which should be
+        equivalent to the original PAL value.
+
+        example : suppose a pthread range 100 to 200, and a desired priority
                   of 0 (halfway between PAL minimum and maximum)
             0 - (IDLE [-15]) = 15
             15 / (TIMECRITICAL[15] - IDLE[-15]) = 0.5
@@ -1286,19 +1358,16 @@ CorUnix::InternalSetThreadPriority(
     posix_priority += min_priority;
 
     schedParam.sched_priority = (int)posix_priority;
-    
+
     TRACE("PAL priority %d is mapped to pthread priority %d\n",
           iNewPriority, schedParam.sched_priority);
 
     /* Finally, set the new priority into place */
-    if (pthread_setschedparam(
-            pTargetThread->GetPThreadSelf(),
-            policy,
-            &schedParam
-            ) != 0)
+    st = pthread_setschedparam(pTargetThread->GetPThreadSelf(), policy, &schedParam);
+    if (st != 0)
     {
 #if SET_SCHEDPARAM_NEEDS_PRIVS
-        if (EPERM == errno)
+        if (EPERM == st)
         {
             // UNIXTODO: Should log a warning to the event log
             TRACE("Caller does not have OS privileges to call pthread_setschedparam\n");
@@ -1306,12 +1375,12 @@ CorUnix::InternalSetThreadPriority(
             goto InternalSetThreadPriorityExit;
         }
 #endif
-        
-        ASSERT("Unable to set thread priority (errno %d)\n", errno);
+
+        ASSERT("Unable to set thread priority to %d (error %d)\n", (int)posix_priority, st);
         palError = ERROR_INTERNAL_ERROR;
         goto InternalSetThreadPriorityExit;
     }
-    
+
     pTargetThread->m_iThreadPriority = iNewPriority;
 
 InternalSetThreadPriorityExit:
@@ -1326,7 +1395,7 @@ InternalSetThreadPriorityExit:
         pobjThread->ReleaseReference(pThread);
     }
 
-    return palError;    
+    return palError;
 }
 
 BOOL
@@ -1356,25 +1425,25 @@ CorUnix::GetThreadTimesInternal(
         &pthrTarget,
         &pobjThread
         );
-    
+
     if (palError != NO_ERROR)
     {
         ASSERT("Unable to get thread data from handle %p"
               "thread\n", hThread);
         SetLastError(ERROR_INTERNAL_ERROR);
         goto SetTimesToZero;
-    }   
+    }
 
     pthrTarget->Lock(pthrCurrent);
-    
+
     mach_port_t mhThread;
     mhThread = pthread_mach_thread_np(pthrTarget->GetPThreadSelf());
-    
+
     kern_return_t status;
     status = thread_info(
-        mhThread, 
-        THREAD_BASIC_INFO, 
-        (thread_info_t)&resUsage, 
+        mhThread,
+        THREAD_BASIC_INFO,
+        (thread_info_t)&resUsage,
         &resUsage_count);
 
     pthrTarget->Unlock(pthrCurrent);
@@ -1511,7 +1580,7 @@ CorUnix::GetThreadTimesInternal(
               "thread\n", hThread);
         SetLastError(ERROR_INTERNAL_ERROR);
         goto SetTimesToZero;
-    }   
+    }
 
     pTargetThread->Lock(pThread);
 
@@ -1541,7 +1610,7 @@ CorUnix::GetThreadTimesInternal(
     calcTime += (__int64) ts.tv_nsec;
     lpUserTime->dwLowDateTime = (DWORD)calcTime;
     lpUserTime->dwHighDateTime = (DWORD)(calcTime >> 32);
-    
+
     /* Set kernel time to zero, for now */
     lpKernelTime->dwLowDateTime = 0;
     lpKernelTime->dwHighDateTime = 0;
@@ -1552,7 +1621,7 @@ CorUnix::GetThreadTimesInternal(
 #endif //HAVE_MACH_THREADS
 
 SetTimesToZero:
-    
+
     lpUserTime->dwLowDateTime = 0;
     lpUserTime->dwHighDateTime = 0;
     lpKernelTime->dwLowDateTime = 0;
@@ -1620,13 +1689,13 @@ GetThreadTimes(
         lpCreationTime->dwLowDateTime = 0;
         lpCreationTime->dwHighDateTime = 0;
     }
-    
+
     if (lpExitTime)
     {
         lpExitTime->dwLowDateTime = 0;
         lpExitTime->dwHighDateTime = 0;
     }
-    
+
     LOGEXIT("GetThreadTimes returns BOOL %d\n", retval);
     PERF_EXIT(GetThreadTimes);
     return (retval);
@@ -1652,6 +1721,14 @@ CPalThread::ThreadEntry(
         ASSERT("THREAD pointer is NULL!\n");
         goto fail;
     }
+
+#if !HAVE_MACH_EXCEPTIONS
+    if (!pThread->EnsureSignalAlternateStack())
+    {
+        ASSERT("Cannot allocate alternate stack for SIGSEGV!\n");
+        goto fail;
+    }
+#endif // !HAVE_MACH_EXCEPTIONS
 
 #if defined(FEATURE_PAL_SXS) && defined(_DEBUG)
     // We cannot assert yet, as we haven't set in this thread into the TLS, and so __ASSERT_ENTER
@@ -1713,7 +1790,7 @@ CPalThread::ThreadEntry(
     if (UserCreatedThread == pThread->GetThreadType())
     {
         /* Inform all loaded modules that a thread has been created */
-        /* note : no need to take a critical section to serialize here; the loader 
+        /* note : no need to take a critical section to serialize here; the loader
            will take the module critical section */
         LOADCallDllMain(DLL_THREAD_ATTACH, NULL);
     }
@@ -1732,7 +1809,7 @@ CPalThread::ThreadEntry(
     TRACE("Thread exited (%u)\n", retValue);
     ExitThread(retValue);
 
-    /* Note: never get here */ 
+    /* Note: never get here */
     ASSERT("ExitThread failed!\n");
     for (;;);
 
@@ -1741,51 +1818,18 @@ fail:
     //
     // Notify InternalCreateThread that a failure occurred
     //
-    
+
     if (NULL != pThread)
     {
         pThread->synchronizationInfo.SetThreadState(TS_FAILED);
         pThread->SetStartStatus(FALSE);
     }
 
-    /* do not call ExitThread : we don't want to call DllMain(), and the thread 
-       isn't in a clean state (e.g. lpThread isn't in TLS). the cleanup work 
+    /* do not call ExitThread : we don't want to call DllMain(), and the thread
+       isn't in a clean state (e.g. lpThread isn't in TLS). the cleanup work
        above should release all resources */
     return NULL;
 }
-
-
-#define PAL_THREAD_DEFAULT_STACK_SIZE "PAL_THREAD_DEFAULT_STACK_SIZE"
-
-PAL_ERROR
-CorUnix::InitializeGlobalThreadData(
-    void
-    )
-{
-    PAL_ERROR palError = NO_ERROR;
-    char *pszStackSize = NULL;
-
-    //
-    // Read in the environment to see whether we need to change the default
-    // thread stack size.
-    //
-    pszStackSize = EnvironGetenv(PAL_THREAD_DEFAULT_STACK_SIZE);
-    if (NULL != pszStackSize)
-    {
-        // Environment variable exists
-        char *pszEnd;
-        DWORD dw = PAL_strtoul(pszStackSize, &pszEnd, 16); // treat it as hex
-        if ( (pszStackSize != pszEnd) && (0 != dw) )
-        {
-            CPalThread::s_dwDefaultThreadStackSize = dw;
-        }
-
-        InternalFree(pszStackSize);
-    }
-
-    return palError;
-}
-
 
 /*++
 Function:
@@ -1795,7 +1839,7 @@ Abstract:
     Create the CPalThread for the startup thread
     or another external thread entering the PAL
     for the first time
-  
+
 Parameters:
     ppThread - on success, receives the CPalThread
 
@@ -1810,7 +1854,7 @@ CorUnix::CreateThreadData(
 {
     PAL_ERROR palError = NO_ERROR;
     CPalThread *pThread = NULL;
-    
+
     /* Create the thread object */
     pThread = AllocTHREAD();
 
@@ -1849,7 +1893,7 @@ CorUnix::CreateThreadData(
     }
 
     *ppThread = pThread;
-    
+
 CreateThreadDataExit:
 
     if (NO_ERROR != palError)
@@ -1870,7 +1914,7 @@ Function:
 Abstract:
     Creates the IPalObject for a thread, storing
     the reference in the CPalThread
-  
+
 Parameters:
     pThread - the thread data for the creating thread
     pNewThread - the thread data for the thread being initialized
@@ -1917,7 +1961,7 @@ CorUnix::CreateThreadObject(
 
     palError = pobjThread->GetProcessLocalData(
         pThread,
-        WriteLock, 
+        WriteLock,
         &pDataLock,
         reinterpret_cast<void **>(&pLocalData)
         );
@@ -1943,7 +1987,7 @@ CorUnix::CreateThreadObject(
         &hThread,
         &pobjRegisteredThread
         );
-        
+
     //
     // pobjThread is invalidated by the call to RegisterObject, so NULL
     // it out here to prevent it from being released
@@ -1988,13 +2032,13 @@ CreateThreadObjectExit:
         if (!fThreadDataStoredInObject)
         {
             //
-            // The CPalThread for the new thread was never stored in 
+            // The CPalThread for the new thread was never stored in
             // an IPalObject instance, so we need to release the initial
             // reference here. (If it has been stored it will get freed in
             // the owning object's cleanup routine)
             //
 
-            pNewThread->ReleaseThreadReference();            
+            pNewThread->ReleaseThreadReference();
         }
     }
 
@@ -2078,7 +2122,7 @@ CorUnix::InternalCreateDummyThread(
     // pobjThread is invalidated by the above call, so NULL
     // it out here
     //
-    
+
     pobjThread = NULL;
 
     if (NO_ERROR != palError)
@@ -2165,7 +2209,7 @@ CorUnix::InternalGetThreadDataFromHandle(
                 // Transfer object reference to out param
                 //
 
-                *ppobjThread = pobj;                
+                *ppobjThread = pobj;
             }
             else
             {
@@ -2272,10 +2316,10 @@ CPalThread::~CPalThread()
     if (m_fStartItemsInitialized)
     {
         int iError;
-        
+
         iError = pthread_cond_destroy(&m_startCond);
         _ASSERTE(0 == iError);
-        
+
         iError = pthread_mutex_destroy(&m_startMutex);
         _ASSERTE(0 == iError);
     }
@@ -2300,7 +2344,7 @@ CPalThread::ReleaseThreadReference(
     {
         FreeTHREAD(this);
     }
-    
+
 }
 
 PAL_ERROR
@@ -2381,7 +2425,7 @@ CPalThread::SetStartStatus(
     //
     // This routine may get called from CPalThread::ThreadEntry
     //
-    // If we've reached this point there are no further thread 
+    // If we've reached this point there are no further thread
     // suspensions that happen at creation time, so reset
     // m_bCreateSuspended
     //
@@ -2447,17 +2491,125 @@ CPalThread::WaitForStartStatus(
     return m_fStartStatus;
 }
 
+#if !HAVE_MACH_EXCEPTIONS
+/*++
+Function :
+    EnsureSignalAlternateStack
+
+    Ensure that alternate stack for signal handling is allocated for the current thread
+
+Parameters :
+    None
+
+Return :
+    TRUE in case of a success, FALSE otherwise
+--*/
+BOOL
+CPalThread::EnsureSignalAlternateStack()
+{
+    int st = 0;
+
+    if (g_registered_signal_handlers)
+    {
+        stack_t oss;
+
+        // Query the current alternate signal stack
+        st = sigaltstack(NULL, &oss);
+        if ((st == 0) && (oss.ss_flags == SS_DISABLE))
+        {
+            // There is no alternate stack for SIGSEGV handling installed yet so allocate one
+
+            // We include the size of the SignalHandlerWorkerReturnPoint in the alternate stack size since the
+            // context contained in it is large and the SIGSTKSZ was not sufficient on ARM64 during testing.
+            int altStackSize = SIGSTKSZ + ALIGN_UP(sizeof(SignalHandlerWorkerReturnPoint), 16) + GetVirtualPageSize();
+#ifdef HAS_ASAN
+            // Asan also uses alternate stack so we increase its size on the SIGSTKSZ * 4 that enough for asan
+            // (see kAltStackSize in compiler-rt/lib/sanitizer_common/sanitizer_posix_libcdep.cc)
+            altStackSize += SIGSTKSZ * 4;
+#endif
+            altStackSize = ALIGN_UP(altStackSize, GetVirtualPageSize());
+            void* altStack = mmap(NULL, altStackSize, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_STACK | MAP_PRIVATE, -1, 0);
+            if (altStack != MAP_FAILED)
+            {
+                // create a guard page for the alternate stack
+                st = mprotect(altStack, GetVirtualPageSize(), PROT_NONE);
+                if (st == 0)
+                {
+                    stack_t ss;
+                    ss.ss_sp = (char*)altStack;
+                    ss.ss_size = altStackSize;
+                    ss.ss_flags = 0;
+                    st = sigaltstack(&ss, NULL);
+                }
+
+                if (st == 0)
+                {
+                    m_alternateStack = altStack;
+                }
+                else
+                {
+                    int st2 = munmap(altStack, altStackSize);
+                    _ASSERTE(st2 == 0);
+                }
+            }
+        }
+    }
+
+    return (st == 0);
+}
+
+/*++
+Function :
+    FreeSignalAlternateStack
+
+    Free alternate stack for signal handling
+
+Parameters :
+    None
+
+Return :
+    None
+--*/
+void
+CPalThread::FreeSignalAlternateStack()
+{
+    void *altstack = m_alternateStack;
+    m_alternateStack = nullptr;
+
+    if (altstack != nullptr)
+    {
+        stack_t ss, oss;
+        // The man page for sigaltstack says that when the ss.ss_flags is set to SS_DISABLE,
+        // all other ss fields are ignored. However, MUSL implementation checks that the
+        // ss_size is >= MINSIGSTKSZ even in this case.
+        ss.ss_size = MINSIGSTKSZ;
+        ss.ss_flags = SS_DISABLE;
+        int st = sigaltstack(&ss, &oss);
+        if ((st == 0) && (oss.ss_flags != SS_DISABLE))
+        {
+            // Make sure this altstack is this PAL's before freeing.
+            if (oss.ss_sp == altstack)
+            {
+                int st = munmap(oss.ss_sp, oss.ss_size);
+                _ASSERTE(st == 0);
+            }
+        }
+    }
+}
+
+#endif // !HAVE_MACH_EXCEPTIONS
+
 /* IncrementEndingThreadCount and DecrementEndingThreadCount are used
 to control a global counter that indicates if any threads are about to die.
 Once a thread's state is set to TS_DONE, it cannot be suspended. However,
 the dying thread can still access PAL resources, which is dangerous if the
 thread dies during PAL cleanup. To avoid this, the shutdown thread calls
-WaitForEndingThreads after suspending all other threads. WaitForEndingThreads 
-uses a condition variable along with the global counter to wait for remaining 
-PAL threads to die before proceeding with cleanup. As threads die, they 
+WaitForEndingThreads after suspending all other threads. WaitForEndingThreads
+uses a condition variable along with the global counter to wait for remaining
+PAL threads to die before proceeding with cleanup. As threads die, they
 decrement the counter and signal the condition variable. */
 
-void 
+void
 IncrementEndingThreadCount(
     void
     )
@@ -2473,7 +2625,7 @@ IncrementEndingThreadCount(
     _ASSERT_MSG(iError == 0, "pthread_mutex_unlock returned %d\n", iError);
 }
 
-void 
+void
 DecrementEndingThreadCount(
     void
     )
@@ -2496,7 +2648,7 @@ DecrementEndingThreadCount(
     _ASSERT_MSG(iError == 0, "pthread_mutex_unlock returned %d\n", iError);
 }
 
-void 
+void
 WaitForEndingThreads(
     void
     )
@@ -2509,7 +2661,7 @@ WaitForEndingThreads(
     while (iEndingThreads > 0)
     {
         iError = pthread_cond_wait(&ptcEndThread, &ptmEndThread);
-        _ASSERT_MSG(iError == 0, "pthread_cond_wait returned %d\n", iError);  
+        _ASSERT_MSG(iError == 0, "pthread_cond_wait returned %d\n", iError);
     }
 
     iError = pthread_mutex_unlock(&ptmEndThread);
@@ -2537,7 +2689,7 @@ CorUnix::InitializeEndingThreadsData(
         // Don't bother checking the return value of pthread_mutex_destroy
         // since PAL initialization will now fail.
         //
-        
+
         pthread_mutex_destroy(&ptmEndThread);
         goto InitializeEndingThreadsDataExit;
     }
@@ -2561,14 +2713,14 @@ ThreadCleanupRoutine(
     CPalThread *pThreadToCleanup = NULL;
     IDataLock *pDataLock = NULL;
     PAL_ERROR palError = NO_ERROR;
-        
+
     //
     // Free the CPalThread data for the passed in thread
     //
 
     palError = pObjectToCleanup->GetProcessLocalData(
         pThread,
-        WriteLock, 
+        WriteLock,
         &pDataLock,
         reinterpret_cast<void**>(&pThreadData)
         );
@@ -2584,7 +2736,7 @@ ThreadCleanupRoutine(
         // for the thread data to be available while the rest of the
         // object cleanup takes place).
         //
-        
+
         pThreadToCleanup = pThreadData->pThread;
         pThreadData->pThread = NULL;
         pDataLock->ReleaseLock(pThread, TRUE);
@@ -2594,7 +2746,7 @@ ThreadCleanupRoutine(
     {
         ASSERT("Unable to obtain thread data");
     }
-    
+
 }
 
 PAL_ERROR
@@ -2717,7 +2869,7 @@ CPalThread::GetCachedStackLimit()
     return m_stackLimit;
 }
 
-void *
+PVOID
 PALAPI
 PAL_GetStackBase()
 {
@@ -2725,7 +2877,7 @@ PAL_GetStackBase()
     return thread->GetCachedStackBase();
 }
 
-void *
+PVOID
 PALAPI
 PAL_GetStackLimit()
 {
@@ -2850,7 +3002,7 @@ int CorUnix::CThreadMachExceptionHandlers::GetIndexOfHandler(exception_mask_t bm
     {
         // Entry covers this exception type and the handler isn't null
         if (m_masks[i] & bmExceptionMask && m_handlers[i] != MACH_PORT_NULL)
-        { 
+        {
             _ASSERTE(m_handlers[i] != s_ExceptionPort);
 
             // One more check; has the target handler port become dead?
@@ -2868,3 +3020,90 @@ int CorUnix::CThreadMachExceptionHandlers::GetIndexOfHandler(exception_mask_t bm
 }
 
 #endif // HAVE_MACH_EXCEPTIONS
+
+/*++
+Function:
+  PAL_SetCurrentThreadAffinity
+
+Abstract
+  Set affinity of the current thread to the specified processor.
+
+Parameters:
+  procNo - number of the processor to affinitize the current thread to
+
+Return value:
+  TRUE if the function was able to set the affinity, FALSE if it has failed.
+--*/
+BOOL
+PALAPI
+PAL_SetCurrentThreadAffinity(WORD procNo)
+{
+#if HAVE_PTHREAD_GETAFFINITY_NP
+    cpu_set_t cpuSet;
+    CPU_ZERO(&cpuSet);
+
+    CPU_SET(procNo, &cpuSet);
+    int st = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuSet);
+
+    return st == 0;
+#else  // HAVE_PTHREAD_GETAFFINITY_NP
+    // There is no API to manage thread affinity, so let's ignore the request
+    return FALSE;
+#endif // HAVE_PTHREAD_GETAFFINITY_NP
+}
+
+/*++
+Function:
+  PAL_SetCurrentThreadAffinity
+
+Abstract
+  Get affinity set of the current thread. The set is represented by an array of "size" entries of UINT_PTR type.
+
+Parameters:
+  size - number of entries in the "data" array
+  data - pointer to the data of the resulting set, the LSB of the first entry in the array represents processor 0
+
+Return value:
+  TRUE if the function was able to get the affinity set, FALSE if it has failed.
+--*/
+BOOL
+PALAPI
+PAL_GetCurrentThreadAffinitySet(SIZE_T size, UINT_PTR* data)
+{
+#if HAVE_PTHREAD_GETAFFINITY_NP
+    cpu_set_t cpuSet;
+    CPU_ZERO(&cpuSet);
+
+    int st = pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuSet);
+
+    if (st == 0)
+    {
+        const SIZE_T BitsPerBitsetEntry = 8 * sizeof(UINT_PTR);
+        int nrcpus = PAL_GetTotalCpuCount();
+
+        // Get info for as much processors as it is possible to fit into the resulting set
+        SIZE_T remainingCount = std::min(size * BitsPerBitsetEntry, (SIZE_T)nrcpus);
+        SIZE_T i = 0;
+        while (remainingCount != 0)
+        {
+            UINT_PTR entry = 0;
+            SIZE_T bitsToCopy = std::min(remainingCount, BitsPerBitsetEntry);
+            SIZE_T cpuSetOffset = i * BitsPerBitsetEntry;
+            for (SIZE_T j = 0; j < bitsToCopy; j++)
+            {
+                if (CPU_ISSET(cpuSetOffset + j, &cpuSet))
+                {
+                    entry |= (UINT_PTR)1 << j;
+                }
+            }
+            remainingCount -= bitsToCopy;
+            data[i++] = entry;
+        }
+    }
+
+    return st == 0;
+#else  // HAVE_PTHREAD_GETAFFINITY_NP
+    // There is no API to manage thread affinity, so let's ignore the request
+    return FALSE;
+#endif // HAVE_PTHREAD_GETAFFINITY_NP
+}

@@ -178,14 +178,15 @@ struct make_unsigned<int>
     typedef unsigned int type;
 };
 
-#ifndef PLATFORM_UNIX
+#ifndef _HOST_UNIX_
 
 template<>
 struct make_unsigned<long>
 {
     typedef unsigned long type;
 };
-#endif // PLATFORM_UNIX
+
+#endif // !_HOST_UNIX_
 
 template<>
 struct make_unsigned<__int64>
@@ -193,4 +194,37 @@ struct make_unsigned<__int64>
     typedef unsigned __int64 type;
 };
 
-} // namespace jit_std
+template<>
+struct make_unsigned<size_t>
+{
+    typedef size_t type;
+};
+
+template<typename Type1>
+struct make_signed
+{
+};
+
+template<>
+struct make_signed<unsigned int>
+{
+    typedef signed int type;
+};
+
+#ifndef _HOST_UNIX_
+
+template<>
+struct make_signed<unsigned long>
+{
+    typedef signed long type;
+};
+
+#endif // !_HOST_UNIX_
+
+template<>
+struct make_signed<unsigned __int64>
+{
+    typedef signed __int64 type;
+};
+
+} // namespace jitstd

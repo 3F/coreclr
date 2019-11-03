@@ -29,6 +29,7 @@
 
 
 #include "profilinghelper.h"
+#include "profilinghelper.inl"
 
 
 class ProfilerFunctionEnum;
@@ -56,6 +57,9 @@ class ProfileArgIterator
 private:
     void        *m_handle;
     ArgIterator  m_argIterator;
+#ifdef UNIX_AMD64_ABI
+    UINT64       m_bufferPos;
+#endif // UNIX_AMD64_ABI
 
 public:
     ProfileArgIterator(MetaSig * pMetaSig, void* platformSpecificHandle);
@@ -70,6 +74,10 @@ public:
         LIMITED_METHOD_CONTRACT;
         return m_argIterator.NumFixedArgs();
     }
+    
+#ifdef UNIX_AMD64_ABI
+    LPVOID CopyStructFromRegisters();
+#endif // UNIX_AMD64_ABI
 
     //
     // After initialization, this method is called repeatedly until it
@@ -133,7 +141,7 @@ typedef struct _PROFILER_STACK_WALK_DATA PROFILER_STACK_WALK_DATA;
 // from the profiler implementation.  The profiler will call back on the v-table
 // to get at EE internals as required.
 
-class ProfToEEInterfaceImpl : public ICorProfilerInfo7
+class ProfToEEInterfaceImpl : public ICorProfilerInfo10
 {
 public:
 
@@ -555,6 +563,71 @@ public:
 
     // end ICorProfilerInfo7
 
+    // begin ICorProfilerInfo8
+
+    COM_METHOD IsFunctionDynamic(
+        FunctionID functionId,
+        BOOL *isDynamic);
+
+    COM_METHOD GetFunctionFromIP3(
+        LPCBYTE      ip,          // in
+        FunctionID * pFunctionId, // out
+        ReJITID *    pReJitId);   // out
+
+    COM_METHOD GetDynamicFunctionInfo(
+        FunctionID functionId,
+        ModuleID* moduleId,
+        PCCOR_SIGNATURE* ppvSig,
+        ULONG* pbSig,
+        ULONG cchName,
+        ULONG *pcchName,
+        WCHAR wszName[]);
+
+    // end ICorProfilerInfo8
+
+    // begin ICorProfilerInfo9
+
+    COM_METHOD GetNativeCodeStartAddresses(
+        FunctionID functionID, 
+        ReJITID reJitId, 
+        ULONG32 cCodeStartAddresses, 
+        ULONG32 *pcCodeStartAddresses, 
+        UINT_PTR codeStartAddresses[]);
+
+    COM_METHOD GetILToNativeMapping3(
+        UINT_PTR pNativeCodeStartAddress, 
+        ULONG32 cMap, 
+        ULONG32 *pcMap, 
+        COR_DEBUG_IL_TO_NATIVE_MAP map[]);
+
+    COM_METHOD GetCodeInfo4(
+        UINT_PTR pNativeCodeStartAddress, 
+        ULONG32 cCodeInfos, 
+        ULONG32* pcCodeInfos, 
+        COR_PRF_CODE_INFO codeInfos[]);
+
+    // end ICorProfilerInfo9
+
+    // beging ICorProfilerInfo10
+
+    COM_METHOD EnumerateObjectReferences(ObjectID objectId, ObjectReferenceCallback callback, void* clientData);
+
+    COM_METHOD IsFrozenObject(ObjectID objectId, BOOL *pbFrozen);
+
+    COM_METHOD GetLOHObjectSizeThreshold(DWORD *pThreshold);
+
+    COM_METHOD RequestReJITWithInliners(
+        DWORD       dwRejitFlags,
+        ULONG       cFunctions,
+        ModuleID    moduleIds[],
+        mdMethodDef methodIds[]);
+
+    COM_METHOD SuspendRuntime();
+
+    COM_METHOD ResumeRuntime();
+
+    // end ICorProfilerInfo10    
+
 protected:
 
     // Internal Helper Functions
@@ -585,6 +658,8 @@ protected:
     HRESULT ProfilerStackWalkFramesWrapper(Thread * pThreadToSnapshot, PROFILER_STACK_WALK_DATA * pData, unsigned flags);
 
     HRESULT EnumJITedFunctionsHelper(ProfilerFunctionEnum ** ppEnum, IJitManager ** ppJitMgr);
+
+    HRESULT SetupThreadForReJIT();
 
 #ifdef _TARGET_X86_
     HRESULT ProfilerEbpWalker(Thread * pThreadToSnapshot, LPCONTEXT pctxSeed, StackSnapshotCallback * callback, void * clientData);

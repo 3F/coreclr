@@ -25,9 +25,6 @@ HRESULT EnsureEEStarted(COINITIEE flags);
 // Wrapper around EnsureEEStarted which also sets startup mode.
 HRESULT InitializeEE(COINITIEE flags);
 
-// Has the EE been started up?
-BOOL IsRuntimeStarted(DWORD *pdwStartupFlags);
-
 // Enum to control what happens at the end of EE shutdown. There are two options:
 // 1. Call ::ExitProcess to cause the process to terminate gracefully. This is how
 //    shutdown normally ends. "Shutdown" methods that take this action as an argument
@@ -69,10 +66,6 @@ public:
     // Delete on TLS block
     static void DeleteTLS(void **pTlsData);
 
-    // Fiber switch notifications
-    static void SwitchIn();
-    static void SwitchOut();
-
     static void **CheckThreadState(DWORD slot, BOOL force = TRUE);
     static void **CheckThreadStateNoCreate(DWORD slot
 #ifdef _DEBUG
@@ -83,27 +76,13 @@ public:
     // Setup FLS simulation block, including ClrDebugState and StressLog.
     static void SetupTLSForThread(Thread *pThread);
 
-    static DWORD GetTlsIndex () {return TlsIndex;}
-
     static LPVOID* GetTlsData();
     static BOOL SetTlsData (void** ppTlsInfo);
-
-    static BOOL HasDetachedTlsInfo();
-
-    static void CleanupDetachedTlsInfo();
-
-    static void DetachTlsInfo(void **pTlsData);
 
     //***************************************************************************
     // private implementation:
     //***************************************************************************
 private:
-
-    // The debugger needs access to the TlsIndex so that we can read it from OOP.
-    friend class EEDbgInterfaceImpl;
-
-    SVAL_DECL (DWORD, TlsIndex);
-
     static PTLS_CALLBACK_FUNCTION Callbacks[MAX_PREDEFINED_TLS_SLOT];
 
     //***************************************************************************
@@ -199,10 +178,6 @@ private:
     
 };
 
-#ifdef _DEBUG
-extern void DisableGlobalAllocStore ();
-#endif //_DEBUG 
-
 void SetLatchedExitCode (INT32 code);
 INT32 GetLatchedExitCode (void);
 
@@ -210,44 +185,5 @@ INT32 GetLatchedExitCode (void);
 // Stronger than IsGCHeapInitialized
 BOOL IsGarbageCollectorFullyInitialized();
 
-#ifndef FEATURE_CORECLR
-//---------------------------------------------------------------------------------------
-// 
-// Class to encapsulate Cor Command line processing
-// 
-class CorCommandLine
-{
-public:
-
-//********** TYPES
-
-    // Note: We don't bother with interlocked operations as we manipulate these bits,
-    // because we don't anticipate free-threaded access.  (Most of this is used only
-    // during startup / shutdown).
-
-//********** DATA
-
-    // Hold the current (possibly parsed) command line here
-    static DWORD            m_NumArgs;
-    static LPWSTR          *m_ArgvW;
-
-    static LPWSTR          m_pwszAppFullName;
-    static DWORD           m_dwManifestPaths;
-    static LPWSTR         *m_ppwszManifestPaths;
-    static DWORD           m_dwActivationData;
-    static LPWSTR         *m_ppwszActivationData;
-
-//********** METHODS
-
-    // parse the command line
-    static HRESULT         SetArgvW(LPCWSTR lpCommandLine);
-
-    // Retrieve the parsed command line
-    static LPWSTR          *GetArgvW(DWORD *pNumArgs);
-
-private:
-    static HRESULT ReadClickOnceEnvVariables();
-};
-#endif // !FEATURE_CORECLR
 
 #endif

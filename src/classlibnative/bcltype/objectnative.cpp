@@ -18,14 +18,7 @@
 #include "field.h"
 #include "object.h"
 #include "comsynchronizable.h"
-#ifdef FEATURE_REMOTING
-#include "remoting.h"
-#endif
 #include "eeconfig.h"
-#ifdef FEATURE_REMOTING
-#include "objectclone.h"
-#endif
-#include "mdaassistants.h"
 
 
 /********************************************************************/
@@ -66,7 +59,7 @@ FCIMPL1(Object*, ObjectNative::GetObjectValue, Object* obj)
     // MethodTable::Box is a cleaner way to copy value class, but it is slower than following code.
     //
     retVal = OBJECTREFToObject(AllocateObject(pMT));
-    CopyValueClass(retVal->GetData(), objRef->GetData(), pMT, retVal->GetAppDomain());
+    CopyValueClass(retVal->GetData(), objRef->GetData(), pMT);
     HELPER_METHOD_FRAME_END();
 
     return(retVal);
@@ -82,16 +75,7 @@ NOINLINE static INT32 GetHashCodeHelper(OBJECTREF objRef)
 
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_EXACT_DEPTH|Frame::FRAME_ATTR_CAPTURE_DEPTH_2, objRef);   
 
-#ifdef MDA_SUPPORTED
-    MdaModuloObjectHashcode* pProbe = MDA_GET_ASSISTANT(ModuloObjectHashcode);
-#endif
-        
     idx = objRef->GetHashCodeEx();
-
-#ifdef MDA_SUPPORTED
-    if (pProbe)
-        idx = idx % pProbe->GetModulo();
-#endif
 
     HELPER_METHOD_FRAME_END();
     FC_INNER_EPILOG();
@@ -116,9 +100,6 @@ FCIMPL1(INT32, ObjectNative::GetHashCode, Object* obj) {
 
     OBJECTREF objRef(obj);
 
-#ifdef MDA_SUPPORTED
-    if (!MDA_GET_ASSISTANT(ModuloObjectHashcode))
-#endif
     {
         DWORD bits = objRef->GetHeader()->GetBits();
 
@@ -204,19 +185,8 @@ NOINLINE static Object* GetClassHelper(OBJECTREF objRef)
     TypeHandle typeHandle = objRef->GetTypeHandle();
     OBJECTREF refType = NULL;
 
-    // Arrays go down this slow path, at least don't do the full HelperMethodFrame setup
-    // if we are fetching the cached entry.  
-    refType = typeHandle.GetManagedClassObjectFast();
-    if (refType != NULL)
-        return OBJECTREFToObject(refType);
-
     HELPER_METHOD_FRAME_BEGIN_RET_ATTRIB_1(Frame::FRAME_ATTR_EXACT_DEPTH|Frame::FRAME_ATTR_CAPTURE_DEPTH_2, refType);
 
-#ifdef FEATURE_REMOTING
-    if (objRef->IsTransparentProxy())
-        refType = CRemotingServices::GetClass(objRef);
-    else 
-#endif
         refType = typeHandle.GetManagedClassObject();
 
     HELPER_METHOD_FRAME_END();
@@ -270,6 +240,9 @@ FCIMPL1(Object*, ObjectNative::Clone, Object* pThisUNSAFE)
 
     // assert that String has overloaded the Clone() method
     _ASSERTE(pMT != g_pStringClass);
+#ifdef FEATURE_UTF8STRING
+    _ASSERTE(pMT != g_pUtf8StringClass);
+#endif // FEATURE_UTF8STRING
 
     if (pMT->IsArray()) {
         refClone = DupArrayForCloning((BASEARRAYREF)refThis);
@@ -369,3 +342,16 @@ FCIMPL1(FC_BOOL_RET, ObjectNative::IsLockHeld, Object* pThisUNSAFE)
 }
 FCIMPLEND
 
+INT64 QCALLTYPE ObjectNative::GetMonitorLockContentionCount()
+{
+    QCALL_CONTRACT;
+
+    INT64 result = 0;
+
+    BEGIN_QCALL;
+
+    result = (INT64)Thread::GetTotalMonitorLockContentionCount();
+
+    END_QCALL;
+    return result;
+}

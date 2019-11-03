@@ -19,11 +19,11 @@
 
 // Environment variable for setting whether or not to use Server GC.
 // Off by default.
-static const wchar_t *serverGcVar = W("CORECLR_SERVER_GC");
+static const wchar_t *serverGcVar = W("COMPlus_gcServer");
 
 // Environment variable for setting whether or not to use Concurrent GC.
 // On by default.
-static const wchar_t *concurrentGcVar = W("CORECLR_CONCURRENT_GC");
+static const wchar_t *concurrentGcVar = W("COMPlus_gcConcurrent");
 
 // The name of the CoreCLR native runtime DLL.
 static const wchar_t *coreCLRDll = W("CoreCLR.dll");
@@ -47,7 +47,7 @@ class HostEnvironment
     // The list of paths to the assemblies that will be trusted by CoreCLR
     SString m_tpaList;
 
-    ICLRRuntimeHost2* m_CLRRuntimeHost;
+    ICLRRuntimeHost4* m_CLRRuntimeHost;
 
     HMODULE m_coreCLRModule;
 
@@ -110,7 +110,7 @@ public:
 
             // Check for %CORE_ROOT% and try to load CoreCLR.dll from it if it is set
             StackSString coreRoot;
-			m_coreCLRModule = NULL; // Initialize this here since we don't call TryLoadCoreCLR if CORE_ROOT is unset.
+            m_coreCLRModule = NULL; // Initialize this here since we don't call TryLoadCoreCLR if CORE_ROOT is unset.
             if (WszGetEnvironmentVariable(W("CORE_ROOT"), coreRoot) > 0 && coreRoot.GetCount() > 0)
             {
                 coreRoot.Append(W('\\'));
@@ -152,16 +152,7 @@ public:
             }
     }
 
-    ~HostEnvironment() {
-        if(m_coreCLRModule) {
-            // Free the module. This is done for completeness, but in fact CoreCLR.dll 
-            // was pinned earlier so this call won't actually free it. The pinning is
-            // done because CoreCLR does not support unloading.
-            ::FreeLibrary(m_coreCLRModule);
-        }
-    }
-
-    bool TPAListContainsFile(_In_z_ wchar_t* fileNameWithoutExtension, _In_reads_(countExtensions) wchar_t** rgTPAExtensions, int countExtensions)
+    bool TPAListContainsFile(_In_z_ wchar_t* fileNameWithoutExtension, _In_reads_(countExtensions) const wchar_t** rgTPAExtensions, int countExtensions)
     {
         if (m_tpaList.IsEmpty()) return false;
 
@@ -201,7 +192,7 @@ public:
         }
     }
 
-    void AddFilesFromDirectoryToTPAList(_In_z_ const wchar_t* targetPath, _In_reads_(countExtensions) wchar_t** rgTPAExtensions, int countExtensions)
+    void AddFilesFromDirectoryToTPAList(_In_z_ const wchar_t* targetPath, _In_reads_(countExtensions) const wchar_t** rgTPAExtensions, int countExtensions)
     {
         *m_log << W("Adding assemblies from ") << targetPath << W(" to the TPA list") << Logger::endl;
         StackSString assemblyPath;
@@ -259,12 +250,12 @@ public:
     // On first call, scans the coreclr directory for dlls and adds them all to the list.
     const wchar_t * GetTpaList() {
         if (m_tpaList.IsEmpty()) {
-            wchar_t *rgTPAExtensions[] = {
+            const wchar_t *rgTPAExtensions[] = {
                         W("*.ni.dll"),		// Probe for .ni.dll first so that it's preferred if ni and il coexist in the same dir
                         W("*.dll"),
                         W("*.ni.exe"),
                         W("*.exe"),
-                        W("*.ni.winmd")
+                        W("*.ni.winmd"),
                         W("*.winmd")
                         };
 
@@ -298,8 +289,8 @@ public:
         return m_hostExeName;
     }
 
-    // Returns the ICLRRuntimeHost2 instance, loading it from CoreCLR.dll if necessary, or nullptr on failure.
-    ICLRRuntimeHost2* GetCLRRuntimeHost() {
+    // Returns the ICLRRuntimeHost4 instance, loading it from CoreCLR.dll if necessary, or nullptr on failure.
+    ICLRRuntimeHost4* GetCLRRuntimeHost() {
         if (!m_CLRRuntimeHost) {
 
             if (!m_coreCLRModule) {
@@ -319,9 +310,9 @@ public:
 
             *m_log << W("Calling GetCLRRuntimeHost(...)") << Logger::endl;
 
-            HRESULT hr = pfnGetCLRRuntimeHost(IID_ICLRRuntimeHost2, (IUnknown**)&m_CLRRuntimeHost);
+            HRESULT hr = pfnGetCLRRuntimeHost(IID_ICLRRuntimeHost4, (IUnknown**)&m_CLRRuntimeHost);
             if (FAILED(hr)) {
-                *m_log << W("Failed to get ICLRRuntimeHost2 interface. ERRORCODE: ") << Logger::hresult << hr << Logger::endl;
+                *m_log << W("Failed to get ICLRRuntimeHost4 interface. ERRORCODE: ") << Logger::hresult << hr << Logger::endl;
                 return nullptr;
             }
         }
@@ -365,6 +356,116 @@ STARTUP_FLAGS CreateStartupFlags() {
     return initialFlags;
 }
 
+// Class used to manage activation context.
+// See: https://docs.microsoft.com/en-us/windows/desktop/SbsCs/using-the-activation-context-api
+class ActivationContext
+{
+public:
+    //       logger - Logger to record errors
+    // assemblyPath - Assembly containing activation context manifest
+    ActivationContext(Logger &logger, _In_z_ const WCHAR *assemblyPath)
+        : _actCookie{}
+        , _actCxt{ INVALID_HANDLE_VALUE }
+        , _logger{ logger }
+    {
+        ACTCTX cxt{};
+        cxt.cbSize = sizeof(cxt);
+        cxt.dwFlags = (ACTCTX_FLAG_APPLICATION_NAME_VALID | ACTCTX_FLAG_RESOURCE_NAME_VALID);
+        cxt.lpSource = assemblyPath;
+        cxt.lpResourceName = MAKEINTRESOURCEW(1); // The CreateProcess manifest which contains the context details
+
+        _actCxt = ::CreateActCtxW(&cxt);
+        if (_actCxt == INVALID_HANDLE_VALUE)
+        {
+            DWORD err = ::GetLastError();
+            if (err == ERROR_RESOURCE_TYPE_NOT_FOUND)
+            {
+                _logger << W("Assembly does not contain a manifest for activation") << Logger::endl;
+            }
+            else
+            {
+                _logger << W("Activation Context creation failed. Error Code: ") << Logger::hresult << err << Logger::endl;
+            }
+        }
+        else
+        {
+            BOOL res = ::ActivateActCtx(_actCxt, &_actCookie);
+            if (res == FALSE)
+                _logger << W("Failed to activate Activation Context. Error Code: ") << Logger::hresult << ::GetLastError() << Logger::endl;
+        }
+    }
+
+    ~ActivationContext()
+    {
+        if (_actCookie != ULONG_PTR{})
+        {
+            BOOL res = ::DeactivateActCtx(0, _actCookie);
+            if (res == FALSE)
+                _logger << W("Failed to de-activate Activation Context. Error Code: ") << Logger::hresult << ::GetLastError() << Logger::endl;
+        }
+
+        if (_actCxt != INVALID_HANDLE_VALUE)
+            ::ReleaseActCtx(_actCxt);
+    }
+
+private:
+    Logger &_logger;
+    HANDLE _actCxt;
+    ULONG_PTR _actCookie;
+};
+
+class ClrInstanceDetails
+{
+    static void * _currentClrInstance;
+    static unsigned int _currentAppDomainId;
+
+public: // static
+    static HRESULT GetDetails(void **clrInstance, unsigned int *appDomainId)
+    {
+        *clrInstance = _currentClrInstance;
+        *appDomainId = _currentAppDomainId;
+        return S_OK;
+    }
+
+public:
+    ClrInstanceDetails(void *clrInstance, unsigned int appDomainId)
+    {
+        _currentClrInstance = clrInstance;
+        _currentAppDomainId = appDomainId;
+    }
+
+    ~ClrInstanceDetails()
+    {
+        _currentClrInstance = nullptr;
+        _currentAppDomainId = 0;
+    }
+};
+
+void * ClrInstanceDetails::_currentClrInstance;
+unsigned int ClrInstanceDetails::_currentAppDomainId;
+
+extern "C" __declspec(dllexport) HRESULT __cdecl GetCurrentClrDetails(void **clrInstance, unsigned int *appDomainId)
+{
+    return ClrInstanceDetails::GetDetails(clrInstance, appDomainId);
+}
+
+bool TryLoadHostPolicy(StackSString& hostPolicyPath)
+{
+    const WCHAR *hostpolicyName = W("hostpolicy.dll");
+    HMODULE hMod = ::GetModuleHandleW(hostpolicyName);
+    if (hMod != nullptr)
+    {
+        return true;
+    }
+    // Check if a hostpolicy exists and if it does, load it.
+    if (INVALID_FILE_ATTRIBUTES != ::GetFileAttributesW(hostPolicyPath.GetUnicode()))
+    {
+        hMod = ::LoadLibraryExW(hostPolicyPath.GetUnicode(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    }
+
+    return hMod != nullptr;
+}
+
 bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbose, const bool waitForDebugger, DWORD &exitCode)
 {
 
@@ -402,7 +503,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
         appPathPtr = appPath.OpenUnicodeBuffer(size - 1);
         length = WszGetFullPathName(exeName, size, appPathPtr, &filePart);
     }
-    if (length == 0 || length >= size) {
+    if (length == 0 || length >= size || filePart == NULL) {
         log << W("Failed to get full path: ") << exeName << Logger::endl;
         log << W("Error code: ") << GetLastError() << Logger::endl;
         return false;
@@ -440,9 +541,20 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
     nativeDllSearchDirs.Append(W(";"));
     nativeDllSearchDirs.Append(hostEnvironment.m_coreCLRDirectoryPath);
 
+    // Preload mock hostpolicy if requested.
+    StackSString hostpolicyPath;
+    if (WszGetEnvironmentVariable(W("MOCK_HOSTPOLICY"), hostpolicyPath) > 0 && hostpolicyPath.GetCount() > 0)
+    {
+        if (!TryLoadHostPolicy(hostpolicyPath))
+        {
+            log << W("Unable to load requested mock hostpolicy.");
+            return false;
+        }
+    }
+
     // Start the CoreCLR
 
-    ICLRRuntimeHost2 *host = hostEnvironment.GetCLRRuntimeHost();
+    ICLRRuntimeHost4 *host = hostEnvironment.GetCLRRuntimeHost();
     if (!host) {
         return false;
     }
@@ -451,7 +563,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
     
     
     STARTUP_FLAGS flags = CreateStartupFlags();
-    log << W("Setting ICLRRuntimeHost2 startup flags") << Logger::endl;
+    log << W("Setting ICLRRuntimeHost4 startup flags") << Logger::endl;
     log << W("Server GC enabled: ") << HAS_FLAG(flags, STARTUP_FLAGS::STARTUP_SERVER_GC) << Logger::endl;
     log << W("Concurrent GC enabled: ") << HAS_FLAG(flags, STARTUP_FLAGS::STARTUP_CONCURRENT_GC) << Logger::endl;
 
@@ -462,13 +574,25 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
         return false;
     }
 
-    log << W("Starting ICLRRuntimeHost2") << Logger::endl;
+    log << W("Starting ICLRRuntimeHost4") << Logger::endl;
 
     hr = host->Start();
     if (FAILED(hr)) {
         log << W("Failed to start CoreCLR. ERRORCODE: ") << Logger::hresult << hr << Logger:: endl;
         return false;
     }
+
+    StackSString tpaList;
+    if (!managedAssemblyFullName.IsEmpty())
+    {
+        // Target assembly should be added to the tpa list. Otherwise corerun.exe
+        // may find wrong assembly to execute.
+        // Details can be found at https://github.com/dotnet/coreclr/issues/5631
+        tpaList = managedAssemblyFullName;
+        tpaList.Append(W(';'));
+    }
+
+    tpaList.Append(hostEnvironment.GetTpaList());
 
     //-------------------------------------------------------------
 
@@ -495,20 +619,17 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
         W("APP_PATHS"),
         W("APP_NI_PATHS"),
         W("NATIVE_DLL_SEARCH_DIRECTORIES"),
-        W("AppDomainCompatSwitch"),
         W("APP_LOCAL_WINMETADATA")
     };
     const wchar_t *property_values[] = { 
         // TRUSTED_PLATFORM_ASSEMBLIES
-        hostEnvironment.GetTpaList(),
+        tpaList,
         // APP_PATHS
         appPath,
         // APP_NI_PATHS
         appNiPath,
         // NATIVE_DLL_SEARCH_DIRECTORIES
         nativeDllSearchDirs,
-        // AppDomainCompatSwitch
-        W("UseLatestBehaviorWhenTFMNotSpecified"),
         // APP_LOCAL_WINMETADATA
         appLocalWinmetadata
     };
@@ -569,14 +690,19 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
         }
     }
 
-    hr = host->ExecuteAssembly(domainId, managedAssemblyFullName, argc-1, (argc-1)?&(argv[1]):NULL, &exitCode);
-    if (FAILED(hr)) {
-        log << W("Failed call to ExecuteAssembly. ERRORCODE: ") << Logger::hresult << hr << Logger::endl;
-        return false;
+    {
+        ActivationContext cxt{ log, managedAssemblyFullName.GetUnicode() };
+        ClrInstanceDetails current{ host, domainId };
+
+        hr = host->ExecuteAssembly(domainId, managedAssemblyFullName, argc - 1, (argc - 1) ? &(argv[1]) : NULL, &exitCode);
+        if (FAILED(hr))
+        {
+            log << W("Failed call to ExecuteAssembly. ERRORCODE: ") << Logger::hresult << hr << Logger::endl;
+            return false;
+        }
+
+        log << W("App exit value = ") << exitCode << Logger::endl;
     }
-
-    log << W("App exit value = ") << exitCode << Logger::endl;
-
 
     //-------------------------------------------------------------
 
@@ -584,15 +710,17 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
 
     log << W("Unloading the AppDomain") << Logger::endl;
 
-    hr = host->UnloadAppDomain(
+    hr = host->UnloadAppDomain2(
         domainId, 
-        true);                          // Wait until done
+        true,
+        (int *)&exitCode);                          // Wait until done
 
     if (FAILED(hr)) {
         log << W("Failed to unload the AppDomain. ERRORCODE: ") << Logger::hresult << hr << Logger::endl;
         return false;
     }
 
+    log << W("App domain unloaded exit value = ") << exitCode << Logger::endl;
 
     //-------------------------------------------------------------
 
@@ -611,7 +739,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
 
     // Release the reference to the host
 
-    log << W("Releasing ICLRRuntimeHost2") << Logger::endl;
+    log << W("Releasing ICLRRuntimeHost4") << Logger::endl;
 
     host->Release();
 

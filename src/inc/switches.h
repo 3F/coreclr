@@ -10,9 +10,6 @@
 #define STRESS_HEAP
 #endif
 
-#if !defined(CROSSGEN_COMPILE) && !defined(FEATURE_CORECLR)
-#define STRESS_THREAD
-#endif
 
 #define VERIFY_HEAP
 
@@ -37,7 +34,7 @@
     #define LOGGING
 #endif
 
-#if !defined(_TARGET_X86_)
+#if !defined(_TARGET_X86_) || defined(FEATURE_PAL)
 #define WIN64EXCEPTIONS
 #endif
 
@@ -50,13 +47,6 @@
 
 #if 0
     #define APPDOMAIN_STATE
-    #define BREAK_ON_UNLOAD
-    #define AD_LOG_MEMORY
-    #define AD_NO_UNLOAD
-    #define AD_SNAPSHOT
-    #define BREAK_META_ACCESS
-    #define AD_BREAK_ON_CANNOT_UNLOAD
-    #define BREAK_ON_CLSLOAD
 
     // Enable to track details of EESuspension
     #define TIME_SUSPEND
@@ -67,22 +57,10 @@
 #define GC_STATS
 #endif
 
-#if !defined(FEATURE_CORECLR)
-#define EMIT_FIXUPS
-#endif
-
-#if defined(_DEBUG) && !defined(DACCESS_COMPILE) && (defined(_TARGET_X86_) || defined(_TARGET_AMD64_))
-// On x86/x64 Windows debug builds, respect the COMPlus_EnforceEEThreadNotRequiredContracts
-// runtime switch. See code:InitThreadManager and code:GetThreadGenericFullCheck
-#define ENABLE_GET_THREAD_GENERIC_FULL_CHECK
-#endif
-
 #if defined(_TARGET_X86_) || defined(_TARGET_ARM_)
-    #define PAGE_SIZE               0x1000
     #define USE_UPPER_ADDRESS       0
 
 #elif defined(_TARGET_AMD64_) || defined(_TARGET_ARM64_)
-    #define PAGE_SIZE               0x1000
     #define UPPER_ADDRESS_MAPPING_FACTOR 2
     #define CLR_UPPER_ADDRESS_MIN   0x64400000000
     #define CODEHEAP_START_ADDRESS  0x64480000000
@@ -98,10 +76,6 @@
     #error Please add a new #elif clause and define all portability macros for the new platform
 #endif
 
-#ifndef OS_PAGE_SIZE
-#define OS_PAGE_SIZE PAGE_SIZE
-#endif
-
 #if defined(_WIN64)
 #define JIT_IS_ALIGNED
 #endif
@@ -110,16 +84,12 @@
 // ALLOW_SXS_JIT_NGEN enables AltJit support for NGEN, via COMPlus_AltJitNgen / COMPlus_AltJitName.
 // Note that if ALLOW_SXS_JIT_NGEN is defined, then ALLOW_SXS_JIT must be defined.
 #define ALLOW_SXS_JIT
-#if defined(ALLOW_SXS_JIT)
 #define ALLOW_SXS_JIT_NGEN
-#endif // ALLOW_SXS_JIT
 
-#if defined(FEATURE_CORECLR)
 //master switch for gc suspension not based on hijacking
 #define FEATURE_ENABLE_GCPOLL
-#endif //FEATURE_CORECLR
 
-#if defined(FEATURE_ENABLE_GCPOLL) && defined(_TARGET_X86_)
+#if defined(_TARGET_X86_)
 //this enables a fast version of the GC Poll helper instead of the default portable one.
 #define ENABLE_FAST_GCPOLL_HELPER
 #endif // defined(FEATURE_ENABLE_GCPOLL) && defined(_TARGET_X86_)
@@ -132,23 +102,19 @@
 #define PLATFORM_SUPPORTS_SAFE_THREADSUSPEND
 #endif // !FEATURE_PAL
 
-#if !defined(PLATFORM_SUPPORTS_SAFE_THREADSUSPEND) && !defined(FEATURE_ENABLE_GCPOLL)
-#error "Platform must support either safe thread suspension or GC polling"
-#endif
 
 #if defined(STRESS_HEAP) && defined(_DEBUG) && defined(FEATURE_HIJACK)
 #define HAVE_GCCOVER
 #endif
 
-#ifdef FEATURE_CORECLR
+// Some platforms may see spurious AVs when GcCoverage is enabled because of races.
+// Enable further processing to see if they recur.
+#if defined(HAVE_GCCOVER) && (defined(_TARGET_X86_) || defined(_TARGET_AMD64_)) && !defined(FEATURE_PAL)
+#define GCCOVER_TOLERATE_SPURIOUS_AV
+#endif
+
 //Turns on a startup delay to allow simulation of slower and faster startup times.
 #define ENABLE_STARTUP_DELAY
-#endif
-
-
-#ifndef ALLOW_LOCAL_WORKER
-#define ALLOW_LOCAL_WORKER
-#endif
 
 
 #ifdef _DEBUG
@@ -172,33 +138,10 @@
 
 #endif // _DEBUG
 
-
-
-#if defined(PROFILING_SUPPORTED)
-// On desktop CLR builds, the profiling API uses the event log for end-user-friendly
-// diagnostic messages.  CoreCLR on Windows ouputs debug strings for diagnostic messages.
-// Rotor builds have no access to event log message resources, though, so they simply 
-// display popup dialogs for now.
-#define FEATURE_PROFAPI_EVENT_LOGGING
-#endif // defined(PROFILING_SUPPORTED)
-
-// Windows desktop supports the profiling API attach / detach feature.
-// This will eventually be supported on coreclr as well. 
-#if defined(PROFILING_SUPPORTED) && !defined(FEATURE_CORECLR)
-#define FEATURE_PROFAPI_ATTACH_DETACH
-#endif
-
-// Windows desktop DAC builds need to see some of the data used in the profiling API
-// attach / detach feature, particularly Thread::m_dwProfilerEvacuationCounter 
-#if defined(PROFILING_SUPPORTED_DATA) && !defined(FEATURE_CORECLR)
-#define DATA_PROFAPI_ATTACH_DETACH
-#endif
-
 // MUST NEVER CHECK IN WITH THIS ENABLED.
 // This is just for convenience in doing performance investigations in a checked-out enlistment.
 // #define FEATURE_ENABLE_NO_RANGE_CHECKS
 
-#ifndef FEATURE_CORECLR
 // This controls whether a compilation-timing feature that relies on Windows APIs, if available, else direct
 // hardware instructions (rdtsc), for accessing high-resolution hardware timers is enabled. This is disabled
 // in Silverlight (just to avoid thinking about whether the extra code space is worthwhile).
@@ -208,7 +151,6 @@
 // feature also supports using COMPlus_JitTimeLogCsv=a.csv, which will dump method-level and phase-level timing
 // statistics. Also see comments on FEATURE_JIT_TIMER.
 #define FEATURE_JIT_METHOD_PERF
-#endif // FEATURE_CORECLR
 
 
 #ifndef FEATURE_USE_ASM_GC_WRITE_BARRIERS
@@ -221,11 +163,9 @@
 // are treated as potential pinned interior pointers. When enabled, the runtime flag COMPLUS_GCCONSERVATIVE 
 // determines dynamically whether GC is conservative. Note that appdomain unload, LCG and unloadable assemblies
 // do not work reliably with conservative GC.
-#ifdef FEATURE_CORECLR
 #define FEATURE_CONSERVATIVE_GC 1
-#endif
 
-#if defined(_TARGET_ARM_) || defined(_TARGET_ARM64_)
+#if (defined(_TARGET_ARM_) && !defined(ARM_SOFTFP)) || defined(_TARGET_ARM64_)
 #define FEATURE_HFA
 #endif
 
@@ -246,23 +186,15 @@
 #define FEATURE_MINIMETADATA_IN_TRIAGEDUMPS
 #endif // defined(FEATURE_CORESYSTEM)
 
-#if defined(FEATURE_PREJIT) && defined(FEATURE_CORECLR) && defined(FEATURE_CORESYSTEM)
-// Desktop CLR allows profilers and debuggers to opt out of loading NGENd images, and to
-// JIT everything instead. "FEATURE_TREAT_NI_AS_MSIL_DURING_DIAGNOSTICS" is roughly the
-// equivalent for Apollo, where MSIL images may not be available at all.
-// FEATURE_TREAT_NI_AS_MSIL_DURING_DIAGNOSTICS allows profilers or debuggers to state
-// they don't want to use pregenerated code, and to instead load the NGENd image but
-// treat it as if it were MSIL by ignoring the prejitted code and prebaked structures,
-// and instead to JIT and load types at run-time.
-#define FEATURE_TREAT_NI_AS_MSIL_DURING_DIAGNOSTICS
-#endif
-
 // If defined, support interpretation.
 #if !defined(CROSSGEN_COMPILE)
 
-#if defined(ALLOW_SXS_JIT) && !defined(FEATURE_PAL)
+#if !defined(FEATURE_PAL)
 #define FEATURE_STACK_SAMPLING
 #endif // defined (ALLOW_SXS_JIT)
 
 #endif // !defined(CROSSGEN_COMPILE)
 
+#if defined(FEATURE_INTERPRETER) && defined(CROSSGEN_COMPILE)
+#undef FEATURE_INTERPRETER
+#endif

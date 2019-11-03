@@ -39,20 +39,20 @@ public:
 
     // IUnknown functions
 
-    virtual HRESULT __stdcall QueryInterface(REFIID id, void** pInterface);
-    virtual ULONG __stdcall AddRef();
-    virtual ULONG __stdcall Release();
+    virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** pInterface);
+    virtual ULONG STDMETHODCALLTYPE AddRef();
+    virtual ULONG STDMETHODCALLTYPE Release();
 
 
     // This template assumes that the enumerator confors to the interface
     //
     // (this matches the IEnumXXX interface documented in MSDN)
 
-    virtual HRESULT __stdcall Skip(ULONG count);
-    virtual HRESULT __stdcall Reset();
-    virtual HRESULT __stdcall Clone(EnumInterface** ppEnum);
-    virtual HRESULT __stdcall GetCount(ULONG *count);
-    virtual HRESULT __stdcall Next(ULONG count,
+    virtual HRESULT STDMETHODCALLTYPE Skip(ULONG count);
+    virtual HRESULT STDMETHODCALLTYPE Reset();
+    virtual HRESULT STDMETHODCALLTYPE Clone(EnumInterface** ppEnum);
+    virtual HRESULT STDMETHODCALLTYPE GetCount(ULONG *count);
+    virtual HRESULT STDMETHODCALLTYPE Next(ULONG count,
         Element elements[],
         ULONG* elementsFetched);
 
@@ -318,7 +318,6 @@ ProfilerEnum< EnumInterface, Element >::GetCount(ULONG* count)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        SO_NOT_MAINLINE;
     }
     CONTRACTL_END;
 
@@ -363,7 +362,6 @@ ProfilerEnum< EnumInterface, Element >::Skip(ULONG count)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        SO_NOT_MAINLINE;
     }
     CONTRACTL_END;
 
@@ -403,7 +401,6 @@ ProfilerEnum< EnumInterface, Element >::Reset()
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        SO_NOT_MAINLINE;
     }
     CONTRACTL_END;
 
@@ -436,7 +433,6 @@ ProfilerEnum< EnumInterface, Element >::Clone(EnumInterface** pInterface)
         GC_NOTRIGGER;
         MODE_ANY;
 
-        SO_NOT_MAINLINE;
     }
     CONTRACTL_END;
 

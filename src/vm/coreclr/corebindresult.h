@@ -21,8 +21,6 @@ struct CoreBindResult : public IUnknown
 {
 protected:
     ReleaseHolder<ICLRPrivAssembly> m_pAssembly;
-    BOOL m_bIsFromGAC;
-    BOOL m_bIsOnTpaList;
     HRESULT m_hrBindResult;
     LONG m_cRef;
     
@@ -38,13 +36,11 @@ public:
     CoreBindResult() : m_cRef(1) {}
     virtual ~CoreBindResult() {}
     
-    void Init(ICLRPrivAssembly* pAssembly, BOOL bFromGAC, BOOL bIsOnTpaList);	
+    void Init(ICLRPrivAssembly* pAssembly);
     void Reset();
 	
     BOOL Found();
     PEImage* GetPEImage();
-    BOOL IsFromGAC();
-    BOOL IsOnTpaList();
     BOOL IsMscorlib();
     void GetBindAssembly(ICLRPrivAssembly** ppAssembly);
 #ifdef FEATURE_PREJIT
@@ -52,6 +48,9 @@ public:
     PEImage* GetNativeImage();
     void SetNativeImage(PEImage * pNativeImage);
     PEImage* GetILImage();
+#else
+    BOOL HasNativeImage() { return FALSE; }
+    PEImage* GetNativeImage() { return NULL; }
 #endif
     void SetHRBindResult(HRESULT hrBindResult);
     HRESULT GetHRBindResult();

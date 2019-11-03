@@ -99,7 +99,7 @@ public:
 
 
     // returns the number of elements in the list
-    int Count() const;
+    unsigned int Count() const;
 
     // @dbgtodo  Mac - cleaner way to expose this for serialization?
     void PrepareForDeserialize()
@@ -328,7 +328,7 @@ public:
     // number of fixed arguments plus number of varargs
     ULONG32                                     m_allArgsCount;   
 
-    // indicates whether an attempt has been made toinitialize the var data already
+    // indicates whether an attempt has been made to initialize the var data already
     bool                                        m_fInitialized;   
 }; // class NativeVarData
 
@@ -573,7 +573,6 @@ public:
     bool            m_fFldIsStatic;           // true if static field, false if instance field
     bool            m_fFldIsRVA;              // true if static relative to module address
     bool            m_fFldIsTLS;              // true if thread-specific static
-    bool            m_fFldIsContextStatic;    // true if context-specific static
     bool            m_fFldIsPrimitive;        // Only true if this is a value type masquerading as a primitive.
     bool            m_fFldIsCollectibleStatic; // true if this is a static field on a collectible type
 

@@ -40,6 +40,7 @@ enum ProfilerStatus
     kProfStatusInitializingForStartupLoad  = 2, // Prof ready for (or in) its Initialize callback
     kProfStatusInitializingForAttachLoad   = 3, // Prof ready for (or in) its InitializeForAttach callback
     kProfStatusActive                      = 4, // Prof completed initialization and is actively running
+    kProfStatusPreInitialize               = 5, // Prof is in LoadProfiler, but initialization has yet to occur
 };
 
 class CurrentProfilerStatus
@@ -115,6 +116,10 @@ struct ProfControlBlock
 
     // Whether we've turned off concurrent GC during attach
     BOOL fConcurrentGCDisabledForAttach;
+
+    Volatile<BOOL> fProfControlBlockInitialized;
+
+    Volatile<BOOL> fProfilerRequestedRuntimeSuspend;
     
     void Init();
     void ResetPerSessionStatus();    
@@ -142,15 +147,16 @@ GVAL_DECL(ProfControlBlock, g_profControlBlock);
 #define COR_PRF_CALLBACKSTATE_INCALLBACK                 0x1
 #define COR_PRF_CALLBACKSTATE_IN_TRIGGERS_SCOPE          0x2
 #define COR_PRF_CALLBACKSTATE_FORCEGC_WAS_CALLED         0x4
+#define COR_PRF_CALLBACKSTATE_REJIT_WAS_CALLED           0x8
 //
 //---------------------------------------------------------------
 
 #endif // defined(PROFILING_SUPPORTED_DATA) || defined(PROFILING_SUPPORTED)
 
 // This is the helper callback that the gc uses when walking the heap.
-BOOL HeapWalkHelper(Object* pBO, void* pv);
+bool HeapWalkHelper(Object* pBO, void* pv);
 void ScanRootsHelper(Object* pObj, Object** ppRoot, ScanContext *pSC, uint32_t dwUnused);
-BOOL AllocByClassHelper(Object* pBO, void* pv);
+bool AllocByClassHelper(Object* pBO, void* pv);
 
 #endif  // _ProfilePriv_h_
 

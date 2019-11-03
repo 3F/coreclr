@@ -10,6 +10,12 @@
 // Interlocked operations
 class Interlocked
 {
+private:
+
+#ifndef _MSC_VER
+    static void ArmInterlockedOperationBarrier();
+#endif // !_MSC_VER
+
 public:
 
     // Increment the value of the specified 32-bit variable as an atomic operation.
@@ -71,6 +77,12 @@ public:
     //  The previous value of the addend
     template<typename T>
     static T ExchangeAdd(T volatile *addend, T value);
+
+    template<typename T>
+    static T ExchangeAdd64(T volatile* addend, T value);
+
+    template<typename T>
+    static T ExchangeAddPtr(T volatile* addend, T value);
 
     // Performs an atomic compare-and-exchange operation on the specified values. 
     // Parameters:

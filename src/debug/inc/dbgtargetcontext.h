@@ -10,9 +10,9 @@
 #include "crosscomp.h"
 
 //
-// The right side of the debugger can now be built to target multiple platforms. This means it is no longer
+// The right side of the debugger can be built to target multiple platforms. This means it is not
 // safe to use the CONTEXT structure directly: the context of the platform we're building for might not match
-// that of the one the debugger is targetting. So now all right side code will use the DT_CONTEXT abstraction
+// that of the one the debugger is targetting. So all right side code will use the DT_CONTEXT abstraction
 // instead. When the debugger target is the local platform this will just resolve back into CONTEXT, but cross
 // platform we'll provide a hand-rolled version.
 //
@@ -26,11 +26,8 @@
 // ByteSwapContext.
 //
 
-// For now, the only cross-platform CONTEXTs we support are x86/PAL and ARM/Win. Look in
-// rotor/pal/inc/rotor_pal.h for the original PAL definitions.
-
 //
-// **** NOTE: Keep these in sync with rotor/pal/inc/rotor_pal.h ****
+// **** NOTE: Keep these in sync with pal/inc/pal.h ****
 //
 
 // This odd define pattern is needed because in DBI we set _TARGET_ to match the host and
@@ -344,7 +341,7 @@ typedef DECLSPEC_ALIGN(8) struct {
         DT_NEON128 Q[16];
         ULONGLONG D[32];
         DWORD S[32];
-    } DUMMYUNIONNAME;
+    };
 
     //
     // Debug registers
@@ -370,6 +367,14 @@ typedef DECLSPEC_ALIGN(8) struct {
 
 #define DT_CONTEXT_FULL (DT_CONTEXT_CONTROL | DT_CONTEXT_INTEGER | DT_CONTEXT_FLOATING_POINT)
 #define DT_CONTEXT_ALL (DT_CONTEXT_CONTROL | DT_CONTEXT_INTEGER | DT_CONTEXT_FLOATING_POINT | DT_CONTEXT_DEBUG_REGISTERS)
+
+#define DT_ARM64_MAX_BREAKPOINTS     8
+#define DT_ARM64_MAX_WATCHPOINTS     2
+
+typedef struct {
+    ULONGLONG Low;
+    LONGLONG High;
+} DT_NEON128;
 
 typedef DECLSPEC_ALIGN(16) struct {
     //
@@ -426,7 +431,7 @@ typedef DECLSPEC_ALIGN(16) struct {
     // Floating Point/NEON Registers
     //
 
-    /* +0x110 */ NEON128 V[32];
+    /* +0x110 */ DT_NEON128 V[32];
     /* +0x310 */ DWORD Fpcr;
     /* +0x314 */ DWORD Fpsr;
 
@@ -434,10 +439,10 @@ typedef DECLSPEC_ALIGN(16) struct {
     // Debug registers
     //
 
-    /* +0x318 */ DWORD Bcr[ARM64_MAX_BREAKPOINTS];
-    /* +0x338 */ DWORD64 Bvr[ARM64_MAX_BREAKPOINTS];
-    /* +0x378 */ DWORD Wcr[ARM64_MAX_WATCHPOINTS];
-    /* +0x380 */ DWORD64 Wvr[ARM64_MAX_WATCHPOINTS];
+    /* +0x318 */ DWORD Bcr[DT_ARM64_MAX_BREAKPOINTS];
+    /* +0x338 */ DWORD64 Bvr[DT_ARM64_MAX_BREAKPOINTS];
+    /* +0x378 */ DWORD Wcr[DT_ARM64_MAX_WATCHPOINTS];
+    /* +0x380 */ DWORD64 Wvr[DT_ARM64_MAX_WATCHPOINTS];
     /* +0x390 */
 
 } DT_CONTEXT;

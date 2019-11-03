@@ -10,6 +10,8 @@
 struct ArrayOpScript;
 class MetaSig;
 
+extern PCODE GetPreStubEntryPoint();
+
 //=======================================================================
 
 #define X86_INSTR_CALL_REL32    0xE8        // call rel32
@@ -219,11 +221,7 @@ class StubLinkerCPU : public StubLinker
         VOID X86EmitLeaRIP(CodeLabel *target, X86Reg reg);
 #endif
 
-        static const unsigned X86TLSFetch_TRASHABLE_REGS = (1<<kEAX) | (1<<kEDX) | (1<<kECX);
-        VOID X86EmitTLSFetch(DWORD idx, X86Reg dstreg, unsigned preservedRegSet);
-
         VOID X86EmitCurrentThreadFetch(X86Reg dstreg, unsigned preservedRegSet);
-        VOID X86EmitCurrentAppDomainFetch(X86Reg dstreg, unsigned preservedRegSet);
         
         VOID X86EmitIndexRegLoad(X86Reg dstreg, X86Reg srcreg, __int32 ofs = 0);
         VOID X86EmitIndexRegStore(X86Reg dstreg, __int32 ofs, X86Reg srcreg);
@@ -250,10 +248,14 @@ class StubLinkerCPU : public StubLinker
                               );
         VOID X86EmitPushEBPframe();
 
+#if defined(_TARGET_X86_)
+#if defined(PROFILING_SUPPORTED) && !defined(FEATURE_STUBS_AS_IL)
         // These are used to emit calls to notify the profiler of transitions in and out of
         // managed code through COM->COM+ interop or N/Direct
         VOID EmitProfilerComCallProlog(TADDR pFrameVptr, X86Reg regFrame);
         VOID EmitProfilerComCallEpilog(TADDR pFrameVptr, X86Reg regFrame);
+#endif // PROFILING_SUPPORTED && !FEATURE_STUBS_AS_IL
+#endif // _TARGET_X86_
 
 
 
@@ -345,6 +347,11 @@ class StubLinkerCPU : public StubLinker
 
         VOID EmitSetup(CodeLabel *pForwardRef);
         VOID EmitRareSetup(CodeLabel* pRejoinPoint, BOOL fThrow);
+
+#ifndef FEATURE_STUBS_AS_IL
+        VOID EmitMethodStubProlog(TADDR pFrameVptr, int transitionBlockOffset);
+        VOID EmitMethodStubEpilog(WORD numArgBytes, int transitionBlockOffset);
+
         VOID EmitCheckGSCookie(X86Reg frameReg, int gsCookieOffset);
 
 #ifdef _TARGET_X86_
@@ -353,10 +360,8 @@ class StubLinkerCPU : public StubLinker
 
         void EmitComMethodStubEpilog(TADDR pFrameVptr, CodeLabel** rgRareLabels, 
                                      CodeLabel** rgRejoinLabels, BOOL bShouldProfile);
-#endif
-
-        VOID EmitMethodStubProlog(TADDR pFrameVptr, int transitionBlockOffset);
-        VOID EmitMethodStubEpilog(WORD numArgBytes, int transitionBlockOffset);
+#endif // _TARGET_X86_
+#endif // !FEATURE_STUBS_AS_IL
 
         VOID EmitUnboxMethodStub(MethodDesc* pRealMD);
 #if defined(FEATURE_SHARE_GENERIC_CODE)  
@@ -374,13 +379,16 @@ class StubLinkerCPU : public StubLinker
                                            BOOL bShouldProfile);
 #endif // FEATURE_COMINTEROP && _TARGET_X86_
 
+#ifndef FEATURE_STUBS_AS_IL
         //===========================================================================
         // Computes hash code for MulticastDelegate.Invoke()
         static UINT_PTR HashMulticastInvoke(MetaSig* pSig);
 
+#ifdef _TARGET_X86_
         //===========================================================================
         // Emits code for Delegate.Invoke() any delegate type
         VOID EmitDelegateInvoke();
+#endif // _TARGET_X86_
 
         //===========================================================================
         // Emits code for MulticastDelegate.Invoke() - sig specific
@@ -389,24 +397,29 @@ class StubLinkerCPU : public StubLinker
         //===========================================================================
         // Emits code for Delegate.Invoke() on delegates that recorded creator assembly
         VOID EmitSecureDelegateInvoke(UINT_PTR hash);
+#endif // !FEATURE_STUBS_AS_IL
 
         //===========================================================================
         // Emits code to adjust for a static delegate target.
         VOID EmitShuffleThunk(struct ShuffleEntry *pShuffleEntryArray);
 
 
+#ifndef FEATURE_ARRAYSTUB_AS_IL
         //===========================================================================
         // Emits code to do an array operation.
         VOID EmitArrayOpStub(const ArrayOpScript*);
 
         //Worker function to emit throw helpers for array ops.
         VOID EmitArrayOpStubThrow(unsigned exConst, unsigned cbRetArg);
+#endif
 
+#ifndef FEATURE_STUBS_AS_IL
         //===========================================================================
         // Emits code to break into debugger
         VOID EmitDebugBreak();
+#endif // !FEATURE_STUBS_AS_IL
 
-#if defined(_DEBUG) && (defined(_TARGET_AMD64_) || defined(_TARGET_X86_)) && !defined(FEATURE_PAL)
+#if defined(_DEBUG) && !defined(FEATURE_PAL)
         //===========================================================================
         // Emits code to log JITHelper access
         void EmitJITHelperLoggingThunk(PCODE pJitHelper, LPVOID helperFuncCount);
@@ -424,6 +437,7 @@ class StubLinkerCPU : public StubLinker
 #ifdef _TARGET_AMD64_
 
         static Stub * CreateTailCallCopyArgsThunk(CORINFO_SIG_INFO * pSig,
+                                                  MethodDesc* pMD,
                                                   CorInfoHelperTailCallSpecialHandling flags);
 
 #endif // _TARGET_AMD64_
@@ -443,6 +457,7 @@ inline TADDR rel32Decode(/*PTR_INT32*/ TADDR pRel32)
     return pRel32 + 4 + *PTR_INT32(pRel32);
 }
 
+void rel32SetInterlocked(/*PINT32*/ PVOID pRel32, TADDR target, MethodDesc* pMD);
 BOOL rel32SetInterlocked(/*PINT32*/ PVOID pRel32, TADDR target, TADDR expected, MethodDesc* pMD);
 
 //------------------------------------------------------------------------
@@ -522,12 +537,25 @@ struct StubPrecode {
         return rel32Decode(PTR_HOST_MEMBER_TADDR(StubPrecode, this, m_rel32));
     }
 
+    void ResetTargetInterlocked()
+    {
+        CONTRACTL
+        {
+            THROWS;
+            GC_NOTRIGGER;
+        }
+        CONTRACTL_END;
+
+        EnsureWritableExecutablePages(&m_rel32);
+        rel32SetInterlocked(&m_rel32, GetPreStubEntryPoint(), (MethodDesc*)GetMethodDesc());
+    }
+
     BOOL SetTargetInterlocked(TADDR target, TADDR expected)
     {
         CONTRACTL
         {
             THROWS;
-            GC_TRIGGERS;
+            GC_NOTRIGGER;
         }
         CONTRACTL_END;
 
@@ -571,71 +599,6 @@ struct NDirectImportPrecode : StubPrecode {
 typedef DPTR(NDirectImportPrecode) PTR_NDirectImportPrecode;
 
 #endif // HAS_NDIRECT_IMPORT_PRECODE
-
-
-#ifdef HAS_REMOTING_PRECODE
-
-// Precode with embedded remoting interceptor
-struct RemotingPrecode {
-
-#ifdef _WIN64
-    static const int Type = XXX;       // NYI
-    // mov r10,pMethodDesc
-    // call PrecodeRemotingThunk
-    // jmp Prestub/Stub/NativeCode
-#else
-    static const int Type = 0x90;
-    // mov eax,pMethodDesc
-    // nop
-    // call PrecodeRemotingThunk
-    // jmp Prestub/Stub/NativeCode
-#endif // _WIN64
-
-    IN_WIN64(USHORT m_movR10;)
-    IN_WIN32(BYTE   m_movEAX;)
-    TADDR           m_pMethodDesc;
-    BYTE            m_type;
-    BYTE            m_call;
-    INT32           m_callRel32;
-    BYTE            m_jmp;
-    INT32           m_rel32;
-
-    void Init(MethodDesc* pMD, LoaderAllocator *pLoaderAllocator = NULL);
-
-    TADDR GetMethodDesc()
-    {
-        LIMITED_METHOD_CONTRACT; 
-        SUPPORTS_DAC;
-
-        return m_pMethodDesc;
-    }
-
-    PCODE GetTarget()
-    { 
-        LIMITED_METHOD_DAC_CONTRACT;
-
-        return rel32Decode(PTR_HOST_MEMBER_TADDR(RemotingPrecode, this, m_rel32));
-    }
-
-    BOOL SetTargetInterlocked(TADDR target, TADDR expected)
-    {
-        CONTRACTL
-        {
-            THROWS;
-            GC_TRIGGERS;
-        }
-        CONTRACTL_END;
-
-        EnsureWritableExecutablePages(&m_rel32);
-        return rel32SetInterlocked(&m_rel32, target, expected, (MethodDesc*)GetMethodDesc());
-    }
-};
-IN_WIN64(static_assert_no_msg(offsetof(RemotingPrecode, m_movR10) == OFFSETOF_PRECODE_TYPE);)
-IN_WIN64(static_assert_no_msg(offsetof(RemotingPrecode, m_type) == OFFSETOF_PRECODE_TYPE_MOV_R10);)
-IN_WIN32(static_assert_no_msg(offsetof(RemotingPrecode, m_type) == OFFSETOF_PRECODE_TYPE);)
-typedef DPTR(RemotingPrecode) PTR_RemotingPrecode;
-
-#endif // HAS_REMOTING_PRECODE
 
 
 #ifdef HAS_FIXUP_PRECODE
@@ -692,6 +655,11 @@ struct FixupPrecode {
     }
 #endif // HAS_FIXUP_PRECODE_CHUNKS
 
+#ifdef FIXUP_PRECODE_PREALLOCATE_DYNAMIC_METHOD_JUMP_STUBS
+    PCODE GetDynamicMethodPrecodeFixupJumpStub();
+    PCODE GetDynamicMethodEntryJumpStub();
+#endif // FIXUP_PRECODE_PREALLOCATE_DYNAMIC_METHOD_JUMP_STUBS
+
     PCODE GetTarget()
     {
         LIMITED_METHOD_DAC_CONTRACT;
@@ -699,6 +667,7 @@ struct FixupPrecode {
         return rel32Decode(PTR_HOST_MEMBER_TADDR(FixupPrecode, this, m_rel32));
     }
 
+    void ResetTargetInterlocked();
     BOOL SetTargetInterlocked(TADDR target, TADDR expected);
 
     static BOOL IsFixupPrecodeByASM(TADDR addr)

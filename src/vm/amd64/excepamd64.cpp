@@ -21,9 +21,8 @@
 #include "comutilnative.h"
 #include "sigformat.h"
 #include "siginfo.hpp"
-#include "gc.h"
+#include "gcheaputilities.h"
 #include "eedbginterfaceimpl.h" //so we can clearexception in COMPlusThrow
-#include "perfcounters.h"
 #include "asmconstants.h"
 
 #include "exceptionhandling.h"
@@ -158,7 +157,6 @@ RtlVirtualUnwind (
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } 
     CONTRACTL_END;
 
@@ -194,7 +192,6 @@ RtlVirtualUnwind_Worker (
     {
         NOTHROW;
         GC_NOTRIGGER;
-        SO_TOLERANT;
     } 
     CONTRACTL_END;
 

@@ -20,8 +20,15 @@ Revision History:
 --*/
 
 #include "pal/utf8.h"
+#include "pal/malloc.hpp"
+
+using namespace CorUnix;
 
 #define FASTLOOP
+
+#ifndef COUNTOF
+#define COUNTOF(x) (sizeof(x) / sizeof((x)[0]))
+#endif
 
 struct CharUnicodeInfo
 {
@@ -226,7 +233,7 @@ public:
         if (bFoundHigh)
             throw ArgumentException("String 'replacement' contains invalid Unicode code points.", "replacement");
 
-        wcscpy_s(strDefault, sizeof(strDefault), replacement);
+        wcscpy_s(strDefault, COUNTOF(strDefault), replacement);
         strDefaultLength = replacementLength;
     }
 
@@ -253,6 +260,8 @@ class DecoderFallbackBuffer
     // These wrap the internal methods so that we can check for people doing stuff that's incorrect
 
 public:
+    virtual ~DecoderFallbackBuffer() = default;
+
     virtual bool Fallback(BYTE bytesUnknown[], int index, int size) = 0;
 
     // Get next character
@@ -346,7 +355,7 @@ protected:
                 throw ArgumentException("String 'chars' contains invalid Unicode code points.");
 
             // Now we aren't going to be false, so its OK to update chars
-            chars = &charTemp;
+            *chars = charTemp;
         }
 
         return true;
@@ -412,7 +421,7 @@ protected:
 class DecoderReplacementFallbackBuffer : public DecoderFallbackBuffer
 {
     // Store our default string
-    WCHAR strDefault[4];
+    WCHAR strDefault[2];
     int strDefaultLength;
     int fallbackCount = -1;
     int fallbackIndex = -1;
@@ -421,11 +430,8 @@ public:
     // Construction
     DecoderReplacementFallbackBuffer(DecoderReplacementFallback* fallback)
     {
-        // 2X in case we're a surrogate pair
-        wcscpy_s(strDefault, sizeof(strDefault), fallback->GetDefaultString());
-        wcscat_s(strDefault, sizeof(strDefault), fallback->GetDefaultString());
-        strDefaultLength = 2 * PAL_wcslen((const WCHAR *)fallback->GetDefaultString());
-
+        wcscpy_s(strDefault, COUNTOF(strDefault), fallback->GetDefaultString());
+        strDefaultLength = PAL_wcslen((const WCHAR *)fallback->GetDefaultString());
     }
 
     // Fallback Methods
@@ -555,7 +561,7 @@ public:
 
     virtual DecoderFallbackBuffer* CreateFallbackBuffer()
     {
-        return new DecoderExceptionFallbackBuffer();
+        return InternalNew<DecoderExceptionFallbackBuffer>();
     }
 
     // Maximum number of characters that this instance of this fallback could return
@@ -567,7 +573,7 @@ public:
 
 DecoderFallbackBuffer* DecoderReplacementFallback::CreateFallbackBuffer()
 {
-    return new DecoderReplacementFallbackBuffer(this);
+    return InternalNew<DecoderReplacementFallbackBuffer>(this);
 }
 
 class EncoderFallbackException : public ArgumentException
@@ -704,7 +710,7 @@ public:
         if (bFoundHigh)
             throw ArgumentException("String 'replacement' contains invalid Unicode code points.", "replacement");
 
-        wcscpy_s(strDefault, sizeof(strDefault), replacement);
+        wcscpy_s(strDefault, COUNTOF(strDefault), replacement);
         strDefaultLength = replacementLength;
     }
 
@@ -731,6 +737,8 @@ class EncoderFallbackBuffer
     // These wrap the internal methods so that we can check for people doing stuff that is incorrect
 
 public:
+    virtual ~EncoderFallbackBuffer() = default;
+
     virtual bool Fallback(WCHAR charUnknown, int index) = 0;
 
     virtual bool Fallback(WCHAR charUnknownHigh, WCHAR charUnknownLow, int index) = 0;
@@ -874,8 +882,8 @@ public:
     EncoderReplacementFallbackBuffer(EncoderReplacementFallback* fallback)
     {
         // 2X in case we're a surrogate pair
-        wcscpy_s(strDefault, sizeof(strDefault), fallback->GetDefaultString());
-        wcscat_s(strDefault, sizeof(strDefault), fallback->GetDefaultString());
+        wcscpy_s(strDefault, COUNTOF(strDefault), fallback->GetDefaultString());
+        wcscat_s(strDefault, COUNTOF(strDefault), fallback->GetDefaultString());
         strDefaultLength = 2 * PAL_wcslen((const WCHAR *)fallback->GetDefaultString());
 
     }
@@ -1047,7 +1055,7 @@ public:
 
     virtual EncoderFallbackBuffer* CreateFallbackBuffer()
     {
-        return new EncoderExceptionFallbackBuffer();
+        return InternalNew<EncoderExceptionFallbackBuffer>();
     }
 
     // Maximum number of characters that this instance of this fallback could return
@@ -1059,7 +1067,7 @@ public:
 
 EncoderFallbackBuffer* EncoderReplacementFallback::CreateFallbackBuffer()
 {
-    return new EncoderReplacementFallbackBuffer(this);
+    return InternalNew<EncoderReplacementFallbackBuffer>(this);
 }
 
 class UTF8Encoding
@@ -1081,9 +1089,14 @@ class UTF8Encoding
         return begin <= c && c <= end;
     }
 
-    size_t PtrDiff(void* ptr1, void* ptr2)
+    size_t PtrDiff(WCHAR* ptr1, WCHAR* ptr2)
     {
-        return (BYTE*)ptr2 - (BYTE*)ptr1;
+        return ptr1 - ptr2;
+    }
+
+    size_t PtrDiff(BYTE* ptr1, BYTE* ptr2)
+    {
+        return ptr1 - ptr2;
     }
 
     void ThrowBytesOverflow()
@@ -1118,11 +1131,33 @@ class UTF8Encoding
         }
     }
 
+    // During GetChars we had an invalid byte sequence
+    // pSrc is backed up to the start of the bad sequence if we didn't have room to
+    // fall it back.  Otherwise pSrc remains where it is.
+    bool FallbackInvalidByteSequence(BYTE** pSrc, int ch, DecoderFallbackBuffer* fallback, WCHAR** pTarget)
+    {
+        // Get our byte[]
+        BYTE* pStart = *pSrc;
+        BYTE bytesUnknown[3];
+        int size = GetBytesUnknown(pStart, ch, bytesUnknown);
+
+        // Do the actual fallback
+        if (!fallback->InternalFallback(bytesUnknown, *pSrc, pTarget, size))
+        {
+            // Oops, it failed, back up to pStart
+            *pSrc = pStart;
+            return false;
+        }
+
+        // It worked
+        return true;
+    }
+
     int FallbackInvalidByteSequence(BYTE* pSrc, int ch, DecoderFallbackBuffer *fallback)
     {
         // Get our byte[]
-        BYTE *bytesUnknown;
-        int size = GetBytesUnknown(pSrc, ch, &bytesUnknown);
+        BYTE bytesUnknown[3];
+        int size = GetBytesUnknown(pSrc, ch, bytesUnknown);
 
         // Do the actual fallback
         int count = fallback->InternalFallback(bytesUnknown, pSrc, size);
@@ -1133,24 +1168,23 @@ class UTF8Encoding
         return count;
     }
 
-    int GetBytesUnknown(BYTE* pSrc, int ch, BYTE **bytesUnknown)
+    int GetBytesUnknown(BYTE* pSrc, int ch, BYTE* bytesUnknown)
     {
         int size;
-        BYTE bytes[3];
 
         // See if it was a plain char
         // (have to check >= 0 because we have all sorts of wierd bit flags)
         if (ch < 0x100 && ch >= 0)
         {
             pSrc--;
-            bytes[0] = (BYTE)ch;
+            bytesUnknown[0] = (BYTE)ch;
             size =  1;
         }
         // See if its an unfinished 2 byte sequence
         else if ((ch & (SupplimentarySeq | ThreeByteSeq)) == 0)
         {
             pSrc--;
-            bytes[0] = (BYTE)((ch & 0x1F) | 0xc0);
+            bytesUnknown[0] = (BYTE)((ch & 0x1F) | 0xc0);
             size = 1;
         }
         // So now we're either 2nd byte of 3 or 4 byte sequence or
@@ -1163,24 +1197,24 @@ class UTF8Encoding
             {
                 // 3rd byte of 4 byte sequence
                 pSrc -= 3;
-                bytes[0] = (BYTE)(((ch >> 12) & 0x07) | 0xF0);
-                bytes[1] = (BYTE)(((ch >> 6) & 0x3F) | 0x80);
-                bytes[2] = (BYTE)(((ch)& 0x3F) | 0x80);
+                bytesUnknown[0] = (BYTE)(((ch >> 12) & 0x07) | 0xF0);
+                bytesUnknown[1] = (BYTE)(((ch >> 6) & 0x3F) | 0x80);
+                bytesUnknown[2] = (BYTE)(((ch)& 0x3F) | 0x80);
                 size = 3;
             }
             else if ((ch & (FinalByte >> 12)) != 0)
             {
                 // 2nd byte of a 4 byte sequence
                 pSrc -= 2;
-                bytes[0] = (BYTE)(((ch >> 6) & 0x07) | 0xF0);
-                bytes[1] = (BYTE)(((ch)& 0x3F) | 0x80);
+                bytesUnknown[0] = (BYTE)(((ch >> 6) & 0x07) | 0xF0);
+                bytesUnknown[1] = (BYTE)(((ch)& 0x3F) | 0x80);
                 size = 2;
             }
             else
             {
                 // 4th byte of a 4 byte sequence
                 pSrc--;
-                bytes[0] = (BYTE)(((ch)& 0x07) | 0xF0);
+                bytesUnknown[0] = (BYTE)(((ch)& 0x07) | 0xF0);
                 size = 1;
             }
         }
@@ -1191,27 +1225,26 @@ class UTF8Encoding
             {
                 // So its 2nd byte of a 3 byte sequence
                 pSrc -= 2;
-                bytes[0] = (BYTE)(((ch >> 6) & 0x0F) | 0xE0);
-                bytes[1] = (BYTE)(((ch)& 0x3F) | 0x80);
+                bytesUnknown[0] = (BYTE)(((ch >> 6) & 0x0F) | 0xE0);
+                bytesUnknown[1] = (BYTE)(((ch)& 0x3F) | 0x80);
                 size = 2;
             }
             else
             {
                 // 1st byte of a 3 byte sequence
                 pSrc--;
-                bytes[0] = (BYTE)(((ch)& 0x0F) | 0xE0);
+                bytesUnknown[0] = (BYTE)(((ch)& 0x0F) | 0xE0);
                 size = 1;
             }
         }
 
-        *bytesUnknown = bytes;
         return size;
     }
 
 public:
 
     UTF8Encoding(bool isThrowException)
-        : encoderReplacementFallback(W("\xFFFD"))
+        : encoderReplacementFallback(W("\xFFFD")), decoderReplacementFallback(W("\xFFFD"))
     {
         if (isThrowException)
         {
@@ -1432,7 +1465,7 @@ public:
                 }
 
                 // get pSrc 2-byte aligned
-                if (((int)pSrc & 0x1) != 0) {
+                if (((size_t)pSrc & 0x1) != 0) {
                     ch = *pSrc;
                     pSrc++;
                     if (ch > 0x7F) {
@@ -1441,7 +1474,7 @@ public:
                 }
 
                 // get pSrc 4-byte aligned
-                if (((int)pSrc & 0x2) != 0) {
+                if (((size_t)pSrc & 0x2) != 0) {
                     ch = *(USHORT*)pSrc;
                     if ((ch & 0x8080) != 0) {
                         goto LongCodeWithMask16;
@@ -1596,6 +1629,8 @@ public:
         Contract::Assert(fallback == nullptr || fallback->GetRemaining() == 0,
             "[UTF8Encoding.GetCharCount]Expected empty fallback buffer at end");
 
+        InternalDelete(fallback);
+
         return charCount;
 
     }
@@ -1704,8 +1739,9 @@ public:
                 fallback = decoderFallback->CreateFallbackBuffer();
                 fallback->InternalInitialize(bytes, pAllocatedBufferEnd);
             }
-            // This'll back us up the appropriate # of bytes if we didn't get anywhere
-            if (!FallbackInvalidByteSequence(pSrc, ch, fallback))
+            
+            // That'll back us up the appropriate # of bytes if we didn't get anywhere
+            if (!FallbackInvalidByteSequence(&pSrc, ch, fallback, &pTarget))
             {
                 // Ran out of buffer space
                 // Need to throw an exception?
@@ -1838,7 +1874,7 @@ public:
                     if (ch > 0x7F)
                         goto ProcessChar;
 
-                    *pTarget = (char)ch;
+                    *pTarget = (WCHAR)ch;
                     pTarget++;
                 }
                 // we are done
@@ -1868,18 +1904,18 @@ public:
                 pTarget++;
 
                 // get pSrc to be 2-byte aligned
-                if ((((int)pSrc) & 0x1) != 0) {
+                if ((((size_t)pSrc) & 0x1) != 0) {
                     ch = *pSrc;
                     pSrc++;
                     if (ch > 0x7F) {
                         goto LongCode;
                     }
-                    *pTarget = (char)ch;
+                    *pTarget = (WCHAR)ch;
                     pTarget++;
                 }
 
                 // get pSrc to be 4-byte aligned
-                if ((((int)pSrc) & 0x2) != 0) {
+                if ((((size_t)pSrc) & 0x2) != 0) {
                     ch = *(USHORT*)pSrc;
                     if ((ch & 0x8080) != 0) {
                         goto LongCodeWithMask16;
@@ -1997,7 +2033,7 @@ public:
 
                         ch = (chc << 6) | (ch & 0x3F);
 
-                        *pTarget = (char)(((ch >> 10) & 0x7FF) +
+                        *pTarget = (WCHAR)(((ch >> 10) & 0x7FF) +
                             (SHORT)(CharUnicodeInfo::HIGH_SURROGATE_START - (0x10000 >> 10)));
                         pTarget++;
 
@@ -2097,6 +2133,8 @@ public:
         // (don't have to check m_throwOnOverflow for chars)
         Contract::Assert(fallback == nullptr || fallback->GetRemaining() == 0,
             "[UTF8Encoding.GetChars]Expected empty fallback buffer at end");
+
+        InternalDelete(fallback);
 
         return PtrDiff(pTarget, chars);
     }
@@ -2486,6 +2524,8 @@ public:
             ch = 0;
         }
 
+        InternalDelete(fallbackBuffer); 
+
         return (int)(pTarget - bytes);
     }
 
@@ -2698,7 +2738,7 @@ public:
                 }
 
                 // get pSrc aligned
-                if (((int)pSrc & 0x2) != 0) {
+                if (((size_t)pSrc & 0x2) != 0) {
                     ch = *pSrc;
                     pSrc++;
                     if (ch > 0x7F)                                              // Not ASCII
@@ -2812,6 +2852,8 @@ public:
 
         Contract::Assert(fallbackBuffer == nullptr || fallbackBuffer->GetRemaining() == 0,
             "[UTF8Encoding.GetByteCount]Expected Empty fallback buffer");
+
+        InternalDelete(fallbackBuffer);
 
         return byteCount;
     }

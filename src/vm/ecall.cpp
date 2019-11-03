@@ -29,6 +29,36 @@ extern const int c_nECClasses;
 #endif // CROSSGEN_COMPILE
 
 
+/**********
+
+The constructors of string-like types (String, Utf8String) are special since the JIT will
+replace newobj instructions with calls to the corresponding 'Ctor' method. Depending on the
+CLR in use, the ctor methods may be instance methods (with a null 'this' parameter) or
+static methods. See the managed definitions of String.Ctor and Utf8String.Ctor for more
+information.
+
+To add a new ctor overload, in addition to defining the constructor and Ctor methods on
+the managed side, make changes to the following files. (These instructions are for
+Utf8String, but String is similar.)
+
+- src/vm/ecall.cpp (this file), update the definition of "NumberOfUtf8StringConstructors"
+  and add the appropriate static asserts immediately above the definition.
+
+- src/vm/ecall.h, search for "Utf8StringCtor" and add the DYNAMICALLY_ASSIGNED_FCALL_IMPL
+  definitions corresponding to the new overloads.
+
+- src/vm/ecalllist.h, search for "FCFuncStart(gUtf8StringFuncs)" and add the overloads
+  within that block.
+
+- src/vm/metasig.h, add the new Utf8String-returning metasig declarations; and, if necessary,
+  add any void-returning metasig declarations if they haven't already been defined elsewhere.
+  search "String_RetUtf8Str" for an example of how to do this.
+
+- src/vm/mscorlib.h, search "DEFINE_CLASS(UTF8_STRING" and add the new DEFINE_METHOD
+  declarations for the Utf8String-returning Ctor methods, referencing the new metasig declarations.
+
+**********/
+
 // METHOD__STRING__CTORF_XXX has to be in same order as ECall::CtorCharXxx
 #define METHOD__STRING__CTORF_FIRST METHOD__STRING__CTORF_CHARARRAY
 static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 0 == METHOD__STRING__CTORF_CHARARRAY);
@@ -36,6 +66,10 @@ static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 1 == METHOD__STRING__CTORF_CH
 static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 2 == METHOD__STRING__CTORF_CHAR_COUNT);
 static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 3 == METHOD__STRING__CTORF_CHARPTR);
 static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 4 == METHOD__STRING__CTORF_CHARPTR_START_LEN);
+static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 5 == METHOD__STRING__CTORF_READONLYSPANOFCHAR);
+static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 6 == METHOD__STRING__CTORF_SBYTEPTR);
+static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 7 == METHOD__STRING__CTORF_SBYTEPTR_START_LEN);
+static_assert_no_msg(METHOD__STRING__CTORF_FIRST + 8 == METHOD__STRING__CTORF_SBYTEPTR_START_LEN_ENCODING);
 
 // ECall::CtorCharXxx has to be in same order as METHOD__STRING__CTORF_XXX
 #define ECallCtor_First ECall::CtorCharArrayManaged
@@ -44,8 +78,36 @@ static_assert_no_msg(ECallCtor_First + 1 == ECall::CtorCharArrayStartLengthManag
 static_assert_no_msg(ECallCtor_First + 2 == ECall::CtorCharCountManaged);
 static_assert_no_msg(ECallCtor_First + 3 == ECall::CtorCharPtrManaged);
 static_assert_no_msg(ECallCtor_First + 4 == ECall::CtorCharPtrStartLengthManaged);
+static_assert_no_msg(ECallCtor_First + 5 == ECall::CtorReadOnlySpanOfCharManaged);
+static_assert_no_msg(ECallCtor_First + 6 == ECall::CtorSBytePtrManaged);
+static_assert_no_msg(ECallCtor_First + 7 == ECall::CtorSBytePtrStartLengthManaged);
+static_assert_no_msg(ECallCtor_First + 8 == ECall::CtorSBytePtrStartLengthEncodingManaged);
 
-#define NumberOfStringConstructors 5
+#define NumberOfStringConstructors 9
+
+#ifdef FEATURE_UTF8STRING
+// METHOD__UTF8STRING__CTORF_XXX has to be in same order as ECall::Utf8StringCtorCharXxx
+#define METHOD__UTF8STRING__CTORF_FIRST METHOD__UTF8_STRING__CTORF_READONLYSPANOFBYTE
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 0 == METHOD__UTF8_STRING__CTORF_READONLYSPANOFBYTE);
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 1 == METHOD__UTF8_STRING__CTORF_READONLYSPANOFCHAR);
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 2 == METHOD__UTF8_STRING__CTORF_BYTEARRAY_START_LEN);
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 3 == METHOD__UTF8_STRING__CTORF_BYTEPTR);
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 4 == METHOD__UTF8_STRING__CTORF_CHARARRAY_START_LEN);
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 5 == METHOD__UTF8_STRING__CTORF_CHARPTR);
+static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 6 == METHOD__UTF8_STRING__CTORF_STRING);
+
+// ECall::Utf8StringCtorCharXxx has to be in same order as METHOD__UTF8STRING__CTORF_XXX
+#define ECallUtf8String_Ctor_First ECall::Utf8StringCtorReadOnlySpanOfByteManaged
+static_assert_no_msg(ECallUtf8String_Ctor_First + 0 == ECall::Utf8StringCtorReadOnlySpanOfByteManaged);
+static_assert_no_msg(ECallUtf8String_Ctor_First + 1 == ECall::Utf8StringCtorReadOnlySpanOfCharManaged);
+static_assert_no_msg(ECallUtf8String_Ctor_First + 2 == ECall::Utf8StringCtorByteArrayStartLengthManaged);
+static_assert_no_msg(ECallUtf8String_Ctor_First + 3 == ECall::Utf8StringCtorBytePtrManaged);
+static_assert_no_msg(ECallUtf8String_Ctor_First + 4 == ECall::Utf8StringCtorCharArrayStartLengthManaged);
+static_assert_no_msg(ECallUtf8String_Ctor_First + 5 == ECall::Utf8StringCtorCharPtrManaged);
+static_assert_no_msg(ECallUtf8String_Ctor_First + 6 == ECall::Utf8StringCtorStringManaged);
+
+#define NumberOfUtf8StringConstructors 7
+#endif // FEATURE_UTF8STRING
 
 void ECall::PopulateManagedStringConstructors()
 {
@@ -53,8 +115,8 @@ void ECall::PopulateManagedStringConstructors()
 
     INDEBUG(static bool fInitialized = false);
     _ASSERTE(!fInitialized);    // assume this method is only called once
-    _ASSERTE(g_pStringClass != NULL);
 
+    _ASSERTE(g_pStringClass != NULL);
     for (int i = 0; i < NumberOfStringConstructors; i++)
     {
         MethodDesc* pMD = MscorlibBinder::GetMethod((BinderMethodID)(METHOD__STRING__CTORF_FIRST + i));
@@ -64,6 +126,20 @@ void ECall::PopulateManagedStringConstructors()
 
         ECall::DynamicallyAssignFCallImpl(pDest, ECallCtor_First + i);
     }
+
+#ifdef FEATURE_UTF8STRING
+    _ASSERTE(g_pUtf8StringClass != NULL);
+    for (int i = 0; i < NumberOfUtf8StringConstructors; i++)
+    {
+        MethodDesc* pMD = MscorlibBinder::GetMethod((BinderMethodID)(METHOD__UTF8STRING__CTORF_FIRST + i));
+        _ASSERTE(pMD != NULL);
+    
+        PCODE pDest = pMD->GetMultiCallableAddrOfCode();
+
+        ECall::DynamicallyAssignFCallImpl(pDest, ECallUtf8String_Ctor_First + i);
+    }
+#endif // FEATURE_UTF8STRING
+
     INDEBUG(fInitialized = true);
 }
 
@@ -312,10 +388,14 @@ PCODE ECall::GetFCallImpl(MethodDesc * pMD, BOOL * pfSharedOrDynamicFCallImpl /*
         return GetFCallImpl(MscorlibBinder::GetMethod(METHOD__DELEGATE__CONSTRUCT_DELEGATE));
     }
 
-#ifdef FEATURE_COMINTEROP
     // COM imported classes have special constructors
-    if (pMT->IsComObjectType() && pMT != g_pBaseCOMObject && pMT != g_pBaseRuntimeClass)
+    if (pMT->IsComObjectType() 
+#ifdef FEATURE_COMINTEROP
+        && pMT != g_pBaseCOMObject && pMT != g_pBaseRuntimeClass
+#endif // FEATURE_COMINTEROP
+    )
     {
+#ifdef FEATURE_COMINTEROP
         if (pfSharedOrDynamicFCallImpl)
             *pfSharedOrDynamicFCallImpl = TRUE;
 
@@ -325,8 +405,10 @@ PCODE ECall::GetFCallImpl(MethodDesc * pMD, BOOL * pfSharedOrDynamicFCallImpl /*
 
         // FCComCtor does not need to be in the fcall hashtable since it does not erect frame.
         return GetEEFuncEntryPoint(FCComCtor);
-    }
+#else
+        COMPlusThrow(kPlatformNotSupportedException, IDS_EE_ERROR_COM);
 #endif // FEATURE_COMINTEROP
+    }
 
     if (!pMD->GetModule()->IsSystem())
         COMPlusThrow(kSecurityException, BFA_ECALLS_MUST_BE_IN_SYS_MOD);
@@ -557,10 +639,6 @@ LPVOID ECall::GetQCallImpl(MethodDesc * pMD)
         ("%s::%s is not registered using QCFuncElement macro in ecall.cpp",
         pMD->m_pszDebugClassName, pMD->m_pszDebugMethodName));
 
-    CONSISTENCY_CHECK_MSGF(pMD->HasSuppressUnmanagedCodeAccessAttr(),       
-        ("%s::%s is not marked with SuppressUnmanagedCodeSecurityAttribute()", 
-        pMD->m_pszDebugClassName, pMD->m_pszDebugMethodName));
-
     DWORD dwAttrs = pMD->GetAttrs();
     BOOL fPublicOrProtected = IsMdPublic(dwAttrs) || IsMdFamily(dwAttrs) || IsMdFamORAssem(dwAttrs);
 
@@ -585,7 +663,6 @@ MethodDesc* ECall::MapTargetBackToMethod(PCODE pTarg, PCODE * ppAdjustedEntryPoi
         GC_NOTRIGGER;
         MODE_ANY;
         HOST_NOCALLS;
-        SO_TOLERANT;
         SUPPORTS_DAC;
     }
     CONTRACTL_END;
@@ -623,7 +700,6 @@ CorInfoIntrinsics ECall::GetIntrinsicID(MethodDesc* pMD)
         THROWS;
         GC_TRIGGERS;
         MODE_ANY;
-        SO_TOLERANT;
         PRECONDITION(pMD->IsFCall());
     }
     CONTRACTL_END;
@@ -727,7 +803,6 @@ void HCallAssert(void*& cache, void* target)
 {
     CONTRACTL
     {
-        SO_TOLERANT;     // STATIC_CONTRACT_DEBUG_ONLY
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;

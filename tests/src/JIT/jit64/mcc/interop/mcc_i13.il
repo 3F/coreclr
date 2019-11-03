@@ -3,7 +3,9 @@
 // See the LICENSE file in the project root for more information.
 
 
-.assembly extern mscorlib {}
+.assembly extern System.Runtime.Extensions { auto }
+.assembly extern mscorlib { auto }
+
 .assembly MCCTest {}
 .module mcc_i13.exe
 
@@ -12,48 +14,48 @@
 {
   .class MyClass
   {
-    .method assembly static pinvokeimpl("native_i1c.dll" as "#1" cdecl) 
-        vararg valuetype MCCTest.VType1 Sum(float32) cil managed preservesig {
+    .method assembly static pinvokeimpl("native_i1c.dll" as "#1" cdecl)
+        vararg valuetype MCCTest.VType1 Sum(float64) cil managed preservesig {
     }
 
     .method private valuetype MCCTest.VType1 GetSum()
     {
       .maxstack  64
-      ldc.r4     1
-      ldc.r4     2
-      ldc.r4     3
-      ldc.r4     4
-      ldc.r4     5
-      ldc.r4     6
-      ldc.r4     7
-      ldc.r4     8
-      ldc.r4     9
-      ldc.r4     10
-      ldc.r4     11
-      ldc.r4     12
-      ldc.r4     1
+      ldc.r8     1
+      ldc.r8     2
+      ldc.r8     3
+      ldc.r8     4
+      ldc.r8     5
+      ldc.r8     6
+      ldc.r8     7
+      ldc.r8     8
+      ldc.r8     9
+      ldc.r8     10
+      ldc.r8     11
+      ldc.r8     12
+      ldc.r8     1
       neg
-      call       vararg valuetype MCCTest.VType1 MCCTest.MyClass::GetSum2(float32, ..., 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32, 
-																			float32)
-		ret
-	}
-
-    .method private static vararg valuetype MCCTest.VType1 GetSum2(float32)
-    {
-      jmp   vararg valuetype MCCTest.VType1 MCCTest.MyClass::Sum(float32)
+      call       vararg valuetype MCCTest.VType1 MCCTest.MyClass::GetSum2(float64, ...,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64,
+                                                                            float64)
+        ret
     }
-    
+
+    .method private static vararg valuetype MCCTest.VType1 GetSum2(float64)
+    {
+      jmp   vararg valuetype MCCTest.VType1 MCCTest.MyClass::Sum(float64)
+    }
+
     .method public specialname rtspecialname instance void  .ctor()
     {
       .maxstack  1
@@ -71,10 +73,10 @@
         [1] valuetype MCCTest.VType1 res,
         [2] int32 rc
       )
-      
+
       newobj     instance void MCCTest.MyClass::.ctor()
       stloc.s    me
-      
+
       ldloc.s    me
       call       instance valuetype MCCTest.VType1 MCCTest.MyClass::GetSum()
       stloc.s    res
@@ -84,7 +86,7 @@
       ldc.i4     12
       call       int32 MCCTest.Common::CheckResult(valuetype MCCTest.VType1, int32)
       stloc.s    rc
-      
+
       ldloc.s    rc
       ret
     } // end of method MyClass::Main

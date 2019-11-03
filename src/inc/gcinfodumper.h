@@ -8,6 +8,11 @@
 #include "gcinfotypes.h"
 #include "gcinfodecoder.h"
 
+// *****************************************************************************
+// WARNING!!!: These values and code are also used by SOS in the diagnostics
+// repo. Should updated in a backwards and forwards compatible way.
+// See: https://github.com/dotnet/diagnostics/blob/master/src/inc/gcinfodumper.h
+// *****************************************************************************
 
 //
 // This class dumps the contents of the gc encodings, providing outputs
@@ -18,7 +23,7 @@ class GcInfoDumper
 {
 public:
 
-    GcInfoDumper (PTR_CBYTE pbGCInfo);
+    GcInfoDumper (GCInfoToken gcInfoToken);
     ~GcInfoDumper ();
 
     // Returns TRUE to stop decoding.
@@ -80,7 +85,7 @@ private:
         UINT marked;
     };
 
-    PTR_CBYTE m_pbGCInfo;
+    GCInfoToken m_gcTable;
     UINT32 m_StackBaseRegister;
     UINT32 m_SizeOfEditAndContinuePreservedArea;
     LivePointerRecord *m_pRecords;

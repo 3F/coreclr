@@ -29,13 +29,8 @@ Abstract:
 #include <pthread.h>
 
 #define SharedID SHMPTR
-#define SharedPoolId ULONG_PTR
-#define DefaultSharedPool ((ULONG_PTR)0)
-#define NULLSharedID ((SHMPTR)NULL)
 #define SharedIDToPointer(shID) SHMPTR_TO_TYPED_PTR(PVOID, shID)
 #define SharedIDToTypePointer(TYPE,shID) SHMPTR_TO_TYPED_PTR(TYPE, shID)
-#define RawSharedObjectAlloc(szSize, shPoolId) SHMalloc(szSize)
-#define RawSharedObjectFree(shID) SHMfree(shID)
     
 namespace CorUnix
 {   
@@ -45,8 +40,16 @@ namespace CorUnix
         CONST HANDLE *lpHandles,
         BOOL bWaitAll,
         DWORD dwMilliseconds,
+        BOOL bAlertable,
+        BOOL bPrioritize = FALSE);
+
+    DWORD InternalSignalObjectAndWait(
+        CPalThread *thread,
+        HANDLE hObjectToSignal,
+        HANDLE hObjectToWaitOn,
+        DWORD dwMilliseconds,
         BOOL bAlertable);
-    
+
     PAL_ERROR InternalSleepEx(
         CPalThread * pthrCurrent,
         DWORD dwMilliseconds,

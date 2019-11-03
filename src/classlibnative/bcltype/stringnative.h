@@ -41,59 +41,22 @@
 
 class COMString {
 public:
-
-    //
-    // Constructors
-    //
-    static FCDECL5(Object *, StringInitSBytPtrPartialEx, StringObject *thisString,
-                   I1 *ptr, INT32 startIndex, INT32 length, Object* encoding);
-    static FCDECL2(Object *, StringInitCharPtr, StringObject *stringThis, INT8 *ptr);
-    static FCDECL4(Object *, StringInitCharPtrPartial, StringObject *stringThis, INT8 *value,
-                   INT32 startIndex, INT32 length);
-
     //
     // Search/Query Methods
     //
     static FCDECL1(FC_BOOL_RET, IsFastSort, StringObject* pThisRef);
     static FCDECL1(FC_BOOL_RET, IsAscii, StringObject* pThisRef);
 
-    static FCDECL2(INT32, FCCompareOrdinalIgnoreCaseWC, StringObject* strA, __in_z INT8 *strB);
-
-    static FCDECL5(INT32, CompareOrdinalEx, StringObject* strA, INT32 indexA, StringObject* strB, INT32 indexB, INT32 count);
-
-    static FCDECL4(INT32, IndexOfChar, StringObject* vThisRef, CLR_CHAR value, INT32 startIndex, INT32 count );
-
-    static FCDECL4(INT32, LastIndexOfChar, StringObject* thisRef, CLR_CHAR value, INT32 startIndex, INT32 count );
-
-    static FCDECL4(INT32, LastIndexOfCharArray, StringObject* thisRef, CHARArray* valueRef, INT32 startIndex, INT32 count );
-
-    static FCDECL4(INT32, IndexOfCharArray, StringObject* vThisRef, CHARArray* value, INT32 startIndex, INT32 count );
+    static FCDECL6(INT32, CompareOrdinalEx, StringObject* strA, INT32 indexA, INT32 countA, StringObject* strB, INT32 indexB, INT32 countB);
 
     static FCDECL2(FC_CHAR_RET, GetCharAt, StringObject* pThisRef, INT32 index);
     static FCDECL1(INT32, Length, StringObject* pThisRef);
 
     //
-    // Modifiers
-    //
-    static FCDECL3(Object*, ReplaceString, StringObject* thisRef, StringObject* oldValue, StringObject* newValue);
-
-    static FCDECL3(Object*, Insert, StringObject* thisRefUNSAFE, INT32 startIndex, StringObject* valueUNSAFE);
-
-    static FCDECL3(Object*, Remove, StringObject* thisRefUNSAFE, INT32 startIndex, INT32 count);
-
-    //
     // Interop
     //
-#ifdef FEATURE_COMINTEROP
     static FCDECL2(FC_BOOL_RET, FCTryGetTrailByte, StringObject* thisRefUNSAFE, UINT8 *pbData);
     static FCDECL2(VOID,        FCSetTrailByte,    StringObject* thisRefUNSAFE, UINT8 bData);
-#endif // FEATURE_COMINTEROP
-
-#ifdef FEATURE_RANDOMIZED_STRING_HASHING
-    static FCDECL3(INT32, Marvin32HashString, StringObject* thisRefUNSAFE, INT32 strLen, INT64 additionalEntropy);
-    static BOOL QCALLTYPE UseRandomizedHashing();
-#endif // FEATURE_RANDOMIZED_STRING_HASHING
-
 };
 
 // Revert to command line compilation flags

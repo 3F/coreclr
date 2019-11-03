@@ -92,8 +92,7 @@ struct SuspendStatistics
     // a Suspend to the end of a Restart.  We can compute 'avg' using 'cnt' and 'tot' values.
     MinMaxTot suspend, restart, paused;
 
-    // We know there can be contention on acquiring the ThreadStoreLock, or yield points when hosted (like
-    // BeginThreadAffinity on the leading edge and EndThreadAffinity on the trailing edge).
+    // We know there can be contention on acquiring the ThreadStoreLock.
     MinMaxTot acquireTSL, releaseTSL;
 
     // And if we OS suspend a thread that is blocking or perhaps throwing an exception and is therefore
@@ -184,7 +183,8 @@ public:
         SUSPEND_FOR_SHUTDOWN            = 4,
         SUSPEND_FOR_DEBUGGER            = 5,
         SUSPEND_FOR_GC_PREP             = 6,
-        SUSPEND_FOR_DEBUGGER_SWEEP      = 7     // This must only be used in Thread::SysSweepThreadsForDebug
+        SUSPEND_FOR_DEBUGGER_SWEEP      = 7,     // This must only be used in Thread::SysSweepThreadsForDebug
+        SUSPEND_FOR_PROFILER            = 8
     } SUSPEND_REASON;
 
 private:
@@ -262,6 +262,21 @@ private:
     static CLREventBase *s_hAbortEvtCache;
 
     static LONG m_DebugWillSyncCount;
+};
+
+class ThreadStoreLockHolderWithSuspendReason
+{
+public:
+    ThreadStoreLockHolderWithSuspendReason(ThreadSuspend::SUSPEND_REASON reason)
+    {
+        ThreadSuspend::LockThreadStore(reason);
+    }
+    ~ThreadStoreLockHolderWithSuspendReason()
+    {
+        ThreadSuspend::UnlockThreadStore();
+    }
+private:
+    ThreadSuspend::SUSPEND_REASON m_reason;
 };
 
 #endif // _THREAD_SUSPEND_H_

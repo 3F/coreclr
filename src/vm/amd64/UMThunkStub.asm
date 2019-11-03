@@ -11,28 +11,13 @@
 include <AsmMacros.inc>
 include AsmConstants.inc
 
-ifdef FEATURE_MIXEDMODE
-IJWNOADThunk__MakeCall                  equ ?MakeCall@IJWNOADThunk@@KAXXZ 
-IJWNOADThunk__FindThunkTarget           equ ?FindThunkTarget@IJWNOADThunk@@QEAAPEBXXZ
-endif
 gfHostConfig                            equ ?g_fHostConfig@@3KA
-NDirect__IsHostHookEnabled              equ ?IsHostHookEnabled@NDirect@@SAHXZ
 
 extern CreateThreadBlockThrow:proc
 extern TheUMEntryPrestubWorker:proc
-ifdef FEATURE_MIXEDMODE
-extern IJWNOADThunk__FindThunkTarget:proc
-endif
 extern UMEntryPrestubUnwindFrameChainHandler:proc
 extern UMThunkStubUnwindFrameChainHandler:proc
 extern g_TrapReturningThreads:dword
-extern UM2MDoADCallBack:proc
-extern ReverseEnterRuntimeHelper:proc
-extern ReverseLeaveRuntimeHelper:proc
-ifdef FEATURE_INCLUDE_ALL_INTERFACES
-extern gfHostConfig:dword
-extern NDirect__IsHostHookEnabled:proc
-endif
 extern UMThunkStubRareDisableWorker:proc
 extern ReversePInvokeBadTransition:proc
 
@@ -179,13 +164,11 @@ UMThunkStubAMD64_FIXED_STACK_ALLOC_SIZE = UMThunkStubAMD64_STACK_FRAME_SIZE - (U
         ;
         ; Call GetThread()
         ;
-        CALL_GETTHREAD                          ; will not trash r10
-        test            rax, rax
+        INLINE_GETTHREAD r12                    ; will not trash r10
+        test            r12, r12
         jz              DoThreadSetup
 
 HaveThread:
-
-        mov             r12, rax                ; r12 <- Thread*
 
         ;FailFast if a native callable method invoked via ldftn and calli.
         cmp             dword ptr [r12 + OFFSETOF__Thread__m_fPreemptiveGCDisabled], 1
@@ -204,24 +187,6 @@ HaveThread:
 
 InCooperativeMode:
 
-ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        test            [gfHostConfig], ASM_CLRTASKHOSTED    ; inlined NDirect::IsHostHookEnabled       ; hosted
-ifdef _DEBUG
-        call            IsHostHookEnabledHelper
-        test            eax, eax
-endif ; _DEBUG
-        jnz             NotifyHost_ReverseEnterRuntime                                                  ; hosted
-Done_NotifyHost_ReverseEnterRuntime:
-endif
-
-        mov             rax, [r12 + OFFSETOF__Thread__m_pDomain]
-        mov             eax, [rax + OFFSETOF__AppDomain__m_dwId]
-
-        mov             r11d, [METHODDESC_REGISTER + OFFSETOF__UMEntryThunk__m_dwDomainId]
-
-        cmp             rax, r11
-        jne             WrongAppDomain
-
         mov             r11, [METHODDESC_REGISTER + OFFSETOF__UMEntryThunk__m_pUMThunkMarshInfo]
         mov             eax, [r11 + OFFSETOF__UMThunkMarshInfo__m_cbActualArgSize]                      ; stack_args
         test            rax, rax                                                                        ; stack_args
@@ -237,12 +202,6 @@ PostCall:
         ; enable preemptive GC
         ;
         mov             dword ptr [r12 + OFFSETOF__Thread__m_fPreemptiveGCDisabled], 0
-
-ifdef FEATURE_INCLUDE_ALL_INTERFACES
-        cmp             byte ptr [rbp + UMThunkStubAMD64_HOST_NOTIFY_FLAG_OFFSET], 0                    ; hosted
-        jnz             NotifyHost_ReverseLeaveRuntime                                                  ; hosted
-Done_NotifyHost_ReverseLeaveRuntime:        
-endif
 
         ; epilog
         lea             rsp, [rbp - UMThunkStubAMD64_FRAME_OFFSET + UMThunkStubAMD64_FIXED_STACK_ALLOC_SIZE]
@@ -279,6 +238,8 @@ DoThreadSetup:
         movdqa          xmm1, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 10h]
         movdqa          xmm2, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 20h]
         movdqa          xmm3, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 30h]
+
+        mov             r12, rax
         
         jmp             HaveThread
         
@@ -352,267 +313,7 @@ CopyLoop:
         
         jmp             ArgumentsSetup
 
-ifdef FEATURE_INCLUDE_ALL_INTERFACES
-NotifyHost_ReverseEnterRuntime:
-        mov             [rbp + UMThunkStubAMD64_RARE_PATH_SPILL_OFFSET], METHODDESC_REGISTER
-
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h], rcx
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  8h], rdx
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 10h], r8
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 18h], r9
-
-        ; @CONSIDER: mark UMEntryThunks that have FP params and only save/restore xmm regs on those calls
-        ;            initial measurements indidcate that this could be worth about a 5% savings in reverse
-        ;            pinvoke overhead.
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET +  0h], xmm0
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 10h], xmm1
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 20h], xmm2
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 30h], xmm3
-
-        mov             rcx, r12
-        call            ReverseEnterRuntimeHelper
-        mov             byte ptr [rbp + UMThunkStubAMD64_HOST_NOTIFY_FLAG_OFFSET], 1
-                
-        mov             rcx,  [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h] 
-        mov             rdx,  [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  8h] 
-        mov             r8,   [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 10h] 
-        mov             r9,   [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 18h]
-
-        ; @CONSIDER: mark UMEntryThunks that have FP params and only save/restore xmm regs on those calls
-        movdqa          xmm0, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET +  0h]
-        movdqa          xmm1, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 10h]
-        movdqa          xmm2, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 20h]
-        movdqa          xmm3, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 30h]
-
-        mov             METHODDESC_REGISTER, [rbp + UMThunkStubAMD64_RARE_PATH_SPILL_OFFSET]
-
-        jmp             Done_NotifyHost_ReverseEnterRuntime
-
-NotifyHost_ReverseLeaveRuntime:
-
-        ; save rax, xmm0
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h], rax
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET +  0h], xmm0
-
-        mov             rcx, r12
-        call            ReverseLeaveRuntimeHelper
-        mov             byte ptr [rbp + UMThunkStubAMD64_HOST_NOTIFY_FLAG_OFFSET], 0
-
-        ; restore rax, xmm0
-        mov             rax, [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h]
-        movdqa          xmm0, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET +  0h]
-        
-        jmp             Done_NotifyHost_ReverseLeaveRuntime
-endif
-
-WrongAppDomain:
-        ;
-        ; home register args to the stack
-        ;
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h], rcx
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  8h], rdx
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 10h], r8
-        mov             [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 18h], r9
-
-        ;
-        ; save off xmm registers
-        ;
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET +  0h], xmm0
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 10h], xmm1
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 20h], xmm2
-        movdqa          xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET + 30h], xmm3
-
-        ;
-        ; call our helper to perform the AD transtion 
-        ;
-        mov             rcx, METHODDESC_REGISTER
-        lea             r8,  [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET]
-        mov             rax, [METHODDESC_REGISTER + OFFSETOF__UMEntryThunk__m_pUMThunkMarshInfo]
-        mov             r9d, [rax + OFFSETOF__UMThunkMarshInfo__m_cbActualArgSize]
-        call            UM2MDoADCallBack
-
-        ; restore return value
-        mov             rax,  [rbp + UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h]
-        movdqa          xmm0, xmmword ptr [rbp + UMThunkStubAMD64_XMM_SAVE_OFFSET +  0h]
-
-        jmp             PostCall
-
 NESTED_END UMThunkStub, _TEXT
-
-;
-; EXTERN_C void __stdcall UM2MThunk_WrapperHelper(
-;       void *pThunkArgs,               ; rcx
-;       int argLen,                     ; rdx
-;       void *pAddr,                    ; r8            // not used
-;       UMEntryThunk *pEntryThunk,      ; r9
-;       Thread *pThread);               ; [entry_sp + 28h]
-;
-NESTED_ENTRY UM2MThunk_WrapperHelper, _TEXT
-
-
-UM2MThunk_WrapperHelper_STACK_FRAME_SIZE = 0
-
-; number of integer registers saved in prologue
-UM2MThunk_WrapperHelper_NUM_REG_PUSHES = 3
-UM2MThunk_WrapperHelper_STACK_FRAME_SIZE = UM2MThunk_WrapperHelper_STACK_FRAME_SIZE + (UM2MThunk_WrapperHelper_NUM_REG_PUSHES * 8)
-
-UM2MThunk_WrapperHelper_CALLEE_SCRATCH_SIZE = SIZEOF_MAX_OUTGOING_ARGUMENT_HOMES
-UM2MThunk_WrapperHelper_STACK_FRAME_SIZE = UM2MThunk_WrapperHelper_STACK_FRAME_SIZE + UM2MThunk_WrapperHelper_CALLEE_SCRATCH_SIZE
-
-; Ensure that rsp remains 16-byte aligned
-if ((UM2MThunk_WrapperHelper_STACK_FRAME_SIZE + 8) MOD 16) ne 0        ; +8 for caller-pushed return address
-UM2MThunk_WrapperHelper_STACK_FRAME_SIZE = UM2MThunk_WrapperHelper_STACK_FRAME_SIZE + 8
-endif
-
-UM2MThunk_WrapperHelper_FRAME_OFFSET = UM2MThunk_WrapperHelper_CALLEE_SCRATCH_SIZE
-UM2MThunk_WrapperHelper_FIXED_STACK_ALLOC_SIZE = UM2MThunk_WrapperHelper_STACK_FRAME_SIZE - (UM2MThunk_WrapperHelper_NUM_REG_PUSHES * 8)
-
-        push_nonvol_reg rsi
-        push_nonvol_reg rdi
-        push_nonvol_reg rbp
-        alloc_stack     UM2MThunk_WrapperHelper_FIXED_STACK_ALLOC_SIZE
-        set_frame       rbp, UM2MThunk_WrapperHelper_FRAME_OFFSET
-        END_PROLOGUE
-
-        ;
-        ; We are in cooperative mode and in the correct domain. 
-        ; The host has also been notified that we've entered the 
-        ; runtime.  All we have left to do is to copy the stack, 
-        ; setup the register args and then call the managed target
-        ;
-
-        test            rdx, rdx
-        jg              CopyStackArgs
-
-ArgumentsSetup:
-        mov             METHODDESC_REGISTER, r9
-
-        mov             rsi, rcx                ; rsi <- pThunkArgs
-        mov             rcx, [rsi +  0h]
-        mov             rdx, [rsi +  8h]
-        mov             r8,  [rsi + 10h]
-        mov             r9,  [rsi + 18h]
-
-        movdqa          xmm0, xmmword ptr [rsi + UMThunkStubAMD64_XMM_SAVE_OFFSET - UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h]
-        movdqa          xmm1, xmmword ptr [rsi + UMThunkStubAMD64_XMM_SAVE_OFFSET - UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 10h]
-        movdqa          xmm2, xmmword ptr [rsi + UMThunkStubAMD64_XMM_SAVE_OFFSET - UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 20h]
-        movdqa          xmm3, xmmword ptr [rsi + UMThunkStubAMD64_XMM_SAVE_OFFSET - UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET + 30h]
-
-        mov             rax, [METHODDESC_REGISTER + OFFSETOF__UMEntryThunk__m_pUMThunkMarshInfo]      ; rax <- UMThunkMarshInfo*
-        mov             rax, [rax + OFFSETOF__UMThunkMarshInfo__m_pILStub]                              ; rax <- Stub*
-        call            rax
-
-        ; make sure we don't trash the return value
-        mov             [rsi + 0h], rax
-        movdqa          xmmword ptr [rsi + UMThunkStubAMD64_XMM_SAVE_OFFSET - UMThunkStubAMD64_ARGUMENTS_STACK_HOME_OFFSET +  0h], xmm0
-
-        lea             rsp, [rbp - UM2MThunk_WrapperHelper_FRAME_OFFSET + UM2MThunk_WrapperHelper_FIXED_STACK_ALLOC_SIZE]
-        pop             rbp
-        pop             rdi
-        pop             rsi
-        ret
-        
-
-CopyStackArgs:
-        ; rdx = cbStackArgs (with 20h for register args subtracted out already)
-        ; rcx = pSrcArgStack
-
-        sub             rsp, rdx
-        and             rsp, -16
-
-        mov             r8, rcx
-        
-        lea             rsi, [rcx + SIZEOF_MAX_OUTGOING_ARGUMENT_HOMES]
-        lea             rdi, [rsp + UM2MThunk_WrapperHelper_CALLEE_SCRATCH_SIZE]
-
-        mov             rcx, rdx
-        shr             rcx, 3
-        
-        rep movsq
-        
-        mov             rcx, r8
-        
-        jmp             ArgumentsSetup
-        
-NESTED_END UM2MThunk_WrapperHelper, _TEXT
-
-ifdef _DEBUG
-ifdef FEATURE_INCLUDE_ALL_INTERFACES
-
-NESTED_ENTRY IsHostHookEnabledHelper, _TEXT
-
-        push_nonvol_reg rcx
-        push_nonvol_reg rdx
-        push_nonvol_reg r8
-        push_nonvol_reg r9
-        push_nonvol_reg r10
-
-IsHostHookEnabledHelper_FIXED_STACK_ALLOC_SIZE = 20h + 40h
-
-        alloc_stack     IsHostHookEnabledHelper_FIXED_STACK_ALLOC_SIZE
-
-        END_PROLOGUE
-
-        movdqa          xmmword ptr [rsp + 20h +  0h], xmm0
-        movdqa          xmmword ptr [rsp + 20h + 10h], xmm1
-        movdqa          xmmword ptr [rsp + 20h + 20h], xmm2
-        movdqa          xmmword ptr [rsp + 20h + 30h], xmm3
-
-        call            NDirect__IsHostHookEnabled
-
-        movdqa          xmm0, xmmword ptr [rsp + 20h +  0h]
-        movdqa          xmm1, xmmword ptr [rsp + 20h + 10h]
-        movdqa          xmm2, xmmword ptr [rsp + 20h + 20h]
-        movdqa          xmm3, xmmword ptr [rsp + 20h + 30h]
-
-        ; epilog
-        add             rsp, IsHostHookEnabledHelper_FIXED_STACK_ALLOC_SIZE
-        pop             r10
-        pop             r9
-        pop             r8
-        pop             rdx
-        pop             rcx
-        ret        
-NESTED_END IsHostHookEnabledHelper, _TEXT
-
-endif ; FEATURE_INCLUDE_ALL_INTERFACES
-endif ; _DEBUG
-
-ifdef FEATURE_MIXEDMODE
-NESTED_ENTRY IJWNOADThunk__MakeCall, _TEXT
-        ; METHODDESC_REGISTER = IJWNOADThunk*
-
-        alloc_stack     68h
-
-        save_reg_postrsp    rcx, 70h
-        save_reg_postrsp    rdx, 78h
-        save_reg_postrsp    r8,  80h
-        save_reg_postrsp    r9,  88h
-
-        save_xmm128_postrsp xmm0, 20h
-        save_xmm128_postrsp xmm1, 30h
-        save_xmm128_postrsp xmm2, 40h
-        save_xmm128_postrsp xmm3, 50h
-    END_PROLOGUE
-
-        mov             rcx, METHODDESC_REGISTER
-        call            IJWNOADThunk__FindThunkTarget
-
-        movdqa          xmm0, xmmword ptr [rsp + 20h]
-        movdqa          xmm1, xmmword ptr [rsp + 30h]
-        movdqa          xmm2, xmmword ptr [rsp + 40h]
-        movdqa          xmm3, xmmword ptr [rsp + 50h]
-
-        mov             rcx, [rsp + 70h]
-        mov             rdx, [rsp + 78h]
-        mov             r8,  [rsp + 80h]
-        mov             r9 , [rsp + 88h]
-
-        ; The target is in rax
-        add             rsp, 68h
-        TAILJMP_RAX
-NESTED_END IJWNOADThunk__MakeCall, _TEXT
-endif ; FEATURE_MIXEDMODE
 
         end
 

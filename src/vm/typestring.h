@@ -28,13 +28,10 @@
 #include "typeparse.h"
 #include "field.h"
 
-class TypeLibExporter;
 class TypeString;
 
 class TypeNameBuilder
 {
-    friend class TypeNameBuilderWrapper;
-
 public:
     static void QCALLTYPE _ReleaseTypeNameBuilder(TypeNameBuilder * pTnb);
     static TypeNameBuilder * QCALLTYPE _CreateTypeNameBuilder();
@@ -54,7 +51,7 @@ public:
 private:
     friend class TypeString;
     friend SString* TypeName::ToString(SString*, BOOL, BOOL, BOOL);
-    friend TypeHandle TypeName::GetTypeWorker(BOOL, BOOL, BOOL, Assembly*, BOOL, BOOL, StackCrawlMark*, Assembly*, 
+    friend TypeHandle TypeName::GetTypeWorker(BOOL, BOOL, Assembly*, BOOL, BOOL, Assembly*, 
         ICLRPrivBinder * pPrivHostBinder,
         BOOL, OBJECTREF *);
     HRESULT OpenGenericArguments(); 
@@ -148,36 +145,6 @@ private:
     Stack m_stack;
 };
 
-// Class that's exposed to COM and wraps TypeNameBuilder (so that it can thunk
-// all the entry points in order to perform stack probes).
-class TypeNameBuilderWrapper : public ITypeNameBuilder
-{
-public:
-    virtual HRESULT __stdcall QueryInterface(REFIID riid, void **ppUnk);
-    virtual ULONG __stdcall AddRef();
-    virtual ULONG __stdcall Release();
-
-    virtual HRESULT __stdcall OpenGenericArguments(); 
-    virtual HRESULT __stdcall CloseGenericArguments(); 
-    virtual HRESULT __stdcall OpenGenericArgument(); 
-    virtual HRESULT __stdcall CloseGenericArgument();
-    virtual HRESULT __stdcall AddName(LPCWSTR szName); 
-    virtual HRESULT __stdcall AddPointer(); 
-    virtual HRESULT __stdcall AddByRef(); 
-    virtual HRESULT __stdcall AddSzArray(); 
-    virtual HRESULT __stdcall AddArray(DWORD rank);
-    virtual HRESULT __stdcall AddAssemblySpec(LPCWSTR szAssemblySpec);
-    virtual HRESULT __stdcall ToString(BSTR* pszStringRepresentation);
-    virtual HRESULT __stdcall Clear();
-
-    TypeNameBuilderWrapper() : m_ref(0) { WRAPPER_NO_CONTRACT; }
-    virtual ~TypeNameBuilderWrapper() {}
-    
-private:
-    LONG            m_ref;
-    TypeNameBuilder m_tnb;
-};
-
 // --------------------------------------------------------------------------
 // This type can generate names for types. It is used by reflection methods
 // like System.RuntimeType.RuntimeTypeCache.ConstructName
@@ -249,7 +216,6 @@ public:
 #endif
 
 private:
-    friend class TypeLibExporter;
     friend class TypeNameBuilder;
     static void AppendMethodImpl(SString& s, MethodDesc *pMD, Instantiation typeInstantiation, const DWORD format);
     static void AppendTypeDef(TypeNameBuilder& tnb, IMDInternalImport *pImport, mdTypeDef td, DWORD format = FormatNamespace);

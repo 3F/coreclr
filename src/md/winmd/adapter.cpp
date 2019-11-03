@@ -88,6 +88,8 @@ HRESULT CheckIfWinMDAdapterNeeded(IMDCommon *pRawMDCommon)
     HRESULT hr;
     LPWSTR        wszCorVersion = NULL;
     WinMDAdapter* pNewAdapter = NULL;
+    ULONG numAssemblyRefs = 0;
+    const char *szClrPortion = NULL;
 
     *ppAdapter = NULL;
 
@@ -102,7 +104,7 @@ HRESULT CheckIfWinMDAdapterNeeded(IMDCommon *pRawMDCommon)
     //------------------------------------------------------------------------------------------------
     LPCSTR szVersion;
     IfFailGo(pRawMDCommon->GetVersionString(&szVersion));
-    const char *szClrPortion = strchr(szVersion, ';');
+    szClrPortion = strchr(szVersion, ';');
     if (szClrPortion)
     {
         pNewAdapter->m_scenario = kWinMDExp;
@@ -148,7 +150,7 @@ HRESULT CheckIfWinMDAdapterNeeded(IMDCommon *pRawMDCommon)
     //------------------------------------------------------------------------------------------------
     // Find an assemblyRef to mscorlib (required to exist in .winmd files precisely to make the adapter's job easier.
     //------------------------------------------------------------------------------------------------
-    ULONG numAssemblyRefs = pNewAdapter->m_pRawMetaModelCommonRO->CommonGetRowCount(mdtAssemblyRef);
+    numAssemblyRefs = pNewAdapter->m_pRawMetaModelCommonRO->CommonGetRowCount(mdtAssemblyRef);
     pNewAdapter->m_assemblyRefMscorlib = 0;
     pNewAdapter->m_fReferencesMscorlibV4 = FALSE;
     for (ULONG rid = 1; rid <= numAssemblyRefs; rid++)
@@ -860,10 +862,11 @@ WinMDAdapter::GetTypeRefProps(
 
     HRESULT hr;
     ULONG   treatment;
+    ULONG treatmentClass;
     IfFailGo(GetTypeRefTreatment(tkTypeRef, &treatment));
     _ASSERTE(treatment != kTrNotYetInitialized);
 
-    ULONG treatmentClass = treatment & kTrClassMask;
+    treatmentClass = treatment & kTrClassMask;
     if (treatmentClass == kTrClassWellKnownRedirected)
     {
         ULONG nRewritePairIndex = treatment & ~kTrClassMask;
@@ -998,9 +1001,10 @@ WinMDAdapter::GetTypeRefRedirectedInfo(
     
     HRESULT hr;
     ULONG   treatment;
+    ULONG treatmentClass;
     IfFailGo(GetTypeRefTreatment(tkTypeRef, &treatment));
     
-    ULONG treatmentClass = treatment & kTrClassMask;
+    treatmentClass = treatment & kTrClassMask;
     if (treatmentClass == kTrClassWellKnownRedirected)
     {
         *pIndex = (RedirectedTypeIndex)(treatment & ~kTrClassMask);
@@ -1097,7 +1101,7 @@ HRESULT WinMDAdapter::ModifyExportedTypeName(
 
 //------------------------------------------------------------------------------
 
-// We must optionaly add an assembly ref for System.Numerics.Vectors.dll since this assembly is not available
+// We must optionally add an assembly ref for System.Numerics.Vectors.dll since this assembly is not available
 // on downlevel platforms. 
 //
 // This function assumes that System.Numerics.Vectors.dll is the last assembly that
@@ -1181,14 +1185,12 @@ void WinMDAdapter::GetExtraAssemblyRefProps(FrameworkAssemblyIndex index,
 
     if (ppPublicKeytoken)
     {
-#ifdef FEATURE_CORECLR
         if (index == FrameworkAssembly_Mscorlib)
         {
             *ppPublicKeytoken = g_rbTheSilverlightPlatformKeyToken;
             *pTokenLength = sizeof(g_rbTheSilverlightPlatformKeyToken);
         }
         else
-#endif
         {
             if (index == FrameworkAssembly_SystemNumericsVectors || index == FrameworkAssembly_SystemRuntime || index == FrameworkAssembly_SystemObjectModel)
             {
@@ -1278,11 +1280,14 @@ HRESULT WinMDAdapter::ModifyMethodProps(mdMethodDef tkMethodDef, /*[in, out]*/ D
     _ASSERTE(TypeFromToken(tkMethodDef) == mdtMethodDef);
 
     ULONG mdTreatment;
+    DWORD dwAttr;
+    DWORD dwImplFlags;
+    ULONG ulRVA;
     IfFailGo(GetMethodDefTreatment(tkMethodDef, &mdTreatment));
 
-    DWORD dwAttr = pdwAttr ? *pdwAttr: 0;
-    DWORD dwImplFlags = pdwImplFlags ? *pdwImplFlags : 0;
-    ULONG ulRVA = pulRVA ? *pulRVA : 0; 
+    dwAttr = pdwAttr ? *pdwAttr: 0;
+    dwImplFlags = pdwImplFlags ? *pdwImplFlags : 0;
+    ulRVA = pulRVA ? *pulRVA : 0; 
 
     switch (mdTreatment & kMdTreatmentMask)
     {
@@ -1594,7 +1599,6 @@ HRESULT WinMDAdapter::ComputeMethodDefTreatment(mdMethodDef tkMethodDef, mdTypeD
         
         mdToken tkMethodImplFirst;
         ULONG count;
-        mdTypeRef mtTypeRef;
         IfFailGo(m_pRawMetaModelCommonRO->CommonGetMethodImpls(tkDeclaringTypeDef, &tkMethodImplFirst, &count));
         for (ULONG i = 0; i < count; i++)
         {
@@ -2400,9 +2404,12 @@ HRESULT WinMDAdapter::TranslateWinMDAttributeUsageAttribute(mdTypeDef tkTypeDefO
     {
         IfFailGo(COR_E_BADIMAGEFORMAT);
     }
-    DWORD wfTargetValue = *(DWORD*)(pbWFUsageBlob + 2);
-    *pClrTargetValue = ConvertToClrAttributeTarget(wfTargetValue);
 
+    {
+        DWORD wfTargetValue = *(DWORD*)(pbWFUsageBlob + 2);
+        *pClrTargetValue = ConvertToClrAttributeTarget(wfTargetValue);
+    }
+    
     // add AttributeTargets.Method, AttributeTargets.Constructor , AttributeTargets.Property, and AttributeTargets.Event if this is the VersionAttribute
     LPCSTR  szNamespace;
     LPCSTR  szName;

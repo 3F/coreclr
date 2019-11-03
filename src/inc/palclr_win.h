@@ -83,78 +83,15 @@
 // WIN_PAL_ENDTRY
 //
 
-#if !defined(FEATURE_CORECLR)
-
-#include "staticcontract.h"
-
-#define WIN_PAL_TRY_NAKED                                                       \
-    {                                                                           \
-        bool __exHandled; __exHandled = false;                                  \
-        DWORD __exCode; __exCode = 0;                                           \
-        __try                                                                   \
-        {
-
-#define WIN_PAL_TRY                                                             \
-    {                                                                           \
-        WIN_PAL_TRY_NAKED                                                       \
-        WIN_PAL_TRY_HANDLER_DBG_BEGIN
-
-#define WIN_PAL_TRY_FOR_DLLMAIN(_reason)                                        \
-    {                                                                           \
-        WIN_PAL_TRY_NAKED                                                       \
-        WIN_PAL_TRY_HANDLER_DBG_BEGIN_DLLMAIN(_reason)
-
-// Note: PAL_SEH_RESTORE_GUARD_PAGE is only ever defined in clrex.h, so we only restore guard pages automatically
-// when these macros are used from within the VM.
-#define WIN_PAL_SEH_RESTORE_GUARD_PAGE PAL_SEH_RESTORE_GUARD_PAGE
- 
-#define WIN_PAL_EXCEPT_NAKED(Disposition)                                       \
-    } __except(__exCode = GetExceptionCode(), Disposition) {                    \
-        __exHandled = true;                                                     \
-        WIN_PAL_SEH_RESTORE_GUARD_PAGE
-
-#define WIN_PAL_EXCEPT(Disposition)                                             \
-        WIN_PAL_TRY_HANDLER_DBG_END                                             \
-        WIN_PAL_EXCEPT_NAKED(Disposition)
-
-#define WIN_PAL_EXCEPT_FILTER_NAKED(pfnFilter, pvFilterParameter)                                       \
-    } __except(__exCode = GetExceptionCode(), pfnFilter(GetExceptionInformation(), pvFilterParameter)) {  \
-        __exHandled = true;                                                     \
-        WIN_PAL_SEH_RESTORE_GUARD_PAGE
-
-#define WIN_PAL_EXCEPT_FILTER(pfnFilter, pvFilterParameter)                     \
-        WIN_PAL_TRY_HANDLER_DBG_END                                             \
-        WIN_PAL_EXCEPT_FILTER_NAKED(pfnFilter, pvFilterParameter)
-
-#define WIN_PAL_FINALLY_NAKED                                                   \
-    } __finally {                                                               \
-
-#define WIN_PAL_FINALLY                                                             \
-        WIN_PAL_TRY_HANDLER_DBG_END                                             \
-        WIN_PAL_FINALLY_NAKED
-
-#define WIN_PAL_ENDTRY_NAKED                                                    \
-        }                                                                       \
-    }                                                                           \
-
-#define WIN_PAL_ENDTRY                                                          \
-            }                                                                   \
-            WIN_PAL_ENDTRY_NAKED_DBG                                            \
-        }                                                                       \
-    }
-
-#endif // !PAL_WIN_SEH
 
 
 #if defined(_DEBUG_IMPL) && !defined(JIT_BUILD) && !defined(JIT64_BUILD) && !defined(_ARM_) // @ARMTODO
 #define WIN_PAL_TRY_HANDLER_DBG_BEGIN                                           \
     BOOL ___oldOkayToThrowValue = FALSE;                                        \
-    BOOL ___oldSOTolerantState = FALSE;                                         \
     ClrDebugState *___pState = GetClrDebugState();                              \
     __try                                                                       \
     {                                                                           \
         ___oldOkayToThrowValue = ___pState->IsOkToThrow();                      \
-        ___oldSOTolerantState = ___pState->IsSOTolerant();                      \
         ___pState->SetOkToThrow(TRUE);                                          \
         ANNOTATION_TRY_BEGIN;
 
@@ -168,7 +105,6 @@
         if (___pState)                                                          \
         {                                                                       \
             ___oldOkayToThrowValue = ___pState->IsOkToThrow();                  \
-            ___oldSOTolerantState = ___pState->IsSOTolerant();                  \
             ___pState->SetOkToThrow(TRUE);                                      \
         }                                                                       \
         if ((_reason == DLL_PROCESS_DETACH) || (_reason == DLL_THREAD_DETACH))  \
@@ -190,17 +126,19 @@
         }                                                                       \
     }
 
-#define WIN_PAL_ENDTRY_NAKED_DBG                                                \
-    if (__exHandled)                                                            \
-    {                                                                           \
-        RESTORE_SO_TOLERANCE_STATE;                                             \
-    }                                                                           \
-    
+#define WIN_PAL_ENDTRY_NAKED_DBG
+
 #else
 #define WIN_PAL_TRY_HANDLER_DBG_BEGIN                   ANNOTATION_TRY_BEGIN;
 #define WIN_PAL_TRY_HANDLER_DBG_BEGIN_DLLMAIN(_reason)  ANNOTATION_TRY_BEGIN;
 #define WIN_PAL_TRY_HANDLER_DBG_END                     ANNOTATION_TRY_END;
 #define WIN_PAL_ENDTRY_NAKED_DBG                                                          
 #endif // defined(ENABLE_CONTRACTS_IMPL) && !defined(JIT64_BUILD)
+
+#if !defined (FEATURE_PAL)
+// Native system libray handle.
+// In Windows, NATIVE_LIBRARY_HANDLE is the same as HMODULE.
+typedef HMODULE NATIVE_LIBRARY_HANDLE;
+#endif // !FEATURE_PAL
 
 #endif	// __PALCLR_WIN_H__

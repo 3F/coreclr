@@ -6,8 +6,6 @@
 #if !defined(_EX_H_)
 #define _EX_H_
 
-void RetailAssertIfExpectedClean();             // Defined in src/utilcode/debug.cpp
-
 #ifdef FEATURE_PAL
 #define EX_TRY_HOLDER                                   \
     HardwareExceptionHolder                             \
@@ -23,7 +21,6 @@ void RetailAssertIfExpectedClean();             // Defined in src/utilcode/debug
 #include "winwrap.h"
 #include "corerror.h"
 #include "stresslog.h"
-#include "genericstackprobe.h"
 #include "staticcontract.h"
 #include "entrypoints.h"
 
@@ -124,18 +121,6 @@ void GetCurrentExceptionPointers(PEXCEPTION_POINTERS pExceptionInfo);
 DWORD GetCurrentExceptionCode();
 
 // ---------------------------------------------------------------------------
-//   We save current ExceptionPointers using VectoredExceptionHandler.  The save data is only valid
-//   duing exception handling.  Return TRUE if the current exception is hard or soft SO.
-// ---------------------------------------------------------------------------
-bool IsCurrentExceptionSO();
-
-// ---------------------------------------------------------------------------
-//   Return TRUE if the current exception is hard( or soft) SO. Soft SO
-//   is defined when the stack probing code is enabled (FEATURE_STACK_PROBE)
-// ---------------------------------------------------------------------------
-bool IsSOExceptionCode(DWORD exceptionCode);
-
-// ---------------------------------------------------------------------------
 //   Standard exception hierarchy & infrastructure for library code & EE
 // ---------------------------------------------------------------------------
 
@@ -159,8 +144,6 @@ Exception
     |-> SEHException                                    Y
     |
     |-> DelegatingException                             Y
-    |
-    |-> StackOverflowException                          Y
     |
     |-> OutOfMemoryException                            Y
     |
@@ -246,14 +229,11 @@ class Exception
         HandlerState();
 
         void CleanupTry();
-        void SetupCatch(INDEBUG_COMMA(__in_z const char * szFile) int lineNum, bool fVMInitialized = true);
+        void SetupCatch(INDEBUG_COMMA(__in_z const char * szFile) int lineNum);
         void SucceedCatch();
 
         BOOL DidCatch() { return (m_dwFlags & Caught); }
         void SetCaught() { m_dwFlags |= Caught; }
-
-        BOOL DidCatchSO() { return (m_dwFlags & CaughtSO); }
-        void SetCaughtSO() { m_dwFlags |= CaughtSO; }
 
         BOOL DidCatchCxx() { return (m_dwFlags & CaughtCxx); }
         void SetCaughtCxx() { m_dwFlags |= CaughtCxx; }
@@ -722,10 +702,6 @@ private:
 // backout code following the END_CATCH that has to be executed. The solution is
 // to replace that backout code with holder objects.
 
-
-// This is a rotten way to define an enum but as long as we're treating
-// "if (optimizabletoconstant)" warnings as fatal errors, we have little choice.
-
 //-----------------------------------------------------------------------
 
 #define RethrowTransientExceptions                                      \
@@ -733,14 +709,6 @@ private:
     {                                                                   \
         EX_RETHROW;                                                     \
     }                                                                   \
-
-#define RethrowSOExceptions                                             \
-    if (__state.DidCatchSO())                                           \
-    {                                                                   \
-        STATIC_CONTRACT_THROWS_TERMINAL;                                \
-        EX_RETHROW;                                                     \
-    }                                                                   \
-
 
 // Don't use this - use RethrowCorruptingExceptions (see below) instead.
 #define SwallowAllExceptions ;
@@ -772,10 +740,6 @@ private:
 //
 // SET_CE_RETHROW_FLAG_FOR_EX_CATCH macros helps evaluate if the CE is to be rethrown or not. This has been redefined in
 // Clrex.h to add the condition of evaluating the throwable as well (which is not available outside the VM folder).
-//
-// Typically, SET_CE_RETHROW_FLAG_FOR_EX_CATCH would rethrow a Corrupted State Exception. However, SO needs to be dealt
-// with specially and this work is done during EX_CATCH, by calling SetupCatch against the handler state, and by EX_ENDTRY
-// by calling HANDLE_STACKOVERFLOW_AFTER_CATCH.
 //
 // Passing FALSE as the second argument to IsProcessCorruptedStateException implies that SET_CE_RETHROW_FLAG_FOR_EX_CATCH
 // will ensure that we dont rethrow SO and allow EX_ENDTRY to SO specific processing. If none is done, then EX_ENDTRY will
@@ -853,13 +817,10 @@ void ExThrowTrap(const char *fcn, const char *file, int line, const char *szType
 
 #endif
 
-#define HANDLE_SO_TOLERANCE_FOR_THROW
-
 #define EX_THROW(_type, _args)                                                          \
     {                                                                                   \
         FAULT_NOT_FATAL();                                                              \
                                                                                         \
-        HANDLE_SO_TOLERANCE_FOR_THROW;                                                  \
         _type * ___pExForExThrow =  new _type _args ;                                   \
                 /* don't embed file names in retail to save space and avoid IP */       \
                 /* a findstr /n will allow you to locate it in a pinch */               \
@@ -886,7 +847,6 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
     {                                                                                   \
         FAULT_NOT_FATAL();                                                              \
                                                                                         \
-        HANDLE_SO_TOLERANCE_FOR_THROW;                                                  \
         Exception *_inner2 = ExThrowWithInnerHelper(_inner);                            \
         _type *___pExForExThrow =  new _type _args ;                                    \
         ___pExForExThrow->SetInnerException(_inner2);                                   \
@@ -928,7 +888,8 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
                 INDEBUG(static bool __alwayszero;)                                      \
                 INDEBUG(VolatileLoad(&__alwayszero);)                                   \
                 {                                                                       \
-                    /* this is necessary for Rotor exception handling to work */        \
+                    /* Disallow returns to make exception handling work. */             \
+                    /* Some work is done after the catch, see EX_ENDTRY. */             \
                     DEBUG_ASSURE_NO_RETURN_BEGIN(EX_TRY)                                \
                     EX_TRY_HOLDER                                                       \
 
@@ -953,7 +914,6 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
         PAL_CPP_CATCH_ALL                                                               \
         {                                                                               \
             SCAN_EHMARKER_CATCH();                                                      \
-            VALIDATE_BACKOUT_STACK_CONSUMPTION;                                         \
             __defaultException_t __defaultException;                                    \
             CHECK::ResetAssert();                                                       \
             ExceptionHolder __pException(__state.m_pExceptionPtr);                      \
@@ -979,7 +939,8 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
             INDEBUG(static bool __alwayszero;)                                      \
             INDEBUG(VolatileLoad(&__alwayszero);)                                   \
             {                                                                       \
-                /* this is necessary for Rotor exception handling to work */        \
+                /* Disallow returns to make exception handling work. */             \
+                /* Some work is done after the catch, see EX_ENDTRY. */             \
                 DEBUG_ASSURE_NO_RETURN_BEGIN(EX_TRY)                                \
 
 #define EX_CATCH_IMPL_CPP_ONLY                                                      \
@@ -994,7 +955,6 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
             __state.m_pExceptionPtr = __pExceptionRaw;                              \
             SCAN_EHMARKER_END_CATCH();                                              \
             SCAN_IGNORE_THROW_MARKER;                                               \
-            VALIDATE_BACKOUT_STACK_CONSUMPTION;                                     \
             __defaultException_t __defaultException;                                \
             CHECK::ResetAssert();                                                   \
             ExceptionHolder __pException(__state.m_pExceptionPtr);                  \
@@ -1063,18 +1023,10 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
             }                                                                           \
             SCAN_EHMARKER_END_CATCH();                                                  \
         }                                                                               \
-        EX_ENDTRY                                                                       \
-            
+        EX_ENDTRY
+
 #define EX_ENDTRY                                                                       \
-        PAL_CPP_ENDTRY                                                                  \
-        if (__state.DidCatch())                                                         \
-        {                                                                               \
-            RESTORE_SO_TOLERANCE_STATE;                                                 \
-        }                                                                               \
-        if (__state.DidCatchSO())                                                       \
-        {                                                                               \
-            HANDLE_STACKOVERFLOW_AFTER_CATCH;                                           \
-        }
+        PAL_CPP_ENDTRY
 
 #define EX_RETHROW                                                                      \
         {                                                                               \
@@ -1132,10 +1084,7 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
 #define EX_CATCH_THROWABLE(ppThrowable)                                         \
     EX_CATCH                                                                    \
     {                                                                           \
-        if (NULL != ppThrowable)                                                \
-        {                                                                       \
-            *ppThrowable = GET_THROWABLE();                                     \
-        }                                                                       \
+        *ppThrowable = GET_THROWABLE();                                         \
     }                                                                           \
     EX_END_CATCH(SwallowAllExceptions)
 
@@ -1193,31 +1142,6 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
             EX_RETHROW;                                                         \
                                                                                 \
         _ASSERTE(FAILED(HR));                                                   \
-        IErrorInfo *pErr = GET_EXCEPTION()->GetErrorInfo();                     \
-        if (pErr != NULL)                                                       \
-        {                                                                       \
-            SetErrorInfo(0, pErr);                                              \
-            pErr->Release();                                                    \
-        }                                                                       \
-    }                                                                           \
-    EX_END_CATCH(SwallowAllExceptions)
-
-
-//===================================================================================
-// Variant of the above Macro for used by ngen and mscorsvc to add
-// a RetailAssert when a reg key is set if we get an unexpected HRESULT
-// from one of the RPC calls.
-//===================================================================================
-
-#define EX_CATCH_HRESULT_AND_NGEN_CLEAN(_hr)                                    \
-    EX_CATCH                                                                    \
-    {                                                                           \
-        (_hr) = GET_EXCEPTION()->GetHR();                                       \
-        RetailAssertIfExpectedClean();                                          \
-        /* Enable this assert after we fix EH so that GetHR() never */          \
-        /* mistakenly returns S_OK */                                           \
-        /***/                                                                   \
-        /* _ASSERTE(FAILED(_hr)); */                                            \
         IErrorInfo *pErr = GET_EXCEPTION()->GetErrorInfo();                     \
         if (pErr != NULL)                                                       \
         {                                                                       \
@@ -1333,15 +1257,9 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
 #define EX_END_HOOK                                      \
     }                                                    \
     ANNOTATION_HANDLER_END;                              \
-    if (IsCurrentExceptionSO())                          \
-        __state.SetCaughtSO();                           \
-    VM_NO_SO_INFRASTRUCTURE_CODE(_ASSERTE(!__state.DidCatchSO());) \
-    if (!__state.DidCatchSO())                           \
-        EX_RETHROW;                                      \
+    EX_RETHROW;                                          \
     EX_END_CATCH_FOR_HOOK;                               \
-    SO_INFRASTRUCTURE_CODE(if (__state.DidCatchSO()))    \
-        SO_INFRASTRUCTURE_CODE(ThrowStackOverflow();)    \
-    }                                                    \
+    }
 
 // ---------------------------------------------------------------------------
 // Inline implementations. Pay no attention to that man behind the curtain.
@@ -1350,7 +1268,6 @@ Exception *ExThrowWithInnerHelper(Exception *inner);
 inline Exception::HandlerState::HandlerState()
 {
     STATIC_CONTRACT_NOTHROW;
-    STATIC_CONTRACT_SO_TOLERANT;
     STATIC_CONTRACT_CANNOT_TAKE_LOCK;
     STATIC_CONTRACT_SUPPORTS_DAC;
 
@@ -1370,21 +1287,9 @@ inline void Exception::HandlerState::CleanupTry()
     LIMITED_METHOD_DAC_CONTRACT;
 }
 
-inline void Exception::HandlerState::SetupCatch(INDEBUG_COMMA(__in_z const char * szFile) int lineNum, bool fVMInitialized /* = true */)
+inline void Exception::HandlerState::SetupCatch(INDEBUG_COMMA(__in_z const char * szFile) int lineNum)
 {
     WRAPPER_NO_CONTRACT;
-
-    if (fVMInitialized)
-    {
-        // Calling into IsCurrentExceptionSO will end up using various VM support entities (e.g. TLS slots, accessing CExecutionEngine
-        // implementation that accesses other VM specific data, etc) that may not be ready/initialized
-        // until the VM is initialized. 
-        //
-        // This is particularly important when we have exceptions thrown/triggerred during runtime's initialization
-        // and accessing such data can result in possible recursive AV's in the runtime.
-        if (IsCurrentExceptionSO())
-            SetCaughtSO();
-    }
 
     /* don't embed file names in retail to save space and avoid IP */
     /* a findstr /n will allow you to locate it in a pinch */
@@ -1474,7 +1379,6 @@ void DECLSPEC_NORETURN ThrowWin32(DWORD err);
 void DECLSPEC_NORETURN ThrowLastError();
 void DECLSPEC_NORETURN ThrowOutOfMemory();
 void DECLSPEC_NORETURN ThrowStackOverflow();
-void DECLSPEC_NORETURN ThrowMessage(LPCSTR message, ...);
 
 #undef IfFailThrow
 inline HRESULT IfFailThrow(HRESULT hr)

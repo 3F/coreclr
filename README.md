@@ -1,12 +1,12 @@
-[.NET Core Runtime (CoreCLR)](https://github.com/3F/coreclr)
+.NET Core CLR (CoreCLR)
 ===========================
 
-This repo contains the .NET Core runtime, called CoreCLR, and the base library, called mscorlib. It includes the garbage collector, JIT compiler, base .NET data types and many low-level classes.
+Contains the complete runtime implementation for .NET Core. It includes RyuJIT, the .NET GC, native interop and many other components.
 
 Build Status
 ------------
 
-                    | CI
+ILAsm & ILDasm      | CI
 --------------------| ----------------
 Win.x86-x64.Release | [![Build status](https://ci.appveyor.com/api/projects/status/4gwh8k5wn62tk8iv/branch/master?svg=true)](https://ci.appveyor.com/project/3Fs/coreclr/branch/master)
 

@@ -95,23 +95,8 @@ ASMCONSTANTS_C_ASSERT(MethodTableWriteableData__m_dwFlags == offsetof(MethodTabl
 #define MethodTableWriteableData__enum_flag_Unrestored 0x04
 ASMCONSTANTS_C_ASSERT(MethodTableWriteableData__enum_flag_Unrestored == MethodTableWriteableData::enum_flag_Unrestored);
 
-#define StringObject__m_StringLength    0x04
-ASMCONSTANTS_C_ASSERT(StringObject__m_StringLength == offsetof(StringObject, m_StringLength));
-
-#define SIZEOF__BaseStringObject       0xe
-ASMCONSTANTS_C_ASSERT(SIZEOF__BaseStringObject == (ObjSizeOf(StringObject) + sizeof(WCHAR)));
-
-#define SIZEOF__ArrayOfObjectRef       0xc
-ASMCONSTANTS_C_ASSERT(SIZEOF__ArrayOfObjectRef == ObjSizeOf(ArrayBase));
-
-#define SIZEOF__ArrayOfValueType       0xc
-ASMCONSTANTS_C_ASSERT(SIZEOF__ArrayOfValueType == ObjSizeOf(ArrayBase));
-
 #define ArrayBase__m_NumComponents     0x4
 ASMCONSTANTS_C_ASSERT(ArrayBase__m_NumComponents == offsetof(ArrayBase, m_NumComponents));
-
-#define ArrayTypeDesc__m_TemplateMT    0x4
-ASMCONSTANTS_C_ASSERT(ArrayTypeDesc__m_TemplateMT == offsetof(ArrayTypeDesc, m_TemplateMT));
 
 #define ArrayTypeDesc__m_Arg           0x8
 ASMCONSTANTS_C_ASSERT(ArrayTypeDesc__m_Arg == offsetof(ArrayTypeDesc, m_Arg));
@@ -119,32 +104,7 @@ ASMCONSTANTS_C_ASSERT(ArrayTypeDesc__m_Arg == offsetof(ArrayTypeDesc, m_Arg));
 #define PtrArray__m_Array              0x8
 ASMCONSTANTS_C_ASSERT(PtrArray__m_Array == offsetof(PtrArray, m_Array));
 
-#define SYSTEM_INFO__dwNumberOfProcessors 0x14
-ASMCONSTANTS_C_ASSERT(SYSTEM_INFO__dwNumberOfProcessors == offsetof(SYSTEM_INFO, dwNumberOfProcessors));
-
 #define TypeHandle_CanCast 0x1 // TypeHandle::CanCast
-
-// Maximum number of characters to be allocated for a string in AllocateStringFast*. Chosen so that we'll
-// never have to check for overflow and will never try to allocate a string on regular heap that should have
-// gone on the large object heap. Additionally the constant has been chosen such that it can be encoded in a
-// single Thumb2 CMP instruction.
-#define MAX_FAST_ALLOCATE_STRING_SIZE   42240
-ASMCONSTANTS_C_ASSERT(MAX_FAST_ALLOCATE_STRING_SIZE < ((LARGE_OBJECT_SIZE - SIZEOF__BaseStringObject) / 2));
-
-
-// Array of objectRef of this Maximum number of elements can be allocated in JIT_NewArr1OBJ_MP*. Chosen so that we'll
-// never have to check for overflow and will never try to allocate the array on regular heap that should have
-// gone on the large object heap. Additionally the constant has been chosen such that it can be encoded in a
-// single Thumb2 CMP instruction.
-#define MAX_FAST_ALLOCATE_ARRAY_OBJECTREF_SIZE   21120
-ASMCONSTANTS_C_ASSERT(MAX_FAST_ALLOCATE_ARRAY_OBJECTREF_SIZE < ((LARGE_OBJECT_SIZE - SIZEOF__ArrayOfObjectRef) / sizeof(void*)));
-
-// Array of valueClass of this Maximum number of characters can be allocated JIT_NewArr1VC_MP*. Chosen so that we'll
-// never have to check for overflow and will never try to allocate the array on regular heap that should have
-// gone on the large object heap. Additionally the constant has been chosen such that it can be encoded in a
-// single Thumb2 CMP instruction.
-#define MAX_FAST_ALLOCATE_ARRAY_VC_SIZE   65280
-ASMCONSTANTS_C_ASSERT(MAX_FAST_ALLOCATE_ARRAY_VC_SIZE < ((4294967296 - 1 - SIZEOF__ArrayOfValueType) / 65536));
 
 #define SIZEOF__GSCookie              0x4
 ASMCONSTANTS_C_ASSERT(SIZEOF__GSCookie == sizeof(GSCookie));
@@ -164,11 +124,11 @@ ASMCONSTANTS_C_ASSERT(SIZEOF__ArgumentRegisters == sizeof(ArgumentRegisters))
 #define SIZEOF__FloatArgumentRegisters 0x40
 ASMCONSTANTS_C_ASSERT(SIZEOF__FloatArgumentRegisters == sizeof(FloatArgumentRegisters))
 
+#define ASM_ENREGISTERED_RETURNTYPE_MAXSIZE 0x20
+ASMCONSTANTS_C_ASSERT(ASM_ENREGISTERED_RETURNTYPE_MAXSIZE == ENREGISTERED_RETURNTYPE_MAXSIZE)
+
 #define UMEntryThunk__m_pUMThunkMarshInfo 0x0C
 ASMCONSTANTS_C_ASSERT(UMEntryThunk__m_pUMThunkMarshInfo == offsetof(UMEntryThunk, m_pUMThunkMarshInfo))
-
-#define UMEntryThunk__m_dwDomainId 0x10
-ASMCONSTANTS_C_ASSERT(UMEntryThunk__m_dwDomainId == offsetof(UMEntryThunk, m_dwDomainId))
 
 #define UMThunkMarshInfo__m_pILStub 0x00
 ASMCONSTANTS_C_ASSERT(UMThunkMarshInfo__m_pILStub == offsetof(UMThunkMarshInfo, m_pILStub))
@@ -176,23 +136,6 @@ ASMCONSTANTS_C_ASSERT(UMThunkMarshInfo__m_pILStub == offsetof(UMThunkMarshInfo, 
 #define UMThunkMarshInfo__m_cbActualArgSize 0x04
 ASMCONSTANTS_C_ASSERT(UMThunkMarshInfo__m_cbActualArgSize == offsetof(UMThunkMarshInfo, m_cbActualArgSize))
 
-#ifdef FEATURE_REMOTING
-
-#define TransparentProxyObject___stubData 0x8
-ASMCONSTANTS_C_ASSERT(TransparentProxyObject___stubData == offsetof(TransparentProxyObject, _stubData))
-
-#define TransparentProxyObject___stub 0x14
-ASMCONSTANTS_C_ASSERT(TransparentProxyObject___stub == offsetof(TransparentProxyObject, _stub))
-
-#define TransparentProxyObject___pMT 0xc
-ASMCONSTANTS_C_ASSERT(TransparentProxyObject___pMT == offsetof(TransparentProxyObject, _pMT))
-
-#define RemotingPrecode__m_pMethodDesc 0x10
-ASMCONSTANTS_C_ASSERT(RemotingPrecode__m_pMethodDesc == offsetof(RemotingPrecode, m_pMethodDesc))
-
-#define REMOTING_PRECODE_RET_OFFSET 0x06
-
-#endif // FEATURE_REMOTING
 
 #define MethodDesc__m_wFlags DBG_FRE(0x1A, 0x06)
 ASMCONSTANTS_C_ASSERT(MethodDesc__m_wFlags == offsetof(MethodDesc, m_wFlags))
@@ -223,14 +166,6 @@ ASMCONSTANTS_C_ASSERT(UnmanagedToManagedFrame__m_pvDatum == offsetof(UnmanagedTo
 
 #endif // FEATURE_COMINTEROP
 
-#ifndef CROSSGEN_COMPILE
-#define               Thread__m_alloc_context__alloc_limit   0x44
-ASMCONSTANTS_C_ASSERT(Thread__m_alloc_context__alloc_limit == offsetof(Thread, m_alloc_context) + offsetof(alloc_context, alloc_limit));
-
-#define               Thread__m_alloc_context__alloc_ptr   0x40
-ASMCONSTANTS_C_ASSERT(Thread__m_alloc_context__alloc_ptr == offsetof(Thread, m_alloc_context) + offsetof(alloc_context, alloc_ptr));
-#endif // CROSSGEN_COMPILE
-
 #define               Thread__m_fPreemptiveGCDisabled   0x08
 #ifndef CROSSGEN_COMPILE
 ASMCONSTANTS_C_ASSERT(Thread__m_fPreemptiveGCDisabled == offsetof(Thread, m_fPreemptiveGCDisabled));
@@ -244,18 +179,6 @@ ASMCONSTANTS_C_ASSERT(Thread__m_pFrame == offsetof(Thread, m_pFrame));
 #define Thread_m_pFrame Thread__m_pFrame
 
 #ifndef CROSSGEN_COMPILE
-#define               Thread__m_pDomain                 0x14
-ASMCONSTANTS_C_ASSERT(Thread__m_pDomain == offsetof(Thread, m_pDomain));
-
-#define               AppDomain__m_dwId                 0x04
-ASMCONSTANTS_C_ASSERT(AppDomain__m_dwId == offsetof(AppDomain, m_dwId));
-
-#define               AppDomain__m_sDomainLocalBlock                 0x08
-ASMCONSTANTS_C_ASSERT(AppDomain__m_sDomainLocalBlock == offsetof(AppDomain, m_sDomainLocalBlock));
-
-#define               DomainLocalBlock__m_pModuleSlots                 0x04
-ASMCONSTANTS_C_ASSERT(DomainLocalBlock__m_pModuleSlots == offsetof(DomainLocalBlock, m_pModuleSlots));
-
 #define               DomainLocalModule__m_pDataBlob                 0x18
 ASMCONSTANTS_C_ASSERT(DomainLocalModule__m_pDataBlob == offsetof(DomainLocalModule, m_pDataBlob));
 
@@ -276,9 +199,6 @@ ASMCONSTANTS_C_ASSERT(VASigCookie__pNDirectILStub == offsetof(VASigCookie, pNDir
 #define CONTEXT_Pc 0x040
 ASMCONSTANTS_C_ASSERT(CONTEXT_Pc == offsetof(T_CONTEXT,Pc))
 
-#define TLS_GETTER_MAX_SIZE_ASM 0x10
-ASMCONSTANTS_C_ASSERT(TLS_GETTER_MAX_SIZE_ASM == TLS_GETTER_MAX_SIZE)
-
 #define CallDescrData__pSrc                0x00
 #define CallDescrData__numStackSlots       0x04
 #define CallDescrData__pArgumentRegisters  0x08
@@ -297,8 +217,30 @@ ASMCONSTANTS_C_ASSERT(CallDescrData__returnValue          == offsetof(CallDescrD
 
 #define SIZEOF__FaultingExceptionFrame                  (SIZEOF__Frame + 0x8 + SIZEOF__CONTEXT)
 #define FaultingExceptionFrame__m_fFilterExecuted       SIZEOF__Frame
-ASMCONSTANTS_C_ASSERT(SIZEOF__FaultingExceptionFrame        == sizeof(FaultingExceptionFrame));
-ASMCONSTANTS_C_ASSERT(FaultingExceptionFrame__m_fFilterExecuted == offsetof(FaultingExceptionFrame, m_fFilterExecuted));
+ASMCONSTANTS_C_ASSERT(SIZEOF__FaultingExceptionFrame        == sizeof(FaultingExceptionFrame))
+ASMCONSTANTS_C_ASSERT(FaultingExceptionFrame__m_fFilterExecuted == offsetof(FaultingExceptionFrame, m_fFilterExecuted))
+
+// For JIT_PInvokeBegin and JIT_PInvokeEnd helpers
+#define               Frame__m_Next 0x04
+ASMCONSTANTS_C_ASSERT(Frame__m_Next == offsetof(Frame, m_Next))
+
+#define               InlinedCallFrame__m_Datum 0x08
+ASMCONSTANTS_C_ASSERT(InlinedCallFrame__m_Datum == offsetof(InlinedCallFrame, m_Datum))
+
+#define               InlinedCallFrame__m_pCallSiteSP 0x0C
+ASMCONSTANTS_C_ASSERT(InlinedCallFrame__m_pCallSiteSP == offsetof(InlinedCallFrame, m_pCallSiteSP))
+
+#define               InlinedCallFrame__m_pCallerReturnAddress 0x10
+ASMCONSTANTS_C_ASSERT(InlinedCallFrame__m_pCallerReturnAddress == offsetof(InlinedCallFrame, m_pCallerReturnAddress))
+
+#define               InlinedCallFrame__m_pCalleeSavedFP 0x14
+ASMCONSTANTS_C_ASSERT(InlinedCallFrame__m_pCalleeSavedFP == offsetof(InlinedCallFrame, m_pCalleeSavedFP))
+
+#define               InlinedCallFrame__m_pThread 0x18
+ASMCONSTANTS_C_ASSERT(InlinedCallFrame__m_pThread == offsetof(InlinedCallFrame, m_pThread))
+
+#define               InlinedCallFrame__m_pSPAfterProlog 0x1C
+ASMCONSTANTS_C_ASSERT(InlinedCallFrame__m_pSPAfterProlog == offsetof(InlinedCallFrame, m_pSPAfterProlog))
 
 #undef ASMCONSTANTS_RUNTIME_ASSERT
 #undef ASMCONSTANTS_C_ASSERT

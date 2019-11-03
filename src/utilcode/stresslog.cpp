@@ -51,7 +51,7 @@ unsigned __int64 getTimeStamp() {
 
 #endif // _TARGET_X86_ 
 
-#if defined(_TARGET_X86_)
+#if defined(_TARGET_X86_) && !defined(FEATURE_PAL)
 
 /*********************************************************************************/
 /* Get the the frequency cooresponding to 'getTimeStamp'.  For x86, this is the
@@ -249,7 +249,6 @@ ThreadStressLog* StressLog::CreateThreadStressLog() {
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_TOLERANT;
     }
     CONTRACTL_END;
     
@@ -278,7 +277,6 @@ ThreadStressLog* StressLog::CreateThreadStressLog() {
         return NULL;
     }
 
-    BEGIN_SO_INTOLERANT_CODE_NO_THROW_CHECK_THREAD(return NULL);
     StressLogLockHolder lockh(theLog.lock, FALSE);
 
     class NestedCaller
@@ -314,6 +312,7 @@ ThreadStressLog* StressLog::CreateThreadStressLog() {
         // we fail.
         ClrFlsSetValue(theLog.TLSslot, NULL);
     }
+#pragma warning(suppress: 4101)
     PAL_CPP_CATCH_DERIVED(OutOfMemoryException, obj)
     {
         // Just leave on any exception. Note: can't goto or return from within EX_CATCH...
@@ -324,8 +323,6 @@ ThreadStressLog* StressLog::CreateThreadStressLog() {
     if (noFLSNow == FALSE && theLog.facilitiesToLog != 0)
         msgs = CreateThreadStressLogHelper();
 
-    END_SO_INTOLERANT_CODE;
-
     return msgs;
 }
 
@@ -335,7 +332,6 @@ ThreadStressLog* StressLog::CreateThreadStressLogHelper() {
         NOTHROW;
         GC_NOTRIGGER;
         FORBID_FAULT;
-        SO_INTOLERANT;
         CANNOT_TAKE_LOCK;
     }
     CONTRACTL_END;
@@ -529,11 +525,10 @@ void TrackSO(BOOL tolerance)
 
 /*********************************************************************************/
 /* fetch a buffer that can be used to write a stress message, it is thread safe */
-void ThreadStressLog::LogMsg ( DWORD_PTR facility, int cArgs, const char* format, va_list Args)
+void ThreadStressLog::LogMsg(unsigned facility, int cArgs, const char* format, va_list Args)
 {
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_FORBID_FAULT;
-    STATIC_CONTRACT_SO_TOLERANT;
 
 	// Asserts in this function cause infinite loops in the asserting mechanism.
 	// Just use debug breaks instead.
@@ -608,12 +603,7 @@ FORCEINLINE BOOL StressLog::InlinedETWLogOn(unsigned facility, unsigned level)
     STATIC_CONTRACT_LEAF;
     STATIC_CONTRACT_SUPPORTS_DAC;
 
-#if defined(FEATURE_EVENT_TRACE) && !defined(FEATURE_CORECLR) && !defined(DACCESS_COMPILE)
-    return ((Microsoft_Windows_DotNETRuntimeStressHandle != 0) && 
-        (ETW_CATEGORY_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_STRESS_PROVIDER_Context, (UCHAR)level, facility) != 0));
-#else
     return FALSE;
-#endif
 }
 
 BOOL StressLog::ETWLogOn(unsigned facility, unsigned level)
@@ -642,7 +632,6 @@ void StressLog::LogMsg (unsigned level, unsigned facility, int cArgs, const char
     STATIC_CONTRACT_NOTHROW;
     STATIC_CONTRACT_GC_NOTRIGGER;
     STATIC_CONTRACT_FORBID_FAULT;
-    STATIC_CONTRACT_SO_TOLERANT;
     STATIC_CONTRACT_SUPPORTS_DAC;
 
     // Any stresslog LogMsg could theoretically create a new stress log and thus
@@ -671,28 +660,6 @@ void StressLog::LogMsg (unsigned level, unsigned facility, int cArgs, const char
     }
 
 // Stress Log ETW feature available only on the desktop versions of the runtime
-#if !defined(FEATURE_CORECLR)
-    // The previous LogMsg call could have modified the Args, so we need to reset it
-    if(InlinedETWLogOn(facility, level))
-    {
-#define MAX_STRESSLOG_DATA_ETW_LENGTH 256
-        CHAR logMessage[MAX_STRESSLOG_DATA_ETW_LENGTH];
-
-        va_start(Args, format);
-        ULONG messageLength = (USHORT)_vsnprintf_s(logMessage, COUNTOF(logMessage), MAX_STRESSLOG_DATA_ETW_LENGTH-1, format, Args);
-        va_end(Args);
-        
-        if(messageLength >= 0 && 
-           messageLength < MAX_STRESSLOG_DATA_ETW_LENGTH) // this condition has been added to make prefast happy
-        {
-            logMessage[messageLength] = 0;
-        }
-        messageLength++;
-        logMessage[MAX_STRESSLOG_DATA_ETW_LENGTH-1] = 0;
-        FireEtwStressLogEvent_V1((UINT32)facility, (UCHAR)level, logMessage, GetClrInstanceId());
-#undef MAX_STRESSLOG_DATA_ETW_LENGTH
-    }
-#endif // !FEATURE_CORECLR
 #endif //!DACCESS_COMPILE
 }
 

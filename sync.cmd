@@ -1,114 +1,70 @@
-@if "%_echo%" neq "on" echo off
+@if not defined _echo @echo off
 setlocal EnableDelayedExpansion
 
-set synclog=sync.log
-echo Running Sync.cmd %* > %synclog%
-
-set options=/nologo /v:minimal /clp:Summary /flp:v=detailed;Append;LogFile=%synclog%
-
-set "__args= %*"
+set "__args=%*"
 set processedArgs=
-set unprocessedBuildArgs=
+set unprocessedArgs=
+set __MSBuildArgs=
 
-set src=false
-set packages=false
-set azureBlobs=false
+REM If no processed arguments are specified, -p is implied.
+if "%1" == ""   (set __MSBuildArgs=.\build.proj /p:RestoreDuringBuild=true /t:Sync&goto ArgsDone)
+if "%1" == "--" (set __MSBuildArgs=.\build.proj /p:RestoreDuringBuild=true /t:Sync&goto ArgsDone)
 
-if [%1]==[] (
-  set src=true
-  set packages=true
-  goto Begin
+:ArgLoop
+
+if "%1" == "" goto ArgsDone
+if /I [%1] == [-?] goto Usage
+if /I [%1] == [-help] goto Usage
+
+REM This for loop splits the remaining arguments, preserving "=".
+REM x gets the next argument, and y gets all remaining arguments after the first.
+FOR /f "tokens=1*" %%x IN ("%*") DO (
+    set param=%%x
+    if /i "!param!" == "-p"                     (set __MSBuildArgs=!__MSBuildArgs! .\build.proj /p:RestoreDuringBuild=true /t:Sync)
+    if /i "!param!" == "-ab"                    (set __MSBuildArgs=!__MSBuildArgs! .\src\syncAzure.proj)
+    if /i "!param:~0,14!" == "-AzureAccount="   (set v=!param:~14!&set __MSBuildArgs=!__MSBuildArgs! /p:CloudDropAccountName=!v!)
+    if /i "!param:~0,12!" == "-AzureToken="     (set v=!param:~12!&set __MSBuildArgs=!__MSBuildArgs! /p:CloudDropAccessToken=!v!)
+    if /i "!param:~0,12!" == "-BuildMajor="     (set v=!param:~12!&set __MSBuildArgs=!__MSBuildArgs! /p:BuildNumberMajor=!v!)
+    if /i "!param:~0,12!" == "-BuildMinor="     (set v=!param:~12!&set __MSBuildArgs=!__MSBuildArgs! /p:BuildNumberMinor=!v!)
+    if /i "!param:~0,11!" == "-Container="      (set v=!param:~11!&set __MSBuildArgs=!__MSBuildArgs! /p:ContainerName=!v!)
+    if /i "!param:~0,16!" == "-BlobNamePrefix=" (set v=!param:~16!&set __MSBuildArgs=!__MSBuildArgs! /p:__BlobNamePrefix=!v!)
+    if /i "!param:~0,11!" == "-RuntimeId="      (set v=!param:~11!&set __MSBuildArgs=!__MSBuildArgs! /p:RuntimeId=!v!)
+    REM all other arguments get passed through to msbuild unchanged.
+    if /i not "!param:~0,1!" == "-"             (set __MSBuildArgs=!__MSBuildArgs! !param!)
+
+    REM The innermost recursive invocation of :ArgLoop will execute
+    REM msbuild, and all other invocations simply exit.
+    call :ArgLoop %%y
+    exit /b
 )
 
-:Loop
-if [%1]==[] goto Begin
+:ArgsDone
 
-if /I [%1] == [/?] goto Usage
-if /I [%1] == [/help] goto Usage
-
-if /I [%1] == [/p] (
-    set packages=true
-    set processedArgs=!processedArgs! %1
-    goto Next
-)
-
-if /I [%1] == [/s] (
-    set src=true
-    set processedArgs=!processedArgs! %1
-    goto Next
-)
-
-if /I [%1] == [/ab] (
-    set azureBlobs=true
-    set processedArgs=!processedArgs! %1
-    goto Next
-)
-
-if [!processedArgs!]==[] (
-  call set unprocessedBuildArgs=!__args!
-) else (
-  call set unprocessedBuildArgs=%%__args:*!processedArgs!=%%
-)
-
-:Next
-shift /1
-goto Loop
-
-:Begin
-echo Running init-tools.cmd
-call %~dp0init-tools.cmd
-
-if [%src%] == [true] (
-  echo Fetching git database from remote repos ...
-  call git fetch --all -p -v >> %synclog% 2>&1
-  if NOT [!ERRORLEVEL!]==[0] (
-    echo ERROR: An error occurred while fetching remote source code, see %synclog% for more details.
-    exit /b 1
-  )
-)
-
-if [%azureBlobs%] == [true] (
-  echo Connecting and downloading packages from Azure BLOB ...
-  echo msbuild.exe %~dp0src\syncAzure.proj !options! !unprocessedBuildArgs! >> %synclog%
-  call msbuild.exe %~dp0src\syncAzure.proj !options! !unprocessedBuildArgs!
-  if NOT [!ERRORLEVEL!]==[0] (
-    echo ERROR: An error occurred while downloading packages from Azure BLOB, see %synclog% for more details. There may have been networking problems so please try again in a few minutes.
-    exit /b 1
-  )
-)
-
-set targets=RestoreNETCorePlatforms
-
-if [%packages%] == [true] (
-  set options=!options! /t:!targets! /p:RestoreDuringBuild=true
-  echo msbuild.exe %~dp0build.proj !options! !unprocessedBuildArgs! >> %synclog%
-  call msbuild.exe %~dp0build.proj !options! !unprocessedBuildArgs!
-  if NOT [!ERRORLEVEL!]==[0] (
-    echo ERROR: An error occurred while syncing packages, see %synclog% for more details. There may have been networking problems so please try again in a few minutes.
-    exit /b 1
-  )
-)
-
-echo Done Syncing.
-exit /b 0
-
-goto :EOF
+@call %~dp0dotnet.cmd msbuild /nologo /verbosity:minimal /clp:Summary /nodeReuse:false /flp:v=detailed;LogFile=sync.log %__MSBuildArgs%
+@exit /b %ERRORLEVEL%
 
 :Usage
 echo.
 echo Repository syncing script.
 echo.
 echo Options:
-echo     /s     - Fetches source history from all configured remotes
-echo              (git fetch --all -p -v)
-echo     /p     - Restores all nuget packages for repository
-echo     /ab    - Downloads the latests product packages from Azure.
+echo     -?     - Prints Usage
+echo     -help  - Prints Usage
+echo     -p     - Restores all nuget packages for repository
+echo     -ab    - Downloads the latests product packages from Azure.
 echo              The following properties are required:
-echo                 /p:CloudDropAccountName="Account name"
-echo                 /p:CloudDropAccessToken="Access token"
+echo                 -AzureAccount="Account name"
+echo                 -AzureToken="Access token"
 echo              To download a specific group of product packages, specify:
-echo                 /p:BuildNumberMajor
-echo                 /p:BuildNumberMinor
+echo                 -BuildMajor
+echo                 -BuildMinor
+echo              To download from a specific container, specify:
+echo                 -Container="container name"
+echo              To download blobs starting with a specific prefix, specify:
+echo                 -BlobNamePrefix="Blob name prefix"
+echo              To specify which RID you are downloading binaries for (optional):
+echo                 -RuntimeId="RID" (Needs to match what's in the container)
 echo.
 echo.
-echo If no option is specified then sync.cmd /s /p is implied.
+echo.
+echo If no option is specified then sync.cmd -p is implied.
