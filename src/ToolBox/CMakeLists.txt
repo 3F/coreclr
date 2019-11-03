@@ -1,2 +1,5 @@
 add_subdirectory(SOS)
-add_subdirectory(superpmi)
+
+if(NOT GFLAG_COMPILE_WIN_SHORT)
+    add_subdirectory(superpmi)
+endif()

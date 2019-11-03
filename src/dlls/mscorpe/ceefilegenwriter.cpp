@@ -1019,7 +1019,7 @@ void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString
         }
 
         ret->Append(workdir); ret->Append(path);
-        if(FileExists(ret->GetUnicode())) {
+        if(_waccess(ret->GetUnicode(), 	0 /* Check for file existence */) == 0) {
             return;
         }
 
