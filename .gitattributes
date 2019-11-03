@@ -77,3 +77,9 @@ tests/src/JIT/Performance/CodeQuality/BenchmarksGame/k-nucleotide/knucleotide-in
 tests/src/JIT/Performance/CodeQuality/BenchmarksGame/k-nucleotide/knucleotide-input-big.txt text eol=lf
 tests/src/performance/Scenario/JitBench/Resources/word2vecnet.patch text eol=lf
 
+###############################################################################
+# Our batch files requires CRLF for correct work.
+# https://github.com/3F/hMSBuild/issues/2
+
+*.bat text eol=crlf
+*.cmd text eol=crlf

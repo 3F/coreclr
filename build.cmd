@@ -325,7 +325,7 @@ set MSBUILDDEBUGPATH=%__MsbuildDebugLogsDir%
 REM It is convenient to have your Nuget search path include the location where the build
 REM will place packages.  However nuget used during the build will fail if that directory
 REM does not exist.   Avoid this in at least one case by aggressively creating the directory.
-if not exist "%__BinDir%\.nuget\pkg"           md "%__BinDir%\.nuget\pkg"
+::if not exist "%__BinDir%\.nuget\pkg"           md "%__BinDir%\.nuget\pkg"
 
 echo %__MsgPrefix%Commencing CoreCLR product build
 
@@ -369,6 +369,9 @@ if not !errorlevel! == 0 (
     echo %__MsgPrefix%Error: Failed to generate version headers.
     exit /b !errorlevel!
 )
+
+powershell -NoProfile -ExecutionPolicy ByPass -NoLogo -File "%__ProjectDir%\.modversion.ps1" -ObjDir "%__RootBinDir%\obj\\" -NativeVersionFile "_version.h"
+
 
 REM =========================================================================================
 REM ===
@@ -951,6 +954,7 @@ REM report a summary of the results at the end.
 set __AllBuildSuccess=true
 set __BuildResultFile=%TEMP%\build-all-summary-%RANDOM%.txt
 if exist %__BuildResultFile% del /f /q %__BuildResultFile%
+if exist "%__RootBinDir%\.nupkg" rmdir /S /Q "%__RootBinDir%\.nupkg"
 
 for %%i in (%__BuildArchList%) do (
     for %%j in (%__BuildTypeList%) do (
@@ -960,6 +964,13 @@ for %%i in (%__BuildArchList%) do (
 
 if %__AllBuildSuccess%==true (
     echo %__MsgPrefix%All builds succeeded!
+
+    setlocal
+        setlocal disableDelayedExpansion
+        set __p_call=1
+        call .\ilasm.pkg\tools\gnt /t:pack /p:ngin="%__RootBinDir%\Product\.nupkg" /p:ngout="%__RootBinDir%\Product"
+    endlocal
+
     exit /b 0
 ) else (
     echo %__MsgPrefix%Builds failed:
@@ -980,7 +991,12 @@ echo %__MsgPrefix%Invoking: %__NextCmd%
 if not !errorlevel! == 0 (
     echo %__MsgPrefix%    %__BuildArch% %__BuildType% %__PassThroughArgs% >> %__BuildResultFile%
     set __AllBuildSuccess=false
+    exit /b 0
 )
+
+powershell -NoProfile -ExecutionPolicy ByPass -NoLogo -File "%__ProjectDir%\pack.ps1"^
+             -OS %__BuildOS% -Arch %__BuildArch% -Type %__BuildType%^
+             -RootBinDir "%__RootBinDir%" -PkgTools "%__ProjectDir%\ilasm.pkg"
 exit /b 0
 
 REM =========================================================================================
