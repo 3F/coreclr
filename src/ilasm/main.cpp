@@ -184,6 +184,8 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 //      printf("\n/ERROR          Try to create .exe or .dll file despite errors reported");
 //      printf("\n       Warning! Results are unpredictable, use this option at your own risk!");
       printf("\n/CVRES=<path_to_file>   Set path to cvtres tool: /CVR=cvtres.exe /CVR=tool\\cvtres.cmd /CVR=D:\\tool\\");
+      printf("\n/REBASE                 Try to rebase system object: `netstandard` > `System.Runtime` > `mscorlib`");
+      printf("\n                        ! This option at your own risk: https://github.com/3F/DllExport/issues/125");
       printf("\n/OUTPUT=<targetfile>    Compile to file with specified name \n\t\t\t(user must provide extension, if any)");
       printf("\n/KEY=<keyfile>          Compile with strong signature \n\t\t\t(<keyfile> contains private key)");
       printf("\n/KEY=@<keysource>       Compile with strong signature \n\t\t\t(<keysource> is the private key source name)");
@@ -411,12 +413,16 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     }
                     else if (!_stricmp(szOpt, "CVR"))
                     {
-                        // TODO: ^v omg, how about common handler o_O
+                        // TODO: ^v omg, how about a common handler o_O
                         WCHAR *pStr = EqualOrColon(argv[i]);
                         if(pStr == NULL) goto InvalidOption;
                         for(pStr++; *pStr == L' '; pStr++); //skip the blanks
                         if(wcslen(pStr) == 0) goto InvalidOption; //if no file name
                         wzPathToCvtRes = pStr;
+                    }
+                    else if (!_stricmp(szOpt, "REB"))
+                    {
+                        pAsm->m_sysObjRebase = true;
                     }
                     else if (!_stricmp(szOpt, "OUT"))
                     {

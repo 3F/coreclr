@@ -748,6 +748,8 @@ public:
 
     BinStr* m_pbsMD;
 
+    bool m_sysObjRebase;
+
     Instr   m_Instr[INSTR_POOL_SIZE]; // 16
     inline  Instr* GetInstr() 
     {
@@ -795,6 +797,8 @@ public:
     mdToken ResolveClassRef(mdToken tkResScope, __in __nullterminated const char *pszClassName, Class** ppClass);
     mdToken ResolveTypeSpec(BinStr* typeSpec);
     mdToken GetBaseAsmRef();
+    mdToken GetBaseAsmRefRt();
+    mdToken GetBaseAsmRefClr();
     mdToken GetAsmRef(__in __nullterminated const char* szName);
     mdToken GetModRef(__in __nullterminated char* szName);
     mdToken GetInterfaceImpl(mdToken tsClass, mdToken tsInterface);

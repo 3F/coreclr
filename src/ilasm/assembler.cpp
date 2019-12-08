@@ -284,6 +284,11 @@ mdToken Assembler::GetBaseAsmRef()
         return GetAsmRef(coreLibAsm->szAlias ? coreLibAsm->szAlias : coreLibAsm->szName);
     }
 
+    return (m_sysObjRebase)? GetBaseAsmRefClr() : GetBaseAsmRefRt();
+}
+
+mdToken Assembler::GetBaseAsmRefRt()
+{
     AsmManAssembly* sysRuntime = m_pManifest->GetAsmRefByAsmName("System.Runtime");
     if(sysRuntime != NULL)
     {
@@ -296,6 +301,29 @@ mdToken Assembler::GetBaseAsmRef()
         return GetAsmRef(mscorlibAsm->szAlias ? mscorlibAsm->szAlias : mscorlibAsm->szName);
     }
 
+    AsmManAssembly* netstandardAsm = m_pManifest->GetAsmRefByAsmName("netstandard");
+    if (netstandardAsm != NULL)
+    {
+        return GetAsmRef(netstandardAsm->szAlias ? netstandardAsm->szAlias : netstandardAsm->szName);
+    }
+
+    return GetAsmRef("mscorlib");
+}
+
+mdToken Assembler::GetBaseAsmRefClr()
+{
+    AsmManAssembly* mscorlibAsm = m_pManifest->GetAsmRefByAsmName("mscorlib");
+    if(mscorlibAsm != NULL)
+    {
+        return GetAsmRef(mscorlibAsm->szAlias ? mscorlibAsm->szAlias : mscorlibAsm->szName);
+    }
+
+    AsmManAssembly* sysRuntime = m_pManifest->GetAsmRefByAsmName("System.Runtime");
+    if(sysRuntime != NULL)
+    {
+        return GetAsmRef(sysRuntime->szAlias ? sysRuntime->szAlias : sysRuntime->szName);
+    }
+    
     AsmManAssembly* netstandardAsm = m_pManifest->GetAsmRefByAsmName("netstandard");
     if (netstandardAsm != NULL)
     {

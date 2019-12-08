@@ -151,6 +151,8 @@ Assembler::Assembler()
 
     m_pbsMD = NULL;
 
+    m_sysObjRebase = false;
+
     m_pOutputBuffer = new BYTE[OUTPUT_BUFFER_SIZE];
 
     m_pCurOutputPos = m_pOutputBuffer;

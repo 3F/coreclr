@@ -1048,26 +1048,6 @@ void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString
     }
 }
 
-HRESULT GetClrSystemDirectory(SString& pbuffer)
-{
-    HRESULT hr = S_OK;
-
-
-    PathString pPath;
-    DWORD dwPath;
-    
-    _ASSERTE (g_hThisInst);
-
-    dwPath = WszGetModuleFileName(g_hThisInst, pPath);
-    if(dwPath == 0)
-    {
-        hr = HRESULT_FROM_GetLastErrorNA();
-        return (hr);
-    }
-    
-    return CopySystemDirectory(pPath, pbuffer);
-}
-
 #ifndef FEATURE_PAL
 BOOL CeeFileGenWriter::RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEWriter &pewriter)
 {
@@ -1075,13 +1055,8 @@ BOOL CeeFileGenWriter::RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD
 
     PROCESS_INFORMATION pi;
 
-    PathString wszSystemDir, cvtres;
-    if(FAILED(GetClrSystemDirectory(wszSystemDir))) {
-        pathToCvtRes(nullptr, m_pathToCvtRes, nullptr, cvtres);
-    }
-    else {
-        pathToCvtRes(wszSystemDir.GetUnicode(), m_pathToCvtRes, nullptr, cvtres);
-    }
+    PathString cvtres;
+    pathToCvtRes(nullptr, m_pathToCvtRes, nullptr, cvtres);
 
     const WCHAR* wzMachine;
     if(pewriter.isIA64())
