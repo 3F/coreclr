@@ -1,6 +1,18 @@
 coreclr \ ILAsm - https://github.com/3F/coreclr
 - - - - - - - - -
 
+[v4.700.2]
+
+    * NEW: Implemented new `/REBASE` key feature for IL Assembler. Issue #7.
+           It will try to rebase system object: `netstandard` } `System.Runtime` } `mscorlib`
+           
+           Full explanation in related issue: 
+           https://github.com/3F/DllExport/issues/125#issuecomment-561245575
+    
+    * CHANGED: Removed any use of the cvtres via CLR system directory.
+    
+    * CHANGED: Updated coreclr 3.1.0 RTM
+
 
 [v4.700.1]
 
