@@ -3,7 +3,19 @@
 
 Contains the complete runtime implementation for .NET Core. It includes RyuJIT, the .NET GC, native interop and many other components.
 
-## CoreCLR ILAsm 
+**Modified** and has been prepared specialy for [https://github.com/3F/DllExport](https://github.com/3F/DllExport) by [GitHub/3F](https://github.com/3F) developer.
+
+✓ License
+-------
+
+.NET Core (including the coreclr repo) is licensed under the [MIT License (MIT)](https://github.com/3F/coreclr/blob/master/LICENSE.TXT).
+
+```
+Copyright (c) .NET Foundation and Contributors
+Copyright (c) 2016-2019  Denis Kuzmin < x-3F@outlook.com > GitHub/3F
+```
+
+## CoreCLR IL Assembler
 
 ILAsm & ILDasm      | CI
 --------------------| ----------------
@@ -17,13 +29,12 @@ Win.x86-x64.Release | [![Build status](https://ci.appveyor.com/api/projects/stat
 
 
 IL Assembler (ILAsm) + IL Disassembler (ILDasm)
-    
+
 Custom version on .NET Core CLR (CoreCLR) 3.0: https://github.com/3F/coreclr
 
 Specially for: https://github.com/3F/DllExport
 
-! Please note: You need to provide compatible converter of resources to obj COFF-format when assembling with ILAsm.
-Just use /CVRES (/CVR) key.
+! To provide compatible converter of resources to obj COFF-format when assembling with ILAsm, use /CVRES (/CVR) key.
 
 ```
 ~... /CVR=cvtres.exe
@@ -44,10 +55,4 @@ Additional **MSBuild Properties**:
 
 * `$(ILAsm_RootPkg)` - path to root folder of this package after install.
 * `$(ILAsm_PathToBin)` - path to `\bin` folder., eg.: *$(ILAsm_PathToBin)Win.x64\ilasm.exe*
-
-
-✓ License
--------
-
-.NET Core (including the coreclr repo) is licensed under the [MIT license](https://github.com/3F/coreclr/blob/master/LICENSE.TXT).
 
