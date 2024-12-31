@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- For .NET projects
+       https://github.com/3F/coreclr
+  -->
+  
+  <PropertyGroup>
+    <ILAsm_RootPkg>$(MSBuildThisFileDirectory)..\..\</ILAsm_RootPkg> <!-- [root]\build\net\ILAsm.targets -->
+    <ILAsm_PathToBin>$(ILAsm_RootPkg)bin\</ILAsm_PathToBin>
+  </PropertyGroup>
+
+</Project>

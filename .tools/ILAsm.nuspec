@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>ILAsm</id>
+    <version>%Version%</version>
+    <title>[ ILAsm + ILDasm ] IL Assembler and Disassembler</title>
+    <authors>github.com/3F/coreclr</authors>
+    <owners>reg</owners>
+    <licenseUrl>https://github.com/3F/coreclr/blob/master/LICENSE.TXT</licenseUrl>
+    <projectUrl>https://github.com/3F/coreclr</projectUrl>
+    <repository type="git" url="https://github.com/3F/coreclr" />
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>IL Assembler (ILAsm) + IL Disassembler (ILDasm) on coreclr (.NET Core CLR)
+    
+        Modified versions aka 3F's IL assembler on coreclr (github/3F)
+        Specialy for https://github.com/3F/DllExport
+
+        Target platforms: Win.x64 and Win.x86
+        %VersionFull%
+        _ _ _ _ _ _
+        
+        https://github.com/3F/coreclr
+        The MIT License (MIT)
+
+        ! To provide compatible converter of resources to obj COFF-format when assembling with ILAsm,
+        use /CVRES (/CVR) key.
+        ```
+        ~... /CVR=cvtres.exe
+        ```
+        Related issue: https://github.com/3F/coreclr/issues/2
+        
+        PDB files are available through GitHub Releases:
+        https://github.com/3F/coreclr/releases
+
+        Preferences:
+
+          * $(ILAsm_RootPkg) - path to root folder of this package after install.
+          * $(ILAsm_PathToBin) - path to `\bin` folder., eg.: $(ILAsm_PathToBin)Win.x64\ilasm.exe
+
+        ===
+        gnt ILAsm/%Version%
+        https://github.com/3F/GetNuTool
+    </description>
+    <summary>IL Assembler (ILAsm) + IL Disassembler (ILDasm). The MIT License (MIT).</summary>
+    <releaseNotes> changelog: https://github.com/3F/coreclr/blob/master/changelog.txt </releaseNotes>
+    <copyright>Copyright (c) .NET Foundation and Contributors; Copyright (c) 2016-2024  Denis Kuzmin &lt;x-3F@outlook.com&gt; github/3F</copyright>
+    <tags>coreclr IL ILAsm ILDasm MSIL dotnet Assembler Disassembler compiler MITlicense native tools DllExport</tags>
+  </metadata>
+</package>
