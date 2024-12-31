@@ -483,12 +483,12 @@ IClassFactory *ComClassFactory::GetIClassFactory()
     GCX_PREEMP();
 
     // If a server name is specified, then first try CLSCTX_REMOTE_SERVER.
-    if (m_pwszServer)
+    if (m_wszServer)
     {
         // Set up the COSERVERINFO struct.
         COSERVERINFO ServerInfo;
         memset(&ServerInfo, 0, sizeof(COSERVERINFO));
-        ServerInfo.pwszName = m_pwszServer;
+        ServerInfo.pwszName = (LPWSTR)m_wszServer;
 
         // Try to retrieve the IClassFactory passing in CLSCTX_REMOTE_SERVER.
         hr = CoGetClassObject(m_rclsid, CLSCTX_REMOTE_SERVER, &ServerInfo, IID_IClassFactory, (void**)&pClassFactory);
@@ -519,10 +519,10 @@ IClassFactory *ComClassFactory::GetIClassFactory()
         GetHRMsg(hr, strHRDescription);
 
         // Throw the actual exception indicating we couldn't find the class factory.
-        if (m_pwszServer == NULL)
+        if (m_wszServer == NULL)
             COMPlusThrowHR(hr, IDS_EE_LOCAL_COGETCLASSOBJECT_FAILED, strHRHex, strClsid, strHRDescription.GetUnicode());
         else
-            COMPlusThrowHR(hr, IDS_EE_REMOTE_COGETCLASSOBJECT_FAILED, strHRHex, strClsid, m_pwszServer, strHRDescription.GetUnicode());
+            COMPlusThrowHR(hr, IDS_EE_REMOTE_COGETCLASSOBJECT_FAILED, strHRHex, strClsid, m_wszServer, strHRDescription.GetUnicode());
     }
 
     RETURN pClassFactory;
@@ -587,12 +587,11 @@ OBJECTREF ComClassFactory::CreateInstance(MethodTable* pMTClass, BOOL ForManaged
 
 //--------------------------------------------------------------
 // Init the ComClassFactory.
-void ComClassFactory::Init(__in_opt WCHAR* pwszProgID, __in_opt WCHAR* pwszServer, MethodTable* pClassMT)
+void ComClassFactory::Init(__in_opt PCWSTR wszServer, MethodTable* pClassMT)
 {
     LIMITED_METHOD_CONTRACT;
 
-    m_pwszProgID = pwszProgID;
-    m_pwszServer = pwszServer;
+    m_wszServer = wszServer;
     m_pClassMT = pClassMT;
 }
 
@@ -610,95 +609,10 @@ void ComClassFactory::Cleanup()
     if (m_bManagedVersion)
         return;
 
-    if (m_pwszProgID != NULL)
-        delete [] m_pwszProgID;
-
-    if (m_pwszServer != NULL)
-        delete [] m_pwszServer;
+    if (m_wszServer != NULL)
+        delete [] m_wszServer;
 
     delete this;
-}
-
-//-------------------------------------------------------------
-// Returns true if the first parameter of the CA's method ctor is a System.Type
-static BOOL AttributeFirstParamIsSystemType(mdCustomAttribute tkAttribute, IMDInternalImport *pImport)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-        PRECONDITION(CheckPointer(pImport));
-    }
-    CONTRACTL_END;
-
-    mdToken ctorToken;
-    IfFailThrow(pImport->GetCustomAttributeProps(tkAttribute, &ctorToken));
-
-    LPCSTR ctorName;
-    PCCOR_SIGNATURE ctorSig;
-    ULONG cbCtorSig;
-
-    if (TypeFromToken(ctorToken) == mdtMemberRef)
-    {
-        IfFailThrow(pImport->GetNameAndSigOfMemberRef(ctorToken, &ctorSig, &cbCtorSig, &ctorName));
-    }
-    else if (TypeFromToken(ctorToken) == mdtMethodDef)
-    {
-        IfFailThrow(pImport->GetNameAndSigOfMethodDef(ctorToken, &ctorSig, &cbCtorSig, &ctorName));
-    }
-    else
-    {
-        ThrowHR(COR_E_BADIMAGEFORMAT);
-    }
-
-    SigParser sigParser(ctorSig, cbCtorSig);
-
-    ULONG callingConvention;
-    IfFailThrow(sigParser.GetCallingConvInfo(&callingConvention));
-    if (callingConvention != IMAGE_CEE_CS_CALLCONV_HASTHIS)
-    {
-        ThrowHR(COR_E_BADIMAGEFORMAT);
-    }
-
-    ULONG cParameters;
-    IfFailThrow(sigParser.GetData(&cParameters));
-    if (cParameters < 1)
-    {
-        return FALSE;
-    }
-
-    BYTE returnElmentType;
-    IfFailThrow(sigParser.GetByte(&returnElmentType));
-    if (returnElmentType != ELEMENT_TYPE_VOID)
-    {
-        ThrowHR(COR_E_BADIMAGEFORMAT);
-    }
-
-    BYTE paramElementType;
-    IfFailThrow(sigParser.GetByte(&paramElementType));
-    if (paramElementType != ELEMENT_TYPE_CLASS)
-    {
-        return FALSE;
-    }
-
-    mdToken paramTypeToken;
-    IfFailThrow(sigParser.GetToken(&paramTypeToken));
-
-    if (TypeFromToken(paramTypeToken) != mdtTypeRef)
-    {
-        return FALSE;
-    }
-
-    LPCSTR paramTypeNamespace;
-    LPCSTR paramTypeName;
-    IfFailThrow(pImport->GetNameOfTypeRef(paramTypeToken, &paramTypeNamespace, &paramTypeName));
-    if (strcmp("System", paramTypeNamespace) != 0 || strcmp("Type", paramTypeName) != 0)
-    {
-        return FALSE;
-    }
-
-    return TRUE;
 }
 
 #endif // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
@@ -1327,7 +1241,7 @@ HRESULT RCWCleanupList::ReleaseRCWListInCorrectCtx(LPVOID pData)
     // into cooperative GC mode. This "fix" will prevent us from doing so.
     if (g_fEEShutDown & ShutDown_Finalize2)
     {
-        Thread *pThread = GetThread();
+        Thread *pThread = GetThreadNULLOk();
         if (pThread && !FinalizerThread::IsCurrentThreadFinalizer())
             pThread->SetThreadStateNC(Thread::TSNC_UnsafeSkipEnterCooperative);
     }
@@ -1340,7 +1254,7 @@ HRESULT RCWCleanupList::ReleaseRCWListInCorrectCtx(LPVOID pData)
     //  the MTA context), we will infinitely loop.  So, we short circuit this with ctxTried.
 
     Thread *pHeadThread = pHead->GetSTAThread();
-    BOOL fCorrectThread = (pHeadThread == NULL) ? TRUE : (pHeadThread == GetThread());
+    BOOL fCorrectThread = (pHeadThread == NULL) ? TRUE : (pHeadThread == GetThreadNULLOk());
     BOOL fCorrectCookie = (pCurrCtxCookie == NULL) ? TRUE : (pHead->GetWrapperCtxCookie() == pCurrCtxCookie);
 
     if ( pHead->IsFreeThreaded() || // Avoid context transition if the list is for free threaded RCW
@@ -1367,7 +1281,7 @@ HRESULT RCWCleanupList::ReleaseRCWListInCorrectCtx(LPVOID pData)
     // Reset the bit indicating we cannot transition into cooperative GC mode.
     if (g_fEEShutDown & ShutDown_Finalize2)
     {
-        Thread *pThread = GetThread();
+        Thread *pThread = GetThreadNULLOk();
         if (pThread && !FinalizerThread::IsCurrentThreadFinalizer())
             pThread->ResetThreadStateNC(Thread::TSNC_UnsafeSkipEnterCooperative);
     }
@@ -1469,22 +1383,8 @@ RCW* RCW::CreateRCWInternal(IUnknown *pUnk, DWORD dwSyncBlockIndex, DWORD flags,
     }
 
     AppDomain * pAppDomain = GetAppDomain();
-    if(flags & CF_QueryForIdentity)
-    {
-        IUnknown *pUnkTemp = NULL;
-        HRESULT hr = SafeQueryInterfacePreemp(pUnk, IID_IUnknown, &pUnkTemp);
-        LogInteropQI(pUnk, IID_IUnknown, hr, "QI for IID_IUnknown in RCW::CreateRCW");
-        if(SUCCEEDED(hr))
-        {
-            pUnk = pUnkTemp;
-
-        }
-    }
-    else
-    {
-        ULONG cbRef = SafeAddRefPreemp(pUnk);
-        LogInteropAddRef(pUnk, cbRef, "RCWCache::CreateRCW: Addref pUnk because creating new RCW");
-    }
+    ULONG cbRef = SafeAddRefPreemp(pUnk);
+    LogInteropAddRef(pUnk, cbRef, "RCWCache::CreateRCW: Addref pUnk because creating new RCW");
 
     // Make sure we release AddRef-ed pUnk in case of exceptions
     SafeComHolderPreemp<IUnknown> pUnkHolder = pUnk;
@@ -1494,53 +1394,6 @@ RCW* RCW::CreateRCWInternal(IUnknown *pUnk, DWORD dwSyncBlockIndex, DWORD flags,
 
     // Initialize wrapper
     pWrap->Initialize(pUnk, dwSyncBlockIndex, pClassMT);
-
-    // Check to see if this is a DCOM proxy
-    const bool checkForDCOMProxy =  (flags & CF_DetectDCOMProxy);
-
-    if (checkForDCOMProxy)
-    {
-        // If the object is a DCOM proxy...
-        SafeComHolderPreemp<IRpcOptions> pRpcOptions = NULL;
-        GCPressureSize pressureSize = GCPressureSize_None;
-        HRESULT hr = pWrap->SafeQueryInterfaceRemoteAware(IID_IRpcOptions, (IUnknown**)&pRpcOptions);
-        LogInteropQI(pUnk, IID_IRpcOptions, hr, "QI for IRpcOptions");
-        if (S_OK == hr)
-        {
-            ULONG_PTR dwValue = 0;
-            hr = pRpcOptions->Query(pUnk, COMBND_SERVER_LOCALITY, &dwValue);
-
-            if (SUCCEEDED(hr))
-            {
-                if (dwValue == SERVER_LOCALITY_MACHINE_LOCAL || dwValue == SERVER_LOCALITY_REMOTE)
-                {
-                    pWrap->m_Flags.m_fIsDCOMProxy = 1;
-                }
-
-                switch(dwValue)
-                {
-                    case SERVER_LOCALITY_PROCESS_LOCAL:
-                        pressureSize = GCPressureSize_ProcessLocal;
-                        break;
-                    case SERVER_LOCALITY_MACHINE_LOCAL:
-                        pressureSize = GCPressureSize_MachineLocal;
-                        break;
-                    case SERVER_LOCALITY_REMOTE:
-                        pressureSize = GCPressureSize_Remote;
-                        break;
-                    default:
-                        pressureSize = GCPressureSize_None;
-                        break;
-                }
-            }
-        }
-
-        // ...add the appropriate amount of memory pressure to the GC.
-        if (pressureSize != GCPressureSize_None)
-        {
-            pWrap->AddMemoryPressure(pressureSize);
-        }
-    }
 
     pUnkHolder.SuppressRelease();
 
@@ -1580,7 +1433,6 @@ void RCW::Initialize(IUnknown* pUnk, DWORD dwSyncBlockIndex, MethodTable *pClass
     // if this thread is an STA thread, then when the STA dies
     // we need to cleanup this wrapper
     m_pCreatorThread  = GetThread();
-    _ASSERTE(m_pCreatorThread != NULL);
 
     m_pRCWCache = RCWCache::GetRCWCache();
 
@@ -2247,26 +2099,6 @@ HRESULT RCW::SafeQueryInterfaceRemoteAware(REFIID iid, IUnknown** ppResUnk)
 
 #endif //#ifndef CROSSGEN_COMPILE
 
-// Helper method to allow us to compare a MethodTable against a known method table
-// from CoreLib.  If the CoreLib type isn't loaded, we don't load it because we
-// know that it can't be the MethodTable we're curious about.
-static bool MethodTableHasSameTypeDefAsCoreLibClass(MethodTable* pMT, BinderClassID classId)
-{
-    CONTRACTL
-    {
-        GC_NOTRIGGER;
-        NOTHROW;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
-
-    MethodTable* pMT_CoreLibClass = CoreLibBinder::GetClassIfExist(classId);
-    if (pMT_CoreLibClass == NULL)
-        return false;
-
-    return (pMT->HasSameTypeDefAs(pMT_CoreLibClass) != FALSE);
-}
-
 #ifndef CROSSGEN_COMPILE
 // Performs QI for the given interface, optionally instantiating it with the given generic args.
 HRESULT RCW::CallQueryInterface(MethodTable *pMT, Instantiation inst, IID *piid, IUnknown **ppUnk)
@@ -2716,7 +2548,11 @@ BOOL ComObject::SupportsInterface(OBJECTREF oref, MethodTable* pIntfTable)
                     MethodTable::InterfaceMapIterator it = pIntfTable->IterateInterfaceMap();
                     while (it.Next())
                     {
-                        bSupportsItf = Object::SupportsInterface(oref, it.GetInterface());
+                        MethodTable *pItf = it.GetInterfaceApprox();
+                        if (pItf->HasInstantiation() || pItf->IsGenericTypeDefinition())
+                            continue;
+
+                        bSupportsItf = Object::SupportsInterface(oref, pItf);
                         if (!bSupportsItf)
                             break;
                     }

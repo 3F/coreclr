@@ -879,22 +879,6 @@ BOOL EnumClasses()
 #pragma warning(pop)
 #endif
 
-#ifndef _DEBUG
-bool HasSuppressingAttribute()
-{
-    const void* pData;
-    ULONG cbData;
-
-    return ((S_OK == g_pImport->GetCustomAttributeByName(TokenFromRid(mdtModule,1),
-                        (LPCUTF8)"System.Runtime.CompilerServices.SuppressIldasmAttribute",
-                        &pData,
-                        &cbData))
-         || (S_OK == g_pImport->GetCustomAttributeByName(TokenFromRid(mdtAssembly,1),
-                        (LPCUTF8)"System.Runtime.CompilerServices.SuppressIldasmAttribute",
-                        &pData,
-                        &cbData)));
-}
-#endif
 void DumpMscorlib(void* GUICookie)
 {
     // In the CoreCLR with reference assemblies and redirection it is more difficult to determine if
@@ -2008,6 +1992,7 @@ BYTE* PrettyPrintCABlobValue(PCCOR_SIGNATURE &typePtr,
                 break;
             case ELEMENT_TYPE_CLASS        :
                 typePtr += CorSigUncompressToken(typePtr, &tk); //skip the following token
+                FALLTHROUGH;
             case SERIALIZATION_TYPE_TYPE   :
                 appendStr(out,KEYWORD("type"));
                 appendStr(out,appendix);
@@ -2668,6 +2653,7 @@ void DumpDefaultValue(mdToken tok, __inout __nullterminated char* szString, void
                 break;
             }
             //else fall thru to default case, to report the error
+            FALLTHROUGH;
 
         default:
             szptr+=sprintf_s(szptr,SZSTRING_REMAINING_SIZE(szptr),ERRORMSG(" /* ILLEGAL CONSTANT type:0x%02X, size:%d bytes, blob: "),MDDV.m_bType,MDDV.m_cbSize);
@@ -4592,7 +4578,7 @@ BOOL GetClassLayout(mdTypeDef cl, ULONG* pulPackSize, ULONG* pulClassSize)
             {
                 COR_FIELD_OFFSET* pFO = g_rFieldOffset;
                 for(g_cFieldOffsets=0;
-                    SUCCEEDED(g_pImport->GetClassLayoutNext(&Layout,&(pFO->ridOfField),&(pFO->ulOffset)))
+                    SUCCEEDED(g_pImport->GetClassLayoutNext(&Layout,&(pFO->ridOfField),(ULONG*)&(pFO->ulOffset)))
                         &&RidFromToken(pFO->ridOfField);
                     g_cFieldOffsets++, pFO++) ret = TRUE;
             }
@@ -7539,17 +7525,6 @@ DoneInitialization:
         _ASSERTE(g_rchCA);
         memset(g_rchCA,0,g_uNCA+1);
     }
-#ifndef _DEBUG
-    if(HasSuppressingAttribute())
-    {
-        if (g_fDumpHeader)
-            DumpHeader(g_CORHeader,g_pFile);
-        if(g_fDumpMetaInfo)
-            DumpMetaInfo(g_wszFullInputFile,NULL,g_pFile);
-        printError(g_pFile,RstrUTF(IDS_E_SUPPRESSED));
-        goto CloseFileAndExit;
-    }
-#endif
 
     {
         // Dump the CLR header info if requested.
@@ -7812,9 +7787,6 @@ ReportAndExit:
             DumpRTFPostfix(g_pFile);
         }
 
-#ifndef _DEBUG
-CloseFileAndExit:
-#endif
         if(g_pFile)
         {
             fclose(g_pFile);

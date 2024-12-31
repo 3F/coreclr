@@ -32,13 +32,14 @@ const DWORD AcceptableDelta = 150;
 
 const int Iterations = 5;
 
-void RunTest(BOOL AlertThread);
-VOID PALAPI APCFunc(ULONG_PTR dwParam);
-DWORD PALAPI SleeperProc(LPVOID lpParameter);
+void RunTest_SleepEx_test2(BOOL AlertThread);
+VOID PALAPI APCFunc_SleepEx_test2(ULONG_PTR dwParam);
+DWORD PALAPI SleeperProc_SleepEx_test2(LPVOID lpParameter);
 
 DWORD ThreadSleepDelta;
+static volatile bool s_preWaitTimestampRecorded = false;
 
-int __cdecl main( int argc, char **argv ) 
+PALTEST(threading_SleepEx_test2_paltest_sleepex_test2, "threading/SleepEx/test2/paltest_sleepex_test2")
 {
     int i;
     DWORD dwAvgDelta;
@@ -64,7 +65,7 @@ int __cdecl main( int argc, char **argv )
     dwAvgDelta = 0;
     for (i=0;i<Iterations;i++)
     {
-	RunTest(TRUE);
+	RunTest_SleepEx_test2(TRUE);
 	dwAvgDelta += ThreadSleepDelta - InterruptTime;
     }
     dwAvgDelta /= Iterations;
@@ -83,7 +84,7 @@ int __cdecl main( int argc, char **argv )
     dwAvgDelta = 0;
     for (i=0;i<Iterations;i++)
     {
-	RunTest(FALSE);
+	RunTest_SleepEx_test2(FALSE);
 	dwAvgDelta += ThreadSleepDelta - ChildThreadSleepTime;
     }
     dwAvgDelta /= Iterations;
@@ -99,15 +100,16 @@ int __cdecl main( int argc, char **argv )
     return PASS;
 }
 
-void RunTest(BOOL AlertThread)
+void RunTest_SleepEx_test2(BOOL AlertThread)
 {
     HANDLE hThread = 0;
     DWORD dwThreadId = 0;
     int ret;
 
-    hThread = CreateThread( NULL, 
+    s_preWaitTimestampRecorded = false;
+    hThread = CreateThread( NULL,
                             0, 
-                            (LPTHREAD_START_ROUTINE)SleeperProc,
+                            (LPTHREAD_START_ROUTINE)SleeperProc_SleepEx_test2,
                             (LPVOID) AlertThread,
                             0,
                             &dwThreadId);
@@ -118,12 +120,19 @@ void RunTest(BOOL AlertThread)
             "GetLastError returned %d\n", GetLastError());
     }
 
+    // Wait for the pre-wait timestamp to be recorded on the other thread before sleeping, since the sleep duration here will be
+    // compared against the sleep/wait duration on the other thread
+    while (!s_preWaitTimestampRecorded)
+    {
+        Sleep(0);
+    }
+
     if (SleepEx(InterruptTime, FALSE) != 0)
     {
         Fail("The creating thread did not sleep!\n");
     }
 
-    ret = QueueUserAPC(APCFunc, hThread, 0);
+    ret = QueueUserAPC(APCFunc_SleepEx_test2, hThread, 0);
     if (ret == 0)
     {
         Fail("QueueUserAPC failed! GetLastError returned %d\n", GetLastError());
@@ -138,13 +147,13 @@ void RunTest(BOOL AlertThread)
 }
 
 /* Function doesn't do anything, just needed to interrupt SleepEx */
-VOID PALAPI APCFunc(ULONG_PTR dwParam)
+VOID PALAPI APCFunc_SleepEx_test2(ULONG_PTR dwParam)
 {
 
 }
 
 /* Entry Point for child thread. */
-DWORD PALAPI SleeperProc(LPVOID lpParameter)
+DWORD PALAPI SleeperProc_SleepEx_test2(LPVOID lpParameter)
 {
     UINT64 OldTimeStamp;
     UINT64 NewTimeStamp;
@@ -160,6 +169,7 @@ DWORD PALAPI SleeperProc(LPVOID lpParameter)
     }
 
     OldTimeStamp = GetHighPrecisionTimeStamp(performanceFrequency);
+    s_preWaitTimestampRecorded = true;
 
     ret = SleepEx(ChildThreadSleepTime, Alertable);
     

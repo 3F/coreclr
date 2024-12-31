@@ -1,7 +1,5 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 //----------------------------------------------------------
 // CommandLine.cpp - tiny very specific command line parser
@@ -55,8 +53,9 @@ void CommandLine::DumpHelp(const char* program)
     printf("     file1 is read and file2 is written\n");
     printf("     e.g. -copy a.mch b.mch\n");
     printf("\n");
-    printf(" -dump {optional range} inputfile\n");
-    printf("     Dump details for each methodContext\n");
+    printf(" -dump {optional range} inputfile [-simple]\n");
+    printf("     Dump details for each methodContext.\n");
+    printf("     With -simple, don't display the function name/arguments in the header (useful for debugging mcs itself).\n");
     printf("     e.g. -dump a.mc\n");
     printf("\n");
     printf(" -dumpMap inputfile\n");
@@ -96,6 +95,9 @@ void CommandLine::DumpHelp(const char* program)
     printf("     e.g. -merge a.mch *.mc -recursive\n");
     printf("     e.g. -merge a.mch *.mc -recursive -dedup -thin\n");
     printf("\n");
+    printf(" -printJITEEVersion\n");
+    printf("     Print the JITEEVersion GUID with which this was built, in the form: a5eec3a4-4176-43a7-8c2b-a05b551d4f49\n");
+    printf("\n");
     printf(" -removeDup inputfile outputfile\n");
     printf("     Copy methodContexts from inputfile to outputfile, skipping duplicates.\n");
     printf("     e.g. -removeDup a.mc b.mc\n");
@@ -125,6 +127,10 @@ void CommandLine::DumpHelp(const char* program)
     printf("     Create a Table of Contents file for inputfile to allow better random access\n");
     printf("     to the mch file.\n");
     printf("     e.g. '-toc a.mch' creates a.mch.mct\n");
+    printf("\n");
+    printf(" -jitflags inputfile\n");
+    printf("     Summarize interesting jitflags for the method contexts\n");
+    printf("     e.g. '-jitflags a.mch'\n");
     printf("\n");
     printf("Range descriptions are either a single number, or a text file with .mcl extension\n");
     printf("containing a sorted list of line delimited numbers.\n");
@@ -231,6 +237,12 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
                 foundVerb        = true;
                 o->actionDumpToc = true;
             }
+            else if ((_strnicmp(&argv[i][1], "jitflags", argLen) == 0))
+            {
+                tempLen           = strlen(argv[i]);
+                foundVerb         = true;
+                o->actionJitFlags = true;
+            }
             else if ((_strnicmp(&argv[i][1], "ildump", argLen) == 0))
             {
                 tempLen         = strlen(argv[i]);
@@ -244,6 +256,12 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
                 tempLen        = strlen(argv[i]);
                 foundVerb      = true;
                 o->actionMerge = true;
+            }
+            else if ((_strnicmp(&argv[i][1], "printjiteeversion", argLen) == 0))
+            {
+                tempLen        = strlen(argv[i]);
+                foundVerb      = true;
+                o->actionPrintJITEEVersion = true;
             }
             else if ((_strnicmp(&argv[i][1], "recursive", argLen) == 0))
             {
@@ -369,6 +387,10 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
 
                 Logger::OpenLogFile(argv[i]);
             }
+            else if ((_strnicmp(&argv[i][1], "simple", argLen) == 0))
+            {
+                o->simple = true;
+            }
             else
             {
                 LogError("CommandLine::Parse() - Unknown verb '%s'", argv[i]);
@@ -386,6 +408,16 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
                     goto processMCL2;
             }
             goto processInput;
+        }
+    }
+
+    if (o->simple)
+    {
+        if (!o->actionDump)
+        {
+            LogError("CommandLine::Parse() '-simple' requires -dump.");
+            DumpHelp(argv[0]);
+            return false;
         }
     }
 
@@ -527,6 +559,16 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
         }
         return true;
     }
+    if (o->actionJitFlags)
+    {
+        if (!foundFile1)
+        {
+            LogError("CommandLine::Parse() '-jitFlags' needs one input.");
+            DumpHelp(argv[0]);
+            return false;
+        }
+        return true;
+    }
     if (o->actionILDump)
     {
         if (!foundFile1)
@@ -591,6 +633,11 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
             DumpHelp(argv[0]);
             return false;
         }
+        return true;
+    }
+    if (o->actionPrintJITEEVersion)
+    {
+        // No arguments to check
         return true;
     }
 

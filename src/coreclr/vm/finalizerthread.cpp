@@ -8,6 +8,7 @@
 #include "threadsuspend.h"
 #include "jithost.h"
 #include "genanalysis.h"
+#include "eventpipeadapter.h"
 
 #ifdef FEATURE_COMINTEROP
 #include "runtimecallablewrapper.h"
@@ -34,7 +35,7 @@ BOOL FinalizerThread::IsCurrentThreadFinalizer()
 {
     LIMITED_METHOD_CONTRACT;
 
-    return GetThread() == g_pFinalizerThread;
+    return GetThreadNULLOk() == g_pFinalizerThread;
 }
 
 void FinalizerThread::EnableFinalization()
@@ -101,6 +102,11 @@ void FinalizerThread::FinalizeAllObjects()
         fcount++;
 
         CallFinalizer(fobj);
+
+        // thread abort could be injected by the debugger,
+        // but should not be allowed to "leak" out of expression evaluation
+        _ASSERTE(!GetFinalizerThread()->IsAbortRequested());
+
         pThread->InternalReset();
 
         fobj = GCHeapUtilities::GetGCHeap()->GetNextFinalizable();
@@ -216,6 +222,7 @@ void FinalizerThread::WaitForFinalizerEvent (CLREvent *event)
 }
 
 static BOOL s_FinalizerThreadOK = FALSE;
+static BOOL s_InitializedFinalizerThreadForPlatform = FALSE;
 
 VOID FinalizerThread::FinalizerThreadWorker(void *args)
 {
@@ -267,20 +274,30 @@ VOID FinalizerThread::FinalizerThreadWorker(void *args)
         if (gcGenAnalysisState == GcGenAnalysisState::Done)
         {
             gcGenAnalysisState = GcGenAnalysisState::Disabled;
-            EventPipe::Disable(gcGenAnalysisEventPipeSessionId);
+            if (gcGenAnalysisTrace)
+            {
+                EventPipeAdapter::Disable(gcGenAnalysisEventPipeSessionId);
+#ifdef GEN_ANALYSIS_STRESS
+                GenAnalysis::EnableGenerationalAwareSession();
+#endif
+            }
             // Writing an empty file to indicate completion
             fclose(fopen(GENAWARE_COMPLETION_FILE_NAME,"w+"));
-#ifdef GEN_ANALYSIS_STRESS
-            {
-                GenAnalysis::EnableGenerationalAwareSession();
-            }
-#endif
         }
 
         if (!bPriorityBoosted)
         {
             if (GetFinalizerThread()->SetThreadPriority(THREAD_PRIORITY_HIGHEST))
                 bPriorityBoosted = TRUE;
+        }
+
+        // The Finalizer thread is started very early in EE startup. We deferred
+        // some initialization until a point we are sure the EE is up and running. At
+        // this point we make a single attempt and if it fails won't try again.
+        if (!s_InitializedFinalizerThreadForPlatform)
+        {
+            s_InitializedFinalizerThreadForPlatform = TRUE;
+            Thread::InitializationForManagedThreadInNative(GetFinalizerThread());
         }
 
         JitHost::Reclaim();
@@ -315,19 +332,8 @@ VOID FinalizerThread::FinalizerThreadWorker(void *args)
             GetFinalizerThread()->DoExtraWorkForFinalizer();
         }
         LOG((LF_GC, LL_INFO100, "***** Calling Finalizers\n"));
-        // We may mark the finalizer thread for abort.  If so the abort request is for previous finalizer method, not for next one.
-        if (GetFinalizerThread()->IsAbortRequested())
-        {
-            GetFinalizerThread()->EEResetAbort(Thread::TAR_ALL);
-        }
 
         FinalizeAllObjects();
-
-        // We may still have the finalizer thread for abort.  If so the abort request is for previous finalizer method, not for next one.
-        if (GetFinalizerThread()->IsAbortRequested())
-        {
-            GetFinalizerThread()->EEResetAbort(Thread::TAR_ALL);
-        }
 
         // Anyone waiting to drain the Q can now wake up.  Note that there is a
         // race in that another thread starting a drain, as we leave a drain, may
@@ -335,6 +341,9 @@ VOID FinalizerThread::FinalizerThreadWorker(void *args)
         // acceptable.
         SignalFinalizationDone(TRUE);
     }
+
+    if (s_InitializedFinalizerThreadForPlatform)
+        Thread::CleanUpForManagedThreadInNative(GetFinalizerThread());
 }
 
 DWORD WINAPI FinalizerThread::FinalizerThreadStart(void *args)
@@ -369,8 +378,6 @@ DWORD WINAPI FinalizerThread::FinalizerThreadStart(void *args)
         INSTALL_UNHANDLED_MANAGED_EXCEPTION_TRAP;
         {
             GetFinalizerThread()->SetBackground(TRUE);
-
-            EnsureYieldProcessorNormalizedInitialized();
 
             while (!fQuitFinalizer)
             {
@@ -490,8 +497,6 @@ void FinalizerThread::FinalizerThreadWait(DWORD timeout)
 #endif // FEATURE_COMINTEROP
 
         GCX_PREEMP();
-
-        Thread *pThread = GetThread();
 
         ULONGLONG startTime = CLRGetTickCount64();
         ULONGLONG endTime;

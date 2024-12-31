@@ -41,8 +41,6 @@
 #endif //!defined(FEATURE_UTILCODE_NO_DEPENDENCIES)
 
 #if 0
-    #define APPDOMAIN_STATE
-
     // Enable to track details of EESuspension
     #define TIME_SUSPEND
 #endif // 0
@@ -55,7 +53,7 @@
 #if defined(TARGET_X86) || defined(TARGET_ARM)
     #define USE_UPPER_ADDRESS       0
 
-#elif defined(TARGET_AMD64) || defined(TARGET_ARM64)
+#elif defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_S390X)
     #define UPPER_ADDRESS_MAPPING_FACTOR 2
     #define CLR_UPPER_ADDRESS_MIN   0x64400000000
     #define CODEHEAP_START_ADDRESS  0x64480000000
@@ -80,9 +78,6 @@
 // Note that if ALLOW_SXS_JIT_NGEN is defined, then ALLOW_SXS_JIT must be defined.
 #define ALLOW_SXS_JIT
 #define ALLOW_SXS_JIT_NGEN
-
-//master switch for gc suspension not based on hijacking
-#define FEATURE_ENABLE_GCPOLL
 
 #if !defined(TARGET_UNIX)
 // PLATFORM_SUPPORTS_THREADSUSPEND is defined for platforms where it is safe to call
@@ -155,7 +150,7 @@
 // do not work reliably with conservative GC.
 #define FEATURE_CONSERVATIVE_GC 1
 
-#if (defined(TARGET_ARM) && !defined(ARM_SOFTFP)) || defined(TARGET_ARM64)
+#if (defined(TARGET_ARM) && (!defined(ARM_SOFTFP) || defined(CONFIGURABLE_ARM_ABI))) || defined(TARGET_ARM64)
 #define FEATURE_HFA
 #endif
 

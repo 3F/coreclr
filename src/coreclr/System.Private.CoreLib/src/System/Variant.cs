@@ -198,7 +198,7 @@ namespace System
         {
             _objref = null;
             _flags = CV_R4;
-            _data = (uint)BitConverter.SingleToInt32Bits(val);
+            _data = BitConverter.SingleToUInt32Bits(val);
         }
 
         public Variant(double val)
@@ -279,6 +279,7 @@ namespace System
             else if (obj is DispatchWrapper)
             {
                 vt = VarEnum.VT_DISPATCH;
+                Debug.Assert(OperatingSystem.IsWindows());
                 obj = ((DispatchWrapper)obj).WrappedObject;
             }
             else if (obj is ErrorWrapper)
@@ -327,7 +328,7 @@ namespace System
                 CV_U4 => (uint)_data,
                 CV_I8 => _data,
                 CV_U8 => (ulong)_data,
-                CV_R4 => BitConverter.Int32BitsToSingle((int)_data),
+                CV_R4 => BitConverter.UInt32BitsToSingle((uint)_data),
                 CV_R8 => BitConverter.Int64BitsToDouble(_data),
                 CV_DATETIME => new DateTime(_data),
                 CV_TIMESPAN => new TimeSpan(_data),
@@ -401,6 +402,7 @@ namespace System
                 switch (vt)
                 {
                     case 9: /*VT_DISPATCH*/
+                        Debug.Assert(OperatingSystem.IsWindows());
                         v = new Variant(new DispatchWrapper(pValue));
                         break;
 
@@ -442,7 +444,9 @@ namespace System
                     6 => /*VT_CY*/ new Variant(new CurrencyWrapper(iv.ToDecimal(provider))),
                     7 => /*VT_DATE*/ new Variant(iv.ToDateTime(provider)),
                     8 => /*VT_BSTR*/ new Variant(iv.ToString(provider)),
+#pragma warning disable CA1416 // Validate platform compatibility
                     9 => /*VT_DISPATCH*/ new Variant(new DispatchWrapper((object)iv)),
+#pragma warning restore CA1416
                     10 => /*VT_ERROR*/ new Variant(new ErrorWrapper(iv.ToInt32(provider))),
                     11 => /*VT_BOOL*/ new Variant(iv.ToBoolean(provider)),
                     12 => /*VT_VARIANT*/ new Variant((object)iv),

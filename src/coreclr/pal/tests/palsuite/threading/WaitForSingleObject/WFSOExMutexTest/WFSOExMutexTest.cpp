@@ -20,16 +20,15 @@ const int ChildThreadWaitTime = 4000;
 const int InterruptTime = 2000;
 const DWORD AcceptableDelta = 300;
 
-void RunTest(BOOL AlertThread);
-VOID PALAPI APCFunc(ULONG_PTR dwParam);
-DWORD PALAPI WaiterProc(LPVOID lpParameter);
+void RunTest_WFSOExMutexTest(BOOL AlertThread);
+VOID PALAPI APCFunc_WFSOExMutexTest(ULONG_PTR dwParam);
+DWORD PALAPI WaiterProc_WFSOExMutexTest(LPVOID lpParameter);
 
-DWORD ThreadWaitDelta;
-HANDLE hMutex;
+DWORD ThreadWaitDelta_WFSOExMutexTest;
+HANDLE hMutex_WFSOExMutexTest;
+static volatile bool s_preWaitTimestampRecorded = false;
 
-
-
-int __cdecl main( int argc, char **argv ) 
+PALTEST(threading_WaitForSingleObject_WFSOExMutexTest_paltest_waitforsingleobject_wfsoexmutextest, "threading/WaitForSingleObject/WFSOExMutexTest/paltest_waitforsingleobject_wfsoexmutextest")
 {
     int ret=0;
 	
@@ -58,11 +57,11 @@ int __cdecl main( int argc, char **argv )
 	*/
 	
 	/* Create a mutex that is not in the signalled state */
-    hMutex = CreateMutex(NULL,      //No security attributes
+    hMutex_WFSOExMutexTest = CreateMutex(NULL,      //No security attributes
                          TRUE,      //Iniitally owned
                          NULL);     //Name of mutex
 
-    if (hMutex == NULL)
+    if (hMutex_WFSOExMutexTest == NULL)
     {
         Fail("Failed to create mutex!  GetLastError returned %d.\n",
             GetLastError());
@@ -72,12 +71,12 @@ int __cdecl main( int argc, char **argv )
      * it, if it's in an alertable state.
      */
 
-    RunTest(TRUE);
-    if ((ThreadWaitDelta - InterruptTime) > AcceptableDelta)
+    RunTest_WFSOExMutexTest(TRUE);
+    if ((ThreadWaitDelta_WFSOExMutexTest - InterruptTime) > AcceptableDelta)
     {
         Fail("Expected thread to wait for %d ms (and get interrupted).\n"
             "Thread waited for %d ms! (Acceptable delta: %d)\n", 
-            InterruptTime, ThreadWaitDelta, AcceptableDelta);
+            InterruptTime, ThreadWaitDelta_WFSOExMutexTest, AcceptableDelta);
     }
 
 
@@ -85,18 +84,18 @@ int __cdecl main( int argc, char **argv )
      * Check that Queueing an APC in the middle of a wait does NOT interrupt 
      * it, if it is not in an alertable state.
      */
-    RunTest(FALSE);
-    if ((ThreadWaitDelta - ChildThreadWaitTime) > AcceptableDelta)
+    RunTest_WFSOExMutexTest(FALSE);
+    if ((ThreadWaitDelta_WFSOExMutexTest - ChildThreadWaitTime) > AcceptableDelta)
     {
         Fail("Expected thread to wait for %d ms (and not be interrupted).\n"
             "Thread waited for %d ms! (Acceptable delta: %d)\n", 
-            ChildThreadWaitTime, ThreadWaitDelta, AcceptableDelta);
+            ChildThreadWaitTime, ThreadWaitDelta_WFSOExMutexTest, AcceptableDelta);
     }
 
 
    
 	//Release Mutex
-	ret = ReleaseMutex(hMutex);
+	ret = ReleaseMutex(hMutex_WFSOExMutexTest);
 	if (0==ret)
     {
         Fail("Unable to Release Mutex!\n"
@@ -104,7 +103,7 @@ int __cdecl main( int argc, char **argv )
     }
 
 	//Close Mutex Handle
-	ret = CloseHandle(hMutex);
+	ret = CloseHandle(hMutex_WFSOExMutexTest);
     if (!ret)
     {
         Fail("Unable to close handle to Mutex!\n"
@@ -115,7 +114,7 @@ int __cdecl main( int argc, char **argv )
     return PASS;
 }
 
-void RunTest(BOOL AlertThread)
+void RunTest_WFSOExMutexTest(BOOL AlertThread)
 {
     
 	HANDLE hThread = 0;
@@ -123,9 +122,10 @@ void RunTest(BOOL AlertThread)
 
 	int ret=0;
 
-    hThread = CreateThread( NULL, 
+    s_preWaitTimestampRecorded = false;
+    hThread = CreateThread( NULL,
                             0, 
-                            (LPTHREAD_START_ROUTINE)WaiterProc,
+                            (LPTHREAD_START_ROUTINE)WaiterProc_WFSOExMutexTest,
                             (LPVOID) AlertThread,
                             0,
                             &dwThreadId);
@@ -136,11 +136,16 @@ void RunTest(BOOL AlertThread)
             "GetLastError returned %d\n", GetLastError());
     }
 
+    // Wait for the pre-wait timestamp to be recorded on the other thread before sleeping, since the sleep duration here will be
+    // compared against the sleep/wait duration on the other thread
+    while (!s_preWaitTimestampRecorded)
+    {
+        Sleep(0);
+    }
 
-	
-	Sleep(InterruptTime);
+    Sleep(InterruptTime);
 
-    ret = QueueUserAPC(APCFunc, hThread, 0);
+    ret = QueueUserAPC(APCFunc_WFSOExMutexTest, hThread, 0);
     
 	if (ret == 0)
     {
@@ -165,12 +170,12 @@ void RunTest(BOOL AlertThread)
 }
 
 /* Function doesn't do anything, just needed to interrupt the wait*/
-VOID PALAPI APCFunc(ULONG_PTR dwParam)
+VOID PALAPI APCFunc_WFSOExMutexTest(ULONG_PTR dwParam)
 {    
 }
 
 /* Entry Point for child thread. */
-DWORD PALAPI WaiterProc(LPVOID lpParameter)
+DWORD PALAPI WaiterProc_WFSOExMutexTest(LPVOID lpParameter)
 {
     UINT64 OldTimeStamp;
     UINT64 NewTimeStamp;
@@ -186,8 +191,9 @@ DWORD PALAPI WaiterProc(LPVOID lpParameter)
     }
 
     OldTimeStamp = GetHighPrecisionTimeStamp(performanceFrequency);
+    s_preWaitTimestampRecorded = true;
 
-    ret = WaitForSingleObjectEx(	hMutex, 
+    ret = WaitForSingleObjectEx(	hMutex_WFSOExMutexTest, 
 								ChildThreadWaitTime, 
         							Alertable);
     
@@ -204,7 +210,7 @@ DWORD PALAPI WaiterProc(LPVOID lpParameter)
             "Expected return of WAIT_TIMEOUT, got %d.\n", ret);
     }
 
-    ThreadWaitDelta = NewTimeStamp - OldTimeStamp;
+    ThreadWaitDelta_WFSOExMutexTest = NewTimeStamp - OldTimeStamp;
   
     return 0;
 }

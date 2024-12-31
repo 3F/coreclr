@@ -3,8 +3,6 @@
 
 /*++
 
-
-
 Module Name:
 
     init/pal.cpp
@@ -12,8 +10,6 @@ Module Name:
 Abstract:
 
     Implementation of PAL exported functions not part of the Win32 API.
-
-
 
 --*/
 
@@ -43,6 +39,7 @@ SET_DEFAULT_DEBUG_CHANNEL(PAL); // some headers have code with asserts, so do th
 #include "pal/numa.h"
 #include "pal/stackstring.hpp"
 #include "pal/cgroup.h"
+#include <getexepath.h>
 
 #if HAVE_MACH_EXCEPTIONS
 #include "../exception/machexception.h"
@@ -91,15 +88,6 @@ int CacheLineSize;
 #endif
 #endif
 
-#if defined(__FreeBSD__)
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/sysctl.h>
-#endif
-#if HAVE_GETAUXVAL
-#include <sys/auxv.h>
-#endif
-
 #include <algorithm>
 
 using namespace CorUnix;
@@ -146,7 +134,7 @@ static bool RunningNatively()
 {
     int ret = 0;
     size_t sz = sizeof(ret);
-    if (sysctlbyname("sysctl.proc_native", &ret, &sz, NULL, 0) != 0)
+    if (sysctlbyname("sysctl.proc_native", &ret, &sz, nullptr, 0) != 0)
     {
         // if the sysctl failed, we'll assume this OS does not support
         // binary translation - so we must be running natively.
@@ -219,7 +207,7 @@ int
 PALAPI
 PAL_InitializeDLL()
 {
-    return Initialize(0, NULL, g_initializeDLLFlags);
+    return Initialize(0, nullptr, g_initializeDLLFlags);
 }
 
 /*++
@@ -281,12 +269,12 @@ void
 InitializeDefaultStackSize()
 {
     char* defaultStackSizeStr = getenv("COMPlus_DefaultStackSize");
-    if (defaultStackSizeStr != NULL)
+    if (defaultStackSizeStr != nullptr)
     {
         errno = 0;
         // Like all numeric values specific by the COMPlus_xxx variables, it is a
         // hexadecimal string without any prefix.
-        long int size = strtol(defaultStackSizeStr, NULL, 16);
+        long int size = strtol(defaultStackSizeStr, nullptr, 16);
 
         if (errno == 0)
         {
@@ -323,10 +311,10 @@ Initialize(
     DWORD flags)
 {
     PAL_ERROR palError = ERROR_GEN_FAILURE;
-    CPalThread *pThread = NULL;
-    CSharedMemoryObjectManager *pshmom = NULL;
-    LPWSTR command_line = NULL;
-    LPWSTR exe_path = NULL;
+    CPalThread *pThread = nullptr;
+    CSharedMemoryObjectManager *pshmom = nullptr;
+    LPWSTR command_line = nullptr;
+    LPWSTR exe_path = nullptr;
     int retval = -1;
     bool fFirstTimeInit = false;
 
@@ -348,18 +336,18 @@ Initialize(
 
     CriticalSectionSubSysInitialize();
 
-    if(NULL == init_critsec)
+    if(nullptr == init_critsec)
     {
         pthread_mutex_lock(&init_critsec_mutex); // prevents race condition of two threads
                                                  // initializing the critical section.
-        if(NULL == init_critsec)
+        if(nullptr == init_critsec)
         {
             static CRITICAL_SECTION temp_critsec;
 
             // Want this critical section to NOT be internal to avoid the use of unsafe region markers.
             InternalInitializeCriticalSectionAndSpinCount(&temp_critsec, 0, false);
 
-            if(NULL != InterlockedCompareExchangePointer(&init_critsec, &temp_critsec, NULL))
+            if(nullptr != InterlockedCompareExchangePointer(&init_critsec, &temp_critsec, nullptr))
             {
                 // Another thread got in before us! shouldn't happen, if the PAL
                 // isn't initialized there shouldn't be any other threads
@@ -370,7 +358,7 @@ Initialize(
         pthread_mutex_unlock(&init_critsec_mutex);
     }
 
-    InternalEnterCriticalSection(pThread, init_critsec); // here pThread is always NULL
+    InternalEnterCriticalSection(pThread, init_critsec); // here pThread is always nullptr
 
     if (init_count == 0)
     {
@@ -378,7 +366,7 @@ Initialize(
         gPID = getpid();
         gSID = getsid(gPID);
 
-        // Initialize the thread local storage  
+        // Initialize the thread local storage
         if (FALSE == TLSInitialize())
         {
             palError = ERROR_PALINIT_TLS;
@@ -419,12 +407,12 @@ Initialize(
 
 #ifdef FEATURE_ENABLE_NO_ADDRESS_SPACE_RANDOMIZATION
         char* useDefaultBaseAddr = getenv("COMPlus_UseDefaultBaseAddr");
-        if (useDefaultBaseAddr != NULL)
+        if (useDefaultBaseAddr != nullptr)
         {
             errno = 0;
             // Like all numeric values specific by the COMPlus_xxx variables, it is a
             // hexadecimal string without any prefix.
-            long int flag = strtol(useDefaultBaseAddr, NULL, 16);
+            long int flag = strtol(useDefaultBaseAddr, nullptr, 16);
 
             if (errno == 0)
             {
@@ -520,7 +508,7 @@ Initialize(
         //
 
         pshmom = InternalNew<CSharedMemoryObjectManager>();
-        if (NULL == pshmom)
+        if (nullptr == pshmom)
         {
             ERROR("Unable to allocate new object manager\n");
             palError = ERROR_OUTOFMEMORY;
@@ -543,7 +531,7 @@ Initialize(
         g_pSynchronizationManager =
             CPalSynchMgrController::CreatePalSynchronizationManager();
 
-        if (NULL == g_pSynchronizationManager)
+        if (nullptr == g_pSynchronizationManager)
         {
             palError = ERROR_NOT_ENOUGH_MEMORY;
             ERROR("Failure creating synchronization manager\n");
@@ -557,11 +545,11 @@ Initialize(
 
     palError = ERROR_GEN_FAILURE;
 
-    if (argc > 0 && argv != NULL)
+    if (argc > 0 && argv != nullptr)
     {
         /* build the command line */
         command_line = INIT_FormatCommandLine(argc, argv);
-        if (NULL == command_line)
+        if (nullptr == command_line)
         {
             ERROR("Error building command line\n");
             palError = ERROR_PALINIT_COMMAND_LINE;
@@ -570,7 +558,7 @@ Initialize(
 
         /* find out the application's full path */
         exe_path = INIT_GetCurrentEXEPath();
-        if (NULL == exe_path)
+        if (nullptr == exe_path)
         {
             ERROR("Unable to find exe path\n");
             palError = ERROR_PALINIT_CONVERT_EXE_PATH;
@@ -588,7 +576,7 @@ Initialize(
         }
 
         // InitializeProcessCommandLine took ownership of this memory.
-        command_line = NULL;
+        command_line = nullptr;
 
 #ifdef PAL_PERF
         // Initialize the Profiling structure
@@ -609,7 +597,7 @@ Initialize(
         }
 
         // LOADSetExeName took ownership of this memory.
-        exe_path = NULL;
+        exe_path = nullptr;
     }
 
     if (init_count == 0)
@@ -625,13 +613,6 @@ Initialize(
         }
 
         palError = ERROR_GEN_FAILURE;
-
-        if (FALSE == TIMEInitialize())
-        {
-            ERROR("Unable to initialize TIME support\n");
-            palError = ERROR_PALINIT_TIME;
-            goto CLEANUP6;
-        }
 
         /* Initialize the File mapping critical section. */
         if (FALSE == MAPInitialize())
@@ -761,7 +742,7 @@ done:
 
     if (fFirstTimeInit && 0 == retval)
     {
-        _ASSERTE(NULL != pThread);
+        _ASSERTE(nullptr != pThread);
     }
 
     if (retval != 0 && GetLastError() == ERROR_SUCCESS)
@@ -783,8 +764,7 @@ Function:
 
 Abstract:
   A replacement for PAL_Initialize when loading CoreCLR. Instead of taking a command line (which CoreCLR
-  instances aren't given anyway) the path into which the CoreCLR is installed is supplied instead. This is
-  cached so that PAL_GetPALDirectoryW can return it later.
+  instances aren't given anyway) the path into which the CoreCLR is installed is supplied instead.
 
   This routine also makes sure the psuedo dynamic libraries PALRT and mscorwks have their initialization
   methods called.
@@ -796,7 +776,7 @@ Return:
 --*/
 PAL_ERROR
 PALAPI
-PAL_InitializeCoreCLR(const char *szExePath, bool runningInExe)
+PAL_InitializeCoreCLR(const char *szExePath, BOOL runningInExe)
 {
     g_running_in_exe = runningInExe;
 
@@ -878,7 +858,7 @@ PAL_IsDebuggerPresent()
     struct kinfo_proc info = {};
     size_t size = sizeof(info);
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
-    int ret = sysctl(mib, sizeof(mib)/sizeof(*mib), &info, &size, NULL, 0);
+    int ret = sysctl(mib, sizeof(mib)/sizeof(*mib), &info, &size, nullptr, 0);
 
     if (ret == 0)
         return ((info.kp_proc.p_flag & P_TRACED) != 0);
@@ -891,12 +871,12 @@ PAL_IsDebuggerPresent()
 
     struct kinfo_proc *info;
 
-    kd = kvm_open(NULL, NULL, NULL, KVM_NO_FILES, "kvm_open");
-    if (kd == NULL)
+    kd = kvm_open(nullptr, nullptr, nullptr, KVM_NO_FILES, "kvm_open");
+    if (kd == nullptr)
         return FALSE;
 
     info = kvm_getprocs(kd, KERN_PROC_PID, getpid(), &cnt);
-    if (info == NULL || cnt < 1)
+    if (info == nullptr || cnt < 1)
     {
         kvm_close(kd);
         return FALSE;
@@ -980,7 +960,7 @@ PAL_TerminateEx(
 {
     ENTRY_EXTERNAL("PAL_TerminateEx()\n");
 
-    if (NULL == init_critsec)
+    if (nullptr == init_critsec)
     {
         /* note that these macros probably won't output anything, since the
         debug channels haven't been initialized yet */
@@ -1077,7 +1057,7 @@ BOOL PALInitLock(void)
     }
 
     CPalThread * pThread =
-        (PALIsThreadDataInitialized() ? InternalGetCurrentThread() : NULL);
+        (PALIsThreadDataInitialized() ? InternalGetCurrentThread() : nullptr);
 
     InternalEnterCriticalSection(pThread, init_critsec);
     return TRUE;
@@ -1099,7 +1079,7 @@ void PALInitUnlock(void)
     }
 
     CPalThread * pThread =
-        (PALIsThreadDataInitialized() ? InternalGetCurrentThread() : NULL);
+        (PALIsThreadDataInitialized() ? InternalGetCurrentThread() : nullptr);
 
     InternalLeaveCriticalSection(pThread, init_critsec);
 }
@@ -1158,7 +1138,7 @@ Abstract:
 
 Parameters :
     int argc : number of arguments in argv
-    char **argv : argument list in an array of NULL-terminated strings
+    char **argv : argument list in an array of nullptr-terminated strings
 
 Return value :
     pointer to Unicode command line. This is a buffer allocated with malloc;
@@ -1181,7 +1161,7 @@ Note : not all peculiarities of Windows command-line processing are supported;
 static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
 {
     LPWSTR retval;
-    LPSTR command_line=NULL, command_ptr;
+    LPSTR command_line=nullptr, command_ptr;
     LPCSTR arg_ptr;
     INT length, i,j;
     BOOL bQuoted = FALSE;
@@ -1206,7 +1186,7 @@ static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
     if(!command_line)
     {
         ERROR("couldn't allocate memory for command line!\n");
-        return NULL;
+        return nullptr;
     }
 
     command_ptr=command_line;
@@ -1240,171 +1220,38 @@ static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
         }
         *command_ptr++=' ';
     }
-    /* replace the last space with a NULL terminator */
+    /* replace the last space with a nullptr terminator */
     command_ptr--;
     *command_ptr='\0';
 
     /* convert to Unicode */
-    i = MultiByteToWideChar(CP_ACP, 0,command_line, -1, NULL, 0);
+    i = MultiByteToWideChar(CP_ACP, 0,command_line, -1, nullptr, 0);
     if (i == 0)
     {
         ASSERT("MultiByteToWideChar failure\n");
         free(command_line);
-        return NULL;
+        return nullptr;
     }
 
     retval = reinterpret_cast<LPWSTR>(InternalMalloc((sizeof(WCHAR)*i)));
-    if(retval == NULL)
+    if(retval == nullptr)
     {
         ERROR("can't allocate memory for Unicode command line!\n");
         free(command_line);
-        return NULL;
+        return nullptr;
     }
 
     if(!MultiByteToWideChar(CP_ACP, 0,command_line, i, retval, i))
     {
         ASSERT("MultiByteToWideChar failure\n");
         free(retval);
-        retval = NULL;
+        retval = nullptr;
     }
     else
         TRACE("Command line is %s\n", command_line);
 
     free(command_line);
     return retval;
-}
-
-#if defined(__linux__)
-#define symlinkEntrypointExecutable "/proc/self/exe"
-#elif !defined(__APPLE__)
-#define symlinkEntrypointExecutable "/proc/curproc/exe"
-#endif
-
-bool GetAbsolutePath(const char* path, PathCharString& absolutePath)
-{
-    bool result = false;
-
-    char realPath[PATH_MAX];
-    if (realpath(path, realPath) != nullptr && realPath[0] != '\0')
-    {
-        absolutePath.Set(realPath, strlen(realPath));
-        // realpath should return canonicalized path without the trailing slash
-        _ASSERTE(absolutePath[absolutePath.GetCount() - 1] != '/');
-
-        result = true;
-    }
-
-    return result;
-}
-
-bool GetEntrypointExecutableAbsolutePath(PathCharString& entrypointExecutable)
-{
-    bool result = false;
-
-    entrypointExecutable.Clear();
-
-    // Get path to the executable for the current process using
-    // platform specific means.
-#if defined(__APPLE__)
-
-    // On Mac, we ask the OS for the absolute path to the entrypoint executable
-    uint32_t lenActualPath = 0;
-    if (_NSGetExecutablePath(nullptr, &lenActualPath) == -1)
-    {
-        // OSX has placed the actual path length in lenActualPath,
-        // so re-attempt the operation
-        PathCharString resizedPath;
-        char *pResizedPath = resizedPath.OpenStringBuffer(lenActualPath);
-        if (_NSGetExecutablePath(pResizedPath, &lenActualPath) == 0)
-        {
-            resizedPath.CloseBuffer(lenActualPath - 1);
-            entrypointExecutable.Set(resizedPath);
-            result = true;
-        }
-    }
-#elif defined (__FreeBSD__)
-    static const int name[] =
-    {
-        CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1
-    };
-    char path[PATH_MAX];
-    size_t len;
-
-    len = sizeof(path);
-    if (sysctl(name, 4, path, &len, nullptr, 0) == 0)
-    {
-        entrypointExecutable.Set(path, len);
-        result = true;
-    }
-    else
-    {
-        // ENOMEM
-        result = false;
-    }
-#elif defined(__NetBSD__) && defined(KERN_PROC_PATHNAME)
-    static const int name[] =
-    {
-        CTL_KERN, KERN_PROC_ARGS, -1, KERN_PROC_PATHNAME,
-    };
-    char path[MAXPATHLEN];
-    size_t len;
-
-    len = sizeof(path);
-    if (sysctl(name, __arraycount(name), path, &len, NULL, 0) != -1)
-    {
-        entrypointExecutable.Set(path, len);
-        result = true;
-    }
-    else
-    {
-        result = false;
-    }
-#elif defined(__sun)
-    const char *path;
-    if ((path = getexecname()) == NULL)
-    {
-        result = false;
-    }
-    else if (*path != '/')
-    {
-        char *cwd;
-        if ((cwd = getcwd(NULL, PATH_MAX)) == NULL)
-        {
-            result = false;
-        }
-        else
-        {
-            entrypointExecutable.Set(cwd, strlen(cwd));
-            entrypointExecutable.Append('/');
-            entrypointExecutable.Append(path, strlen(path));
-
-            result = true;
-            free(cwd);
-        }
-    }
-    else
-    {
-        entrypointExecutable.Set(path, strlen(path));
-        result = true;
-    }
-#else
-
-#if HAVE_GETAUXVAL && defined(AT_EXECFN)
-    const char *execfn = (const char *)getauxval(AT_EXECFN);
-
-    if (execfn)
-    {
-        entrypointExecutable.Set(execfn, strlen(execfn));
-        result = true;
-    }
-    else
-#endif
-    // On other OSs, return the symlink that will be resolved by GetAbsolutePath
-    // to fetch the entrypoint EXE absolute path, inclusive of filename.
-    result = GetAbsolutePath(symlinkEntrypointExecutable, entrypointExecutable);
-#endif
-
-    return result;
 }
 
 /*++
@@ -1421,28 +1268,32 @@ Return:
 --*/
 static LPWSTR INIT_GetCurrentEXEPath()
 {
-    PathCharString real_path;
     LPWSTR return_value;
     INT return_size;
 
-    if (!GetEntrypointExecutableAbsolutePath(real_path))
+    char* path = getexepath();
+    if (!path)
     {
         ERROR( "Cannot get current exe path\n" );
-        return NULL;
+        return nullptr;
     }
 
-    return_size = MultiByteToWideChar(CP_ACP, 0, real_path, -1, NULL, 0);
+    PathCharString real_path;
+    real_path.Set(path, strlen(path));
+    free(path);
+
+    return_size = MultiByteToWideChar(CP_ACP, 0, real_path, -1, nullptr, 0);
     if (0 == return_size)
     {
         ASSERT("MultiByteToWideChar failure\n");
-        return NULL;
+        return nullptr;
     }
 
     return_value = reinterpret_cast<LPWSTR>(InternalMalloc((return_size*sizeof(WCHAR))));
-    if (NULL == return_value)
+    if (nullptr == return_value)
     {
         ERROR("Not enough memory to create full path\n");
-        return NULL;
+        return nullptr;
     }
     else
     {
@@ -1451,7 +1302,7 @@ static LPWSTR INIT_GetCurrentEXEPath()
         {
             ASSERT("MultiByteToWideChar failure\n");
             free(return_value);
-            return_value = NULL;
+            return_value = nullptr;
         }
         else
         {

@@ -429,9 +429,9 @@ public:
         m_TypeSpec = type;
 
         m_pbsBlob = new BinStr();
-        m_pbsBlob->appendInt16(VAL16(1));     // prolog 0x01 0x00
-        m_pbsBlob->appendInt32((int)action);  // 4-byte action
-        if(pbsPairs)                          // name-value pairs if any
+        m_pbsBlob->appendInt16(VAL16(1));           // prolog 0x01 0x00
+        m_pbsBlob->appendInt32(VAL32((int)action)); // 4-byte action
+        if(pbsPairs)                                // name-value pairs if any
         {
             if(pbsPairs->length() > 2)
                 m_pbsBlob->appendFrom(pbsPairs,2);
@@ -620,14 +620,6 @@ struct	EATEntry
 };
 typedef FIFO<EATEntry> EATList;
 
-struct DocWriter
-{
-    char* Name;
-    ISymUnmanagedDocumentWriter* pWriter;
-    DocWriter() { Name=NULL; pWriter=NULL; };
-    ~DocWriter() { delete [] Name; if(pWriter) pWriter->Release();};
-};
-typedef FIFO<DocWriter> DocWriterList;
 /**************************************************************************/
 /* The assembler object does all the code generation (dealing with meta-data)
    writing a PE file etc etc. But does NOT deal with syntax (that is what
@@ -642,7 +634,6 @@ struct Instr
     unsigned linenum_end;
 	unsigned column_end;
     unsigned pc;
-    ISymUnmanagedDocumentWriter* pWriter;
     Document* pOwnerDocument;
 };
 #define INSTR_POOL_SIZE 16
@@ -736,12 +727,6 @@ struct Indx
     }
 };
 
-typedef enum {
-    CLASSIC,        // default - classic PDB format, currently not supported for CoreCLR
-    PORTABLE,
-    // EMBEDDED     // for future use
-} PdbFormat;
-
 class Assembler {
 public:
     Assembler();
@@ -771,7 +756,6 @@ public:
     BOOL    m_fReportProgress;
     BOOL    m_fIsMscorlib;
     BOOL    m_fTolerateDupMethods;
-    BOOL    m_fENCMode;
     BOOL    m_fOptimize;
     mdToken m_tkSysObject;
     mdToken m_tkSysString;
@@ -818,10 +802,7 @@ public:
     // moved to Class
     //MethodList  m_MethodList;
 
-    BOOL    m_fCPlusPlus;
-    BOOL    m_fWindowsCE;
     BOOL    m_fDLL;
-    BOOL    m_fOBJ;
     BOOL    m_fEntryPointPresent;
     BOOL    m_fHaveFieldsWithRvas;
     BOOL    m_fFoldCode;
@@ -854,7 +835,7 @@ public:
     void    AddToImplList(mdToken);
     void    ClearBoundList(void);
     //--------------------------------------------------------------------------------
-    BOOL Init(BOOL generatePdb, PdbFormat pdbFormat);
+    BOOL Init(BOOL generatePdb);
     void ProcessLabel(__in_z __in char *pszName);
     GlobalLabel *FindGlobalLabel(LPCUTF8 pszName);
     GlobalFixup *AddDeferredGlobalFixup(__in __nullterminated char *pszLabel, BYTE* reference);
@@ -893,7 +874,6 @@ public:
     state_t CheckLocalTypeConsistancy(int instr, unsigned arg);
     state_t AddGlobalLabel(__in __nullterminated char *pszName, HCEESECTION section);
     void SetDLL(BOOL);
-    void SetOBJ(BOOL);
     void ResetForNextMethod();
     void ResetLineNumbers();
     void SetStdMapping(BOOL val = TRUE) { m_fStdMapping = val; };
@@ -1046,9 +1026,6 @@ public:
 
     // Debug metadata paraphernalia
 public:
-    ISymUnmanagedWriter* m_pSymWriter;
-    ISymUnmanagedDocumentWriter* m_pSymDocument;
-    DocWriterList m_DocWriterList;
     ULONG m_ulCurLine; // set by Parser
     ULONG m_ulCurColumn; // set by Parser
     ULONG m_ulLastDebugLine;
@@ -1066,7 +1043,6 @@ public:
 
     // Portable PDB paraphernalia
 public:
-    PdbFormat           m_pdbFormat;
     PortablePdbWriter* m_pPortablePdbWriter;
     char                m_szPdbFileName[MAX_FILENAME_LENGTH * 3 + 1];
     WCHAR               m_wzPdbFileName[MAX_FILENAME_LENGTH];
@@ -1075,8 +1051,6 @@ public:
     void SetPdbFileName(__in __nullterminated char* szName);
     // Saves the pdb file.
     HRESULT SavePdbFile();
-    // Checks whether pdb generation is portable
-    BOOL IsPortablePdb();
 
     // Security paraphernalia
 public:
@@ -1224,8 +1198,6 @@ public:
     void AddMethodImpl(mdToken tkImplementedTypeSpec, __in __nullterminated char* szImplementedName, BinStr* pImplementedSig,
                     mdToken tkImplementingTypeSpec, __in_opt __nullterminated char* szImplementingName, BinStr* pImplementingSig);
     BOOL EmitMethodImpls();
-    // lexical scope handling paraphernalia:
-    void EmitScope(Scope* pSCroot); // struct Scope - see Method.hpp
     // source file name paraphernalia
     BOOL m_fSourceFileSet;
     void SetSourceFileName(__in __nullterminated char* szName);
@@ -1251,11 +1223,6 @@ public:
     void SetCodePage(unsigned val) { g_uCodePage = val; };
     Clockwork* bClock;
     void SetClock(Clockwork* val) { bClock = val; };
-    // ENC paraphernalia
-    HRESULT InitMetaDataForENC(__in __nullterminated WCHAR* wzOrigFileName, BOOL generatePdb, PdbFormat pdbFormat);
-    BOOL EmitFieldsMethodsENC(Class* pClass);
-    BOOL EmitEventsPropsENC(Class* pClass);
-    HRESULT CreateDeltaFiles(__in __nullterminated WCHAR *pwzOutputFilename);
 
     // Syntactic sugar paraphernalia
 private:
@@ -1294,7 +1261,7 @@ public:
 
     void AddGenericParamConstraint(int index, char * pStrGenericParam, mdToken tkTypeConstraint);
 
-    bool CheckAddGenericParamConstraint(GenericParamConstraintList* pGPCList, int index, mdToken tkTypeConstraint);
+    void CheckAddGenericParamConstraint(GenericParamConstraintList* pGPCList, int index, mdToken tkTypeConstraint, bool isParamDirective);
 
     void EmitGenericParamConstraints(int numTyPars, TyParDescr* pTyPars, mdToken tkOwner, GenericParamConstraintList* pGPCL);
 

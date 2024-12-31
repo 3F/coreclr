@@ -121,8 +121,6 @@ STDAPI CreatePDBWorker(LPCWSTR pwzAssemblyPath, LPCWSTR pwzPlatformAssembliesPat
 
     BEGIN_ENTRYPOINT_NOTHROW;
 
-    Zapper* zap = NULL;
-
     EX_TRY
     {
         GetCompileInfo()->SetIsGeneratingNgenPDB(TRUE);
@@ -130,7 +128,7 @@ STDAPI CreatePDBWorker(LPCWSTR pwzAssemblyPath, LPCWSTR pwzPlatformAssembliesPat
         NGenOptions ngo = {0};
         ngo.dwSize = sizeof(NGenOptions);
 
-        zap = Zapper::NewZapper(&ngo);
+        NewHolder<Zapper> zap(Zapper::NewZapper(&ngo));
 
 #if !defined(FEATURE_MERGE_JIT_AND_ENGINE)
         zap->SetDontLoadJit();
@@ -450,7 +448,6 @@ void Zapper::LoadAndInitializeJITForNgen(LPCWSTR pwzJitName, OUT HINSTANCE* phJi
     // Note: FEATURE_MERGE_JIT_AND_ENGINE is defined for the Desktop crossgen compilation as well.
     //
     PathString CoreClrFolder;
-    extern HINSTANCE g_hThisInst;
 
 #if !defined(FEATURE_MERGE_JIT_AND_ENGINE)
     if (m_fDontLoadJit)
@@ -466,13 +463,11 @@ void Zapper::LoadAndInitializeJITForNgen(LPCWSTR pwzJitName, OUT HINSTANCE* phJi
     }
     else
 #endif // !defined(FEATURE_MERGE_JIT_AND_ENGINE)
-    if (WszGetModuleFileName(g_hThisInst, CoreClrFolder))
     {
-        hr = CopySystemDirectory(CoreClrFolder, CoreClrFolder);
+        hr = GetClrModuleDirectory(CoreClrFolder);
         if (SUCCEEDED(hr))
         {
             CoreClrFolder.Append(pwzJitName);
-
         }
     }
 
@@ -583,11 +578,15 @@ void Zapper::InitEE(BOOL fForceDebug, BOOL fForceProfile, BOOL fForceInstrument)
     }
 #else
 
-    CorCompileRuntimeDlls ngenDllId;
+    LPCWSTR pwzJitName = nullptr;
 
-    ngenDllId = CROSSGEN_COMPILER_INFO;
+    // Try to obtain a name for the jit library from the env. variable
+    IfFailThrow(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_JitName, const_cast<LPWSTR*>(&pwzJitName)));
+    if (pwzJitName == nullptr)
+    {
+        pwzJitName = CorCompileGetRuntimeDllName(CROSSGEN_COMPILER_INFO);
+    }
 
-    LPCWSTR pwzJitName = CorCompileGetRuntimeDllName(ngenDllId);
     LoadAndInitializeJITForNgen(pwzJitName, &m_hJitLib, &m_pJitCompiler);
 
 #endif // FEATURE_MERGE_JIT_AND_ENGINE
@@ -620,7 +619,27 @@ void Zapper::InitEE(BOOL fForceDebug, BOOL fForceProfile, BOOL fForceInstrument)
 
         if (altName == NULL)
         {
-            altName = MAKEDLLNAME_W(W("protojit"));
+            #ifdef TARGET_WINDOWS
+#ifdef TARGET_X86
+            altName = MAKEDLLNAME_W(W("clrjit_win_x86_x86"));
+#elif defined(TARGET_AMD64)
+            altName = MAKEDLLNAME_W(W("clrjit_win_x64_x64"));
+#elif defined(TARGET_ARM)
+            altName = MAKEDLLNAME_W(W("clrjit_win_arm_arm"));
+#elif defined(TARGET_ARM64)
+            altName = MAKEDLLNAME_W(W("clrjit_win_arm64_arm64"));
+#endif
+#else // TARGET_WINDOWS
+#ifdef TARGET_X86
+            altName = MAKEDLLNAME_W(W("clrjit_unix_x86_x86"));
+#elif defined(TARGET_AMD64)
+            altName = MAKEDLLNAME_W(W("clrjit_unix_x64_x64"));
+#elif defined(TARGET_ARM)
+            altName = MAKEDLLNAME_W(W("clrjit_unix_arm_arm"));
+#elif defined(TARGET_ARM64)
+            altName = MAKEDLLNAME_W(W("clrjit_unix_arm64_arm64"));
+#endif
+#endif // TARGET_WINDOWS
         }
 
         LoadAndInitializeJITForNgen(altName, &m_hAltJITCompiler, &m_alternateJit);
@@ -1134,7 +1153,7 @@ void Zapper::InitializeCompilerFlags(CORCOMPILE_VERSION_INFO * pVersionInfo)
 
     // Set CORJIT_FLAG_MIN_OPT only if COMPlus_JitMinOpts == 1
     static ConfigDWORD g_jitMinOpts;
-    if (g_jitMinOpts.val_DontUse_(CLRConfig::UNSUPPORTED_JITMinOpts, 0) == 1)
+    if (g_jitMinOpts.val(CLRConfig::UNSUPPORTED_JITMinOpts) == 1)
     {
         m_pOpt->m_compilerFlags.Set(CORJIT_FLAGS::CORJIT_FLAG_MIN_OPT);
     }

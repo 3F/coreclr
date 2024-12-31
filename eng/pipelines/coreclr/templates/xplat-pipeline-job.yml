@@ -7,11 +7,12 @@ parameters:
   helixType: '(unspecified)'
   container: ''
   testGroup: ''
-  crossrootfsDir: ''
+  crossBuild: false
   liveLibrariesBuildConfig: ''
   stagedBuild: false
   strategy: ''
   pool: ''
+  templatePath: 'templates'
 
   # arcade-specific parameters
   condition: true
@@ -26,8 +27,9 @@ parameters:
   variables: {} ## any extra variables to add to the defaults defined below
 
 jobs:
-- template: xplat-job.yml
+- template: /eng/pipelines/common/templates/runtimes/xplat-job.yml
   parameters:
+    templatePath: ${{ parameters.templatePath }}
     buildConfig: ${{ parameters.buildConfig }}
     archType: ${{ parameters.archType }}
     osGroup: ${{ parameters.osGroup }}
@@ -35,7 +37,7 @@ jobs:
     name: ${{ parameters.name }}
     helixType: ${{ parameters.helixType }}
     container: ${{ parameters.container }}
-    crossrootfsDir: ${{ parameters.crossrootfsDir }}
+    crossBuild: ${{ parameters.crossBuild }}
     stagedBuild: ${{ parameters.stagedBuild }}
     strategy: ${{ parameters.strategy }}
     pool: ${{ parameters.pool }}
@@ -69,12 +71,6 @@ jobs:
     - name: buildProductRootFolderPath
       value: '$(Build.SourcesDirectory)/artifacts/bin/coreclr/$(osGroup).$(archType).$(buildConfigUpper)'
 
-    - name: buildCrossDacArtifactName
-      value: CoreCLRCrossDacArtifacts
-
-    - name: crossDacArtifactPath
-      value: $(Build.SourcesDirectory)/artifacts/$(buildCrossDacArtifactName)
-
     - name: buildMuslDacRootFolderPath
       value: '$(Build.SourcesDirectory)/artifacts/bin/coreclr/alpine.$(archType).$(buildConfigUpper)'
 
@@ -86,13 +82,6 @@ jobs:
 
     - name: buildLinuxDacStagingPath
       value: '$(crossDacArtifactPath)/Linux.$(archType).$(buildConfigUpper)'
-
-    - name: crossDacHostArch
-      value: x64
-
-    - ${{ if eq(parameters.archType, 'arm') }}:
-      - name: crossDacHostArch
-        value: x86
 
     # We need this because both mono and coreclr build currently depends on CoreClr
     - name: coreClrProductArtifactName
@@ -126,11 +115,12 @@ jobs:
       value: ''
 
     # 'innerloop' and 'clrinterpreter' jobs run the Priority 0 tests; everything else runs the Priority 1 tests.
-    - ${{ if and(ne(parameters.testGroup, 'innerloop'), ne(parameters.testGroup, 'clrinterpreter')) }}:
-      - ${{ if ne(parameters.osGroup, 'Windows_NT') }}:
+    # 'gc-standalone' is forced to run pri0 as well to start with. 
+    - ${{ if and(ne(parameters.testGroup, 'innerloop'), ne(parameters.testGroup, 'clrinterpreter'), ne(parameters.testGroup, 'gc-standalone'), ne(parameters.testGroup, 'gc-standalone-server') ) }}:
+      - ${{ if ne(parameters.osGroup, 'windows') }}:
         - name: priorityArg
           value: 'priority1'
-      - ${{ if eq(parameters.osGroup, 'Windows_NT') }}:
+      - ${{ if eq(parameters.osGroup, 'windows') }}:
         - name: priorityArg
           value: '-priority=1'
 

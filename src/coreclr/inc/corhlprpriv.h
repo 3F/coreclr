@@ -13,7 +13,7 @@
 #include "corhlpr.h"
 #include "fstring.h"
 
-#if defined(_MSC_VER) && defined(TARGET_X86)
+#if defined(_MSC_VER) && defined(HOST_X86)
 #pragma optimize("y", on)		// If routines don't get inlined, don't pay the EBP frame penalty
 #endif
 
@@ -546,6 +546,22 @@ public:
         (*this)[ix] = value;
     }
 
+    // NOTHROW: Resizes if necessary.
+    BOOL PushNoThrow(const T & value)
+    {
+        // Resize if necessary - nothow.
+        if (m_curSize + 1 >= CQuickArray<T>::Size()) {
+            if (ReSizeNoThrow((m_curSize + 1) * 2) != NOERROR)
+                return FALSE;
+        }
+
+        // Append element to end of array.
+        _ASSERTE(m_curSize + 1 < CQuickArray<T>::Size());
+        SIZE_T ix = m_curSize++;
+        (*this)[ix] = value;
+        return TRUE;
+    }
+
     T Pop()
     {
         _ASSERTE(m_curSize > 0);
@@ -759,7 +775,7 @@ CorSigUncompressToken_EndPtr(
     }
     DWORD dwDataSize = (DWORD)cbDataSize;
 
-    ULONG cbTokenOutLength;
+    uint32_t cbTokenOutLength;
     IfFailRet(CorSigUncompressToken(
         pData,
         dwDataSize,

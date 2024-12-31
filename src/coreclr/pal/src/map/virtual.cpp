@@ -1760,6 +1760,28 @@ ExitVirtualProtect:
     return bRetVal;
 }
 
+#if defined(HOST_OSX) && defined(HOST_ARM64)
+PALAPI VOID PAL_JitWriteProtect(bool writeEnable)
+{
+    thread_local int enabledCount = 0;
+    if (writeEnable)
+    {
+        if (enabledCount++ == 0)
+        {
+            pthread_jit_write_protect_np(0);
+        }
+    }
+    else
+    {
+        if (--enabledCount == 0)
+        {
+            pthread_jit_write_protect_np(1);
+        }
+        _ASSERTE(enabledCount >= 0);
+    }
+}
+#endif // HOST_OSX && HOST_ARM64
+
 #if HAVE_VM_ALLOCATE
 //---------------------------------------------------------------------------------------
 //

@@ -89,7 +89,7 @@ void Compiler::fgResetForSsa()
         m_memorySsaMap[memoryKind] = nullptr;
     }
 
-    for (BasicBlock* blk = fgFirstBB; blk != nullptr; blk = blk->bbNext)
+    for (BasicBlock* const blk : Blocks())
     {
         // Eliminate phis.
         for (MemoryKind memoryKind : allMemoryKinds())
@@ -106,14 +106,13 @@ void Compiler::fgResetForSsa()
             }
         }
 
-        for (Statement* stmt : blk->Statements())
+        for (Statement* const stmt : blk->Statements())
         {
-            for (GenTree* tree = stmt->GetTreeList(); tree != nullptr; tree = tree->gtNext)
+            for (GenTree* const tree : stmt->TreeList())
             {
                 if (tree->IsLocal())
                 {
                     tree->AsLclVarCommon()->SetSsaNum(SsaConfig::RESERVED_SSA_NUM);
-                    continue;
                 }
             }
         }
@@ -255,9 +254,9 @@ void SsaBuilder::ComputeImmediateDom(BasicBlock** postOrder, int count)
             BasicBlock* predBlock = nullptr;
             for (flowList* pred = m_pCompiler->BlockPredsWithEH(block); pred; pred = pred->flNext)
             {
-                if (BitVecOps::IsMember(&m_visitedTraits, m_visited, pred->flBlock->bbNum))
+                if (BitVecOps::IsMember(&m_visitedTraits, m_visited, pred->getBlock()->bbNum))
                 {
-                    predBlock = pred->flBlock;
+                    predBlock = pred->getBlock();
                     break;
                 }
             }
@@ -272,14 +271,14 @@ void SsaBuilder::ComputeImmediateDom(BasicBlock** postOrder, int count)
             BasicBlock* bbIDom = predBlock;
             for (flowList* pred = m_pCompiler->BlockPredsWithEH(block); pred; pred = pred->flNext)
             {
-                if (predBlock != pred->flBlock)
+                if (predBlock != pred->getBlock())
                 {
-                    BasicBlock* domAncestor = IntersectDom(pred->flBlock, bbIDom);
-                    // The result may be NULL if "block" and "pred->flBlock" are part of a
+                    BasicBlock* domAncestor = IntersectDom(pred->getBlock(), bbIDom);
+                    // The result may be NULL if "block" and "pred->getBlock()" are part of a
                     // cycle -- neither is guaranteed ordered wrt the other in reverse postorder,
-                    // so we may be computing the IDom of "block" before the IDom of "pred->flBlock" has
+                    // so we may be computing the IDom of "block" before the IDom of "pred->getBlock()" has
                     // been computed.  But that's OK -- if they're in a cycle, they share the same immediate
-                    // dominator, so the contribution of "pred->flBlock" is not necessary to compute
+                    // dominator, so the contribution of "pred->getBlock()" is not necessary to compute
                     // the result.
                     if (domAncestor != nullptr)
                     {
@@ -356,7 +355,7 @@ void SsaBuilder::ComputeDominanceFrontiers(BasicBlock** postOrder, int count, Bl
 
         for (flowList* pred = blockPreds; pred != nullptr; pred = pred->flNext)
         {
-            DBG_SSA_JITDUMP("   Considering predecessor " FMT_BB ".\n", pred->flBlock->bbNum);
+            DBG_SSA_JITDUMP("   Considering predecessor " FMT_BB ".\n", pred->getBlock()->bbNum);
 
             // If we've found a B2, then consider the possible B1's.  We start with
             // B2, since a block dominates itself, then traverse upwards in the dominator
@@ -366,7 +365,7 @@ void SsaBuilder::ComputeDominanceFrontiers(BasicBlock** postOrder, int count, Bl
             // Along this way, make "block"/B3 part of the dom frontier of the B1.
             // When we reach this immediate dominator, the definition no longer applies, since this
             // potential B1 *does* dominate "block"/B3, so we stop.
-            for (BasicBlock* b1 = pred->flBlock; (b1 != nullptr) && (b1 != block->bbIDom); // !root && !loop
+            for (BasicBlock* b1 = pred->getBlock(); (b1 != nullptr) && (b1 != block->bbIDom); // !root && !loop
                  b1             = b1->bbIDom)
             {
                 DBG_SSA_JITDUMP("      Adding " FMT_BB " to dom frontier of pred dom " FMT_BB ".\n", block->bbNum,
@@ -486,7 +485,7 @@ void SsaBuilder::ComputeIteratedDominanceFrontier(BasicBlock* b, const BlkToBlkV
 static GenTree* GetPhiNode(BasicBlock* block, unsigned lclNum)
 {
     // Walk the statements for phi nodes.
-    for (Statement* stmt : block->Statements())
+    for (Statement* const stmt : block->Statements())
     {
         // A prefix of the statements of the block are phi definition nodes. If we complete processing
         // that prefix, exit.
@@ -540,7 +539,7 @@ void SsaBuilder::InsertPhi(BasicBlock* block, unsigned lclNum)
 
 #ifdef DEBUG
     unsigned seqNum = 1;
-    for (GenTree* node = stmt->GetTreeList(); node != nullptr; node = node->gtNext)
+    for (GenTree* const node : stmt->TreeList())
     {
         node->gtSeqNum = seqNum++;
     }
@@ -590,7 +589,7 @@ void SsaBuilder::AddPhiArg(
 
 #ifdef DEBUG
     unsigned seqNum = 1;
-    for (GenTree* node = stmt->GetTreeList(); node != nullptr; node = node->gtNext)
+    for (GenTree* const node : stmt->TreeList())
     {
         node->gtSeqNum = seqNum++;
     }
@@ -904,7 +903,7 @@ void SsaBuilder::AddDefToHandlerPhis(BasicBlock* block, unsigned lclNum, unsigne
                 bool phiFound = false;
 #endif
                 // A prefix of blocks statements will be SSA definitions.  Search those for "lclNum".
-                for (Statement* stmt : handler->Statements())
+                for (Statement* const stmt : handler->Statements())
                 {
                     // If the tree is not an SSA def, break out of the loop: we're done.
                     if (!stmt->IsPhiDefnStmt())
@@ -1055,9 +1054,9 @@ void SsaBuilder::BlockRenameVariables(BasicBlock* block)
     }
 
     // Walk the statements of the block and rename definitions and uses.
-    for (Statement* stmt : block->Statements())
+    for (Statement* const stmt : block->Statements())
     {
-        for (GenTree* tree = stmt->GetTreeList(); tree != nullptr; tree = tree->gtNext)
+        for (GenTree* const tree : stmt->TreeList())
         {
             if (tree->OperIs(GT_ASG))
             {
@@ -1120,7 +1119,7 @@ void SsaBuilder::AddPhiArgsToSuccessors(BasicBlock* block)
     for (BasicBlock* succ : block->GetAllSuccs(m_pCompiler))
     {
         // Walk the statements for phi nodes.
-        for (Statement* stmt : succ->Statements())
+        for (Statement* const stmt : succ->Statements())
         {
             // A prefix of the statements of the block are phi definition nodes. If we complete processing
             // that prefix, exit.
@@ -1251,7 +1250,7 @@ void SsaBuilder::AddPhiArgsToSuccessors(BasicBlock* block)
                 // For a filter, we consider the filter to be the "real" handler.
                 BasicBlock* handlerStart = succTry->ExFlowBlock();
 
-                for (Statement* stmt : handlerStart->Statements())
+                for (Statement* const stmt : handlerStart->Statements())
                 {
                     GenTree* tree = stmt->GetRootNode();
 
@@ -1393,7 +1392,7 @@ void SsaBuilder::RenameVariables()
 
     // Initialize the memory ssa numbers for unreachable blocks. ValueNum expects
     // memory ssa numbers to have some intitial value.
-    for (BasicBlock* block = m_pCompiler->fgFirstBB; block; block = block->bbNext)
+    for (BasicBlock* const block : m_pCompiler->Blocks())
     {
         if (block->bbIDom == nullptr)
         {
@@ -1528,7 +1527,7 @@ void SsaBuilder::Build()
     // tree is built. The pre/post order numbers that were generated previously and used for loop
     // recognition are still being used by optPerformHoistExpr via fgCreateLoopPreHeader. That's rather
     // odd, considering that SetupBBRoot may have added a new block.
-    for (BasicBlock* block = m_pCompiler->fgFirstBB; block != nullptr; block = block->bbNext)
+    for (BasicBlock* const block : m_pCompiler->Blocks())
     {
         block->bbIDom         = nullptr;
         block->bbPostOrderNum = 0;

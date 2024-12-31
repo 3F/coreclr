@@ -94,7 +94,7 @@ void EEClass::Destruct(MethodTable * pOwningMT)
 #ifdef PROFILING_SUPPORTED
     // If profiling, then notify the class is getting unloaded.
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackClasses());
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackClasses());
         {
             // Calls to the profiler callback may throw, or otherwise fail, if
             // the profiler AVs/throws an unhandled exception/etc. We don't want
@@ -115,7 +115,7 @@ void EEClass::Destruct(MethodTable * pOwningMT)
             {
                 GCX_PREEMP();
 
-                g_profControlBlock.pProfInterface->ClassUnloadStarted((ClassID) pOwningMT);
+                (&g_profControlBlock)->ClassUnloadStarted((ClassID) pOwningMT);
             }
             EX_CATCH
             {
@@ -125,7 +125,7 @@ void EEClass::Destruct(MethodTable * pOwningMT)
             }
             EX_END_CATCH(RethrowTerminalExceptions);
         }
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 #endif // PROFILING_SUPPORTED
 
@@ -153,7 +153,9 @@ void EEClass::Destruct(MethodTable * pOwningMT)
 
         if (pDelegateEEClass->m_pStaticCallStub)
         {
-            BOOL fStubDeleted = pDelegateEEClass->m_pStaticCallStub->DecRef();
+            ExecutableWriterHolder<Stub> stubWriterHolder(pDelegateEEClass->m_pStaticCallStub, sizeof(Stub));
+            BOOL fStubDeleted = stubWriterHolder.GetRW()->DecRef();
+
             if (fStubDeleted)
             {
                 DelegateInvokeStubManager::g_pManager->RemoveStub(pDelegateEEClass->m_pStaticCallStub);
@@ -167,7 +169,6 @@ void EEClass::Destruct(MethodTable * pOwningMT)
         // it is owned by the m_pMulticastStubCache, not by the class
         // - it is shared across classes. So we don't decrement
         // its ref count here
-        delete pDelegateEEClass->m_pUMThunkMarshInfo;
     }
 
 #ifdef FEATURE_COMINTEROP
@@ -178,7 +179,7 @@ void EEClass::Destruct(MethodTable * pOwningMT)
 #ifdef PROFILING_SUPPORTED
     // If profiling, then notify the class is getting unloaded.
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackClasses());
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackClasses());
         {
             // See comments in the call to ClassUnloadStarted for details on this
             // FAULT_NOT_FATAL marker and exception swallowing.
@@ -186,14 +187,14 @@ void EEClass::Destruct(MethodTable * pOwningMT)
             EX_TRY
             {
                 GCX_PREEMP();
-                g_profControlBlock.pProfInterface->ClassUnloadFinished((ClassID) pOwningMT, S_OK);
+                (&g_profControlBlock)->ClassUnloadFinished((ClassID) pOwningMT, S_OK);
             }
             EX_CATCH
             {
             }
             EX_END_CATCH(RethrowTerminalExceptions);
         }
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 #endif // PROFILING_SUPPORTED
 
@@ -274,7 +275,7 @@ VOID EEClass::FixupFieldDescForEnC(MethodTable * pMT, EnCFieldDesc *pFD, mdField
         {
             szFieldName = "Invalid FieldDef record";
         }
-        LOG((LF_ENC, LL_INFO100, "EEClass::InitializeFieldDescForEnC %s\n", szFieldName));
+        LOG((LF_ENC, LL_INFO100, "EEClass::FixupFieldDescForEnC %08x %s\n", fieldDef, szFieldName));
     }
 #endif //LOGGING
 
@@ -714,7 +715,7 @@ EEClass::CheckVarianceInSig(
 
         case ELEMENT_TYPE_VAR:
         {
-            DWORD index;
+            uint32_t index;
             IfFailThrow(psig.GetData(&index));
 
             // This will be checked later anyway; so give up and don't indicate a variance failure
@@ -736,7 +737,7 @@ EEClass::CheckVarianceInSig(
             IfFailThrow(psig.GetToken(&typeref));
 
             // The number of type parameters follows
-            DWORD ntypars;
+            uint32_t ntypars;
             IfFailThrow(psig.GetData(&ntypars));
 
             // If this is a value type, or position == gpNonVariant, then
@@ -810,7 +811,7 @@ EEClass::CheckVarianceInSig(
                 IfFailThrow(psig.GetData(NULL));
 
                 // Get arg count;
-                ULONG cArgs;
+                uint32_t cArgs;
                 IfFailThrow(psig.GetData(&cArgs));
 
                 // Conservatively, assume non-variance of function pointer types
@@ -1170,12 +1171,13 @@ void ClassLoader::ValidateMethodsWithCovariantReturnTypes(MethodTable* pMT)
                 continue;
 
             // Locate the MethodTable defining the pParentMD.
-            while (pParentMT->GetCanonicalMethodTable() != pParentMD->GetMethodTable())
+            MethodTable* pDefinitionParentMT = pParentMT;
+            while (pDefinitionParentMT->GetCanonicalMethodTable() != pParentMD->GetMethodTable())
             {
-                pParentMT = pParentMT->GetParentMethodTable();
+                pDefinitionParentMT = pDefinitionParentMT->GetParentMethodTable();
             }
 
-            SigTypeContext context1(pParentMT->GetInstantiation(), pMD->GetMethodInstantiation());
+            SigTypeContext context1(pDefinitionParentMT->GetInstantiation(), pMD->GetMethodInstantiation());
             MetaSig methodSig1(pParentMD);
             TypeHandle hType1 = methodSig1.GetReturnProps().GetTypeHandleThrowing(pParentMD->GetModule(), &context1, ClassLoader::LoadTypesFlag::LoadTypes, CLASS_LOAD_EXACTPARENTS);
 
@@ -1333,72 +1335,6 @@ void ClassLoader::PropagateCovariantReturnMethodImplSlots(MethodTable* pMT)
     }
 }
 
-
-//*******************************************************************************
-// This is the routine that computes the internal type of a given type.  It normalizes
-// structs that have only one field (of int/ptr sized values), to be that underlying type.
-//
-// * see code:MethodTable#KindsOfElementTypes for more
-// * It get used by code:TypeHandle::GetInternalCorElementType
-CorElementType EEClass::ComputeInternalCorElementTypeForValueType(MethodTable * pMT)
-{
-    CONTRACTL {
-        THROWS;
-        GC_TRIGGERS;
-    } CONTRACTL_END;
-
-    if (pMT->GetNumInstanceFields() == 1 && (!pMT->HasLayout()
-        || pMT->GetNumInstanceFieldBytes() == 4
-#ifdef TARGET_64BIT
-        || pMT->GetNumInstanceFieldBytes() == 8
-#endif // TARGET_64BIT
-        )) // Don't do the optimization if we're getting specified anything but the trivial layout.
-    {
-        FieldDesc * pFD = pMT->GetApproxFieldDescListRaw();
-        CorElementType type = pFD->GetFieldType();
-
-        if (type == ELEMENT_TYPE_VALUETYPE)
-        {
-            //@todo: Is it more apropos to call LookupApproxFieldTypeHandle() here?
-            TypeHandle fldHnd = pFD->GetApproxFieldTypeHandleThrowing();
-            CONSISTENCY_CHECK(!fldHnd.IsNull());
-
-            type = fldHnd.GetInternalCorElementType();
-        }
-
-        switch (type)
-        {
-            // "DDB 20951: vc8 unmanaged pointer bug."
-            // If ELEMENT_TYPE_PTR were returned, Compiler::verMakeTypeInfo would have problem
-            // creating a TI_STRUCT out of CORINFO_TYPE_PTR.
-            // As a result, the importer would not be able to realize that the thing on the stack
-            // is an instance of a valuetype (that contains one single "void*" field), rather than
-            // a pointer to a valuetype.
-            // Returning ELEMENT_TYPE_U allows verMakeTypeInfo to go down the normal code path
-            // for creating a TI_STRUCT.
-            case ELEMENT_TYPE_PTR:
-                type = ELEMENT_TYPE_U;
-
-            case ELEMENT_TYPE_I:
-            case ELEMENT_TYPE_U:
-            case ELEMENT_TYPE_I4:
-            case ELEMENT_TYPE_U4:
-#ifdef TARGET_64BIT
-            case ELEMENT_TYPE_I8:
-            case ELEMENT_TYPE_U8:
-#endif // TARGET_64BIT
-
-            {
-                return type;
-            }
-
-            default:
-                break;
-        }
-    }
-
-    return ELEMENT_TYPE_VALUETYPE;
-}
 
 //*******************************************************************************
 //
@@ -1568,7 +1504,7 @@ int MethodTable::GetVectorSize()
             // We need to verify that T (the element or "base" type) is a primitive type.
             TypeHandle typeArg = GetInstantiation()[0];
             CorElementType corType = typeArg.GetSignatureCorElementType();
-            if (corType >= ELEMENT_TYPE_I1 && corType <= ELEMENT_TYPE_R8)
+            if (((corType >= ELEMENT_TYPE_I1) && (corType <= ELEMENT_TYPE_R8)) || (corType == ELEMENT_TYPE_I) || (corType == ELEMENT_TYPE_U))
             {
                 _ASSERTE(strcmp(namespaceName, "System.Runtime.Intrinsics") == 0);
                 return vectorSize;
@@ -1808,7 +1744,7 @@ EEClass::CheckForHFA()
 }
 
 #ifdef FEATURE_64BIT_ALIGNMENT
-// Returns true iff the native view of this type requires 64-bit aligment.
+// Returns true iff the native view of this type requires 64-bit alignment.
 bool MethodTable::NativeRequiresAlign8()
 {
     LIMITED_METHOD_CONTRACT;
@@ -1968,7 +1904,8 @@ TypeHandle MethodTable::GetDefItfForComClassItf()
     InterfaceMapIterator it = IterateInterfaceMap();
     if (it.Next())
     {
-        return TypeHandle(it.GetInterface());
+        // Can use GetInterfaceApprox, as there are no generic default interfaces
+        return TypeHandle(it.GetInterfaceApprox()); 
     }
     else
     {
@@ -2505,7 +2442,7 @@ MethodTable::DebugDumpGCDesc(
             LOG((LF_ALWAYS, LL_ALWAYS, "GC description for '%s':\n\n", pszClassName));
         }
 
-        if (ContainsPointersOrCollectible())
+        if (ContainsPointers())
         {
             CGCDescSeries *pSeries;
             CGCDescSeries *pHighest;

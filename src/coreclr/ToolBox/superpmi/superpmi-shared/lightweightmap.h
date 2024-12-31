@@ -1,7 +1,5 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 //----------------------------------------------------------
 // LightWeightMap.h -
@@ -78,6 +76,33 @@ public:
         return newOffset + sizeof(unsigned int);
     }
 
+    const unsigned char* CreateBuffer(unsigned int len)
+    {
+        if (len == 0)
+        {
+            return nullptr;
+        }
+
+        if (locked)
+        {
+            LogError("Added item that extended the buffer after it was locked by a call to GetBuffer()");
+            __debugbreak();
+        }
+
+        unsigned int   newbuffsize = bufferLength + sizeof(unsigned int) + len;
+        unsigned char* newbuffer   = new unsigned char[newbuffsize];
+        unsigned int   newOffset   = bufferLength;
+        if (bufferLength > 0)
+            memcpy(newbuffer, buffer, bufferLength);
+        memset(newbuffer + bufferLength + sizeof(unsigned int), 0, len);
+        *((unsigned int*)(newbuffer + bufferLength)) = len;
+        bufferLength += sizeof(unsigned int) + len;
+        if (buffer != nullptr)
+            delete[] buffer;
+        buffer = newbuffer;
+        return buffer + newOffset + sizeof(unsigned int);
+    }
+
     unsigned char* GetBuffer(unsigned int offset)
     {
         if (offset == (unsigned int)-1)
@@ -89,7 +114,7 @@ public:
         return &buffer[offset];
     }
 
-    int Contains(const unsigned char* buff, unsigned int len)
+    int Contains(const unsigned char* buff, unsigned int len) const
     {
 #ifdef DEBUG_LWM
         LogDebug("New call to Contains %d {", len);
@@ -132,7 +157,7 @@ public:
         return -1;
     }
 
-    void Unlock() // did you really mean to use this?
+    void Unlock()
     {
         locked = false;
     }
@@ -244,7 +269,7 @@ public:
                       "Unknown type" /*typeid(_Item).name()*/, ptr - rawData, size);
     }
 
-    unsigned int CalculateArraySize()
+    unsigned int CalculateArraySize() const
     {
         int size = 4 /* tag */ + sizeof(unsigned int) /* numItems */;
         if (numItems > 0)
@@ -294,7 +319,7 @@ public:
 
         // If we have RTTI, we can make this assert report the correct type. No RTTI, though, when
         // built with .NET Core, especially when built against the PAL.
-        AssertCodeMsg((ptr - bytes) == size, EXCEPTIONCODE_LWM, "%s - Ended with unexpected sizes %p != %x",
+        AssertCodeMsg(ptr == (bytes + size), EXCEPTIONCODE_LWM, "%s - Ended with unexpected sizes %p != %x",
                       "Unknown type" /*typeid(_Item).name()*/, (void*)(ptr - bytes), size);
         return size;
     }
@@ -342,7 +367,14 @@ public:
             else if (res > 0)
                 last = mid - 1; // repeat search in bottom half.
             else
+            {
+                int resItem = memcmp(&pItems[mid], &item, sizeof(_Item));
+                if (resItem != 0)
+                {
+                    LogDebug("Tried to add a new value for an existing key, the new value was ignored");
+                }
                 return false; // found it. return position /////
+            }
         }
         insert = first;
         if (insert != (unsigned int)first)
@@ -353,11 +385,9 @@ public:
 
         if (numItems > 0)
         {
-            for (unsigned int i = numItems; i > insert; i--)
-            {
-                pKeys[i]  = pKeys[i - 1];
-                pItems[i] = pItems[i - 1];
-            }
+            int countToMove = (numItems - insert);
+            memmove(&pKeys[insert+1], &pKeys[insert], countToMove * sizeof(pKeys[insert]));
+            memmove(&pItems[insert+1], &pItems[insert], countToMove * sizeof(pItems[insert]));
         }
 
         pKeys[insert]  = key;
@@ -371,7 +401,7 @@ public:
         pItems[index] = item;
     }
 
-    int GetIndex(_Key key)
+    int GetIndex(_Key key) const
     {
         if (numItems == 0)
             return -1;
@@ -395,19 +425,19 @@ public:
         return -1; // Didn't find key
     }
 
-    _Item GetItem(int index)
+    _Item GetItem(int index) const
     {
         AssertCodeMsg(index != -1, EXCEPTIONCODE_LWM, "Didn't find Key");
         return pItems[index]; // found it. return position /////
     }
 
-    _Key GetKey(int index)
+    _Key GetKey(int index) const
     {
         AssertCodeMsg(index != -1, EXCEPTIONCODE_LWM, "Didn't find Key (in GetKey)");
         return pKeys[index];
     }
 
-    _Item Get(_Key key)
+    _Item Get(_Key key) const
     {
         int index = GetIndex(key);
         AssertCodeMsg(index != -1, EXCEPTIONCODE_MC, "Didn't find Item (in Get)");
@@ -424,7 +454,7 @@ public:
         return pKeys;
     }
 
-    unsigned int GetCount()
+    unsigned int GetCount() const
     {
         return numItems;
     }
@@ -584,7 +614,7 @@ private:
     }
 
 public:
-    unsigned int CalculateArraySize()
+    unsigned int CalculateArraySize() const
     {
         int size = 4 /* tag */ + sizeof(unsigned int) /* numItems */;
         if (numItems > 0)
@@ -596,7 +626,7 @@ public:
         return size;
     }
 
-    unsigned int DumpToArray(unsigned char* bytes)
+    unsigned int DumpToArray(unsigned char* bytes) const
     {
         unsigned char* ptr  = bytes;
         unsigned int   size = CalculateArraySize();
@@ -626,7 +656,7 @@ public:
             ptr += bufferLength * sizeof(unsigned char);
         }
 
-        AssertCodeMsg((ptr - bytes) == size, EXCEPTIONCODE_LWM, "Ended with unexpected sizes %Ix != %x", ptr - bytes,
+        AssertCodeMsg(ptr == (bytes + size), EXCEPTIONCODE_LWM, "Ended with unexpected sizes %Ix != %x", ptr - bytes,
                       size);
         return size;
     }
@@ -649,7 +679,7 @@ public:
         return true;
     }
 
-    int GetIndex(unsigned int key)
+    int GetIndex(unsigned int key) const
     {
         if (key >= numItems)
             return -1;
@@ -657,13 +687,13 @@ public:
         return (int)key;
     }
 
-    _Item GetItem(int index)
+    _Item GetItem(int index) const
     {
         AssertCodeMsg(index != -1, EXCEPTIONCODE_LWM, "Didn't find Key");
         return pItems[index]; // found it. return position /////
     }
 
-    _Item Get(unsigned int key)
+    _Item Get(unsigned int key) const
     {
         int index = GetIndex(key);
         return GetItem(index);
@@ -674,7 +704,7 @@ public:
         return pItems;
     }
 
-    unsigned int GetCount()
+    unsigned int GetCount() const
     {
         return numItems;
     }

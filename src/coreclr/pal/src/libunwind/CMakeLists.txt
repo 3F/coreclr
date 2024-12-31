@@ -28,10 +28,13 @@ if(CLR_CMAKE_HOST_UNIX)
       set(arch arm)
     elseif(CLR_CMAKE_HOST_ARCH_I386)
         set(arch x86)
+    elseif(CLR_CMAKE_HOST_ARCH_S390X)
+      set(arch s390x)
     endif ()
 
     # Disable warning due to incorrect format specifier in debugging printf via the Debug macro
     add_compile_options(-Wno-format -Wno-format-security)
+    add_compile_options(-Wno-implicit-fallthrough)
 
     if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       add_compile_options(-Wno-header-guard)
@@ -70,9 +73,7 @@ if(CLR_CMAKE_HOST_UNIX)
     endif()
 
     if (CLR_CMAKE_HOST_OSX)
-        add_definitions(-D_XOPEN_SOURCE)
         add_definitions(-DUNW_REMOTE_ONLY)
-        add_definitions(-D__APPLE__)
         add_compile_options(-Wno-sometimes-uninitialized)
         add_compile_options(-Wno-implicit-function-declaration)
 
@@ -106,6 +107,10 @@ if(CLR_CMAKE_HOST_WIN32)
       set(TARGET_ARM 1)
       set(arch arm)
       add_definitions(-D__arm__)
+    elseif(CLR_CMAKE_TARGET_ARCH_S390X)
+      set(TARGET_S390X 1)
+      set(arch s390x)
+      add_definitions(-D__s390x__)
     else ()
       message(FATAL_ERROR "Unrecognized TARGET")
     endif ()
@@ -123,7 +128,6 @@ if(CLR_CMAKE_HOST_WIN32)
     endif ()
 
     # Assume we are using default MSVC compiler
-    add_compile_options(/std:c++latest)
     add_compile_options(/TC) # compile all files as C
     add_compile_options(/permissive-)
 

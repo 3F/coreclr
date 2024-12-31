@@ -76,11 +76,6 @@ static Keywords keywords[] = {
 /********************************************************************************/
 /* File encoding-dependent functions */
 /*--------------------------------------------------------------------------*/
-char* nextcharA(__in __nullterminated char* pos)
-{
-    return (*pos > 0) ? ++pos : (char *)_mbsinc((const unsigned char *)pos);
-}
-
 char* nextcharU(__in __nullterminated char* pos)
 {
     return ++pos;
@@ -284,7 +279,7 @@ Instr* SetupInstr(unsigned short opcode)
     if((pVal = PASM->GetInstr()))
     {
         pVal->opcode = opcode;
-        if((pVal->pWriter = PASM->m_pSymDocument)!=NULL || PASM->IsPortablePdb())
+        if(PASM->m_fGeneratePDB)
         {
             if(PENV->bExternSource)
             {
@@ -302,10 +297,10 @@ Instr* SetupInstr(unsigned short opcode)
                 // Portable PDB rule:
                 // - If Start Line is equal to End Line then End Column is greater than Start Column.
                 // To fulfill this condition the column_end is set to 2 instead of 0
-                pVal->column_end = PASM->IsPortablePdb() ? 2 : 0;
+                pVal->column_end = 2;
                 pVal->pc = PASM->m_CurPC;
             }
-            pVal->pOwnerDocument = PASM->IsPortablePdb() ? PASM->m_pPortablePdbWriter->GetCurrentDocument() : NULL;
+            pVal->pOwnerDocument = PASM->m_pPortablePdbWriter->GetCurrentDocument();
         }
     }
     return pVal;
@@ -370,6 +365,134 @@ static void AppendStringWithLength(BinStr* pbs, __in __nullterminated char* sz)
             memcpy(pb,sz,L);
     }
 }
+
+/********************************************************************************/
+/* Append a typed field initializer to an untyped custom attribute blob
+ * Since the result is untyped, we have to byte-swap here on big-endian systems
+ */
+#ifdef BIGENDIAN
+static int ByteSwapCustomBlob(BYTE *ptr, int length, int type, bool isSZArray)
+{
+    BYTE *orig_ptr = ptr;
+
+    int nElem = 1;
+    if (isSZArray)
+    {
+        _ASSERTE(length >= 4);
+        nElem = GET_UNALIGNED_32(ptr);
+        SET_UNALIGNED_VAL32(ptr, nElem);
+        if (nElem == 0xffffffff)
+            nElem = 0;
+        ptr += 4;
+        length -= 4;
+    }
+
+    for (int i = 0; i < nElem; i++)
+    {
+        switch (type)
+        {
+            case ELEMENT_TYPE_BOOLEAN:
+            case ELEMENT_TYPE_I1:
+            case ELEMENT_TYPE_U1:
+                _ASSERTE(length >= 1);
+                ptr++;
+                length--;
+                break;
+            case ELEMENT_TYPE_CHAR:
+            case ELEMENT_TYPE_I2:
+            case ELEMENT_TYPE_U2:
+                _ASSERTE(length >= 2);
+                SET_UNALIGNED_VAL16(ptr, GET_UNALIGNED_16(ptr));
+                ptr += 2;
+                length -= 2;
+                break;
+            case ELEMENT_TYPE_I4:
+            case ELEMENT_TYPE_U4:
+            case ELEMENT_TYPE_R4:
+                _ASSERTE(length >= 4);
+                SET_UNALIGNED_VAL32(ptr, GET_UNALIGNED_32(ptr));
+                ptr += 4;
+                length -= 4;
+                break;
+            case ELEMENT_TYPE_I8:
+            case ELEMENT_TYPE_U8:
+            case ELEMENT_TYPE_R8:
+                _ASSERTE(length >= 8);
+                SET_UNALIGNED_VAL64(ptr, GET_UNALIGNED_64(ptr));
+                ptr += 8;
+                length -= 8;
+                break;
+            case ELEMENT_TYPE_STRING:
+            case SERIALIZATION_TYPE_TYPE:
+                _ASSERTE(length >= 1);
+                if (*ptr == 0xFF)
+                {
+                    ptr++;
+                    length--;
+                }
+                else
+                {
+                    int skipped = CorSigUncompressData((PCCOR_SIGNATURE&)ptr);
+                    _ASSERTE(length >= skipped);
+                    ptr += skipped;
+                    length -= skipped;
+                }
+                break;
+            case SERIALIZATION_TYPE_TAGGED_OBJECT:
+            {
+                _ASSERTE(length >= 1);
+                bool objIsSZArray = false;
+                int objType = *ptr;
+                ptr++;
+                length--;
+                if (type == ELEMENT_TYPE_SZARRAY)
+                {
+                    _ASSERTE(length >= 1);
+                    objIsSZArray = false;
+                    objType = *ptr;
+                    ptr++;
+                    length--;
+                }
+                int skipped = ByteSwapCustomBlob(ptr, length, objType, objIsSZArray);
+                _ASSERTE(length >= skipped);
+                ptr += skipped;
+                length -= skipped;
+                break;
+            }
+        }
+    }
+
+    return ptr - orig_ptr;
+}
+#endif
+
+static void AppendFieldToCustomBlob(BinStr* pBlob, __in BinStr* pField)
+{
+    pBlob->appendFrom(pField, (*(pField->ptr()) == ELEMENT_TYPE_SZARRAY) ? 2 : 1);
+
+#ifdef BIGENDIAN
+    BYTE *fieldPtr = pField->ptr();
+    int fieldLength = pField->length();
+
+    bool isSZArray = false;
+    int type = fieldPtr[0];
+    fieldLength--;
+    if (type == ELEMENT_TYPE_SZARRAY)
+    {
+        isSZArray = true;
+        type = fieldPtr[1];
+        fieldLength--;
+    }
+
+    // This may be a bytearray that must not be swapped.
+    if (type == ELEMENT_TYPE_STRING && !isSZArray)
+        return;
+
+    BYTE *blobPtr = pBlob->ptr() + (pBlob->length() - fieldLength);
+    ByteSwapCustomBlob(blobPtr, fieldLength, type, isSZArray);
+#endif
+}
+
 
 /********************************************************************************/
 /* fetch the next token, and return it   Also set the yylval.union if the
@@ -848,7 +971,11 @@ Its_An_Id:
                             if(wzFile != NULL)
                             {
                                 if((parser->wzIncludePath != NULL)
-                                 &&(wcschr(wzFile,'\\')==NULL)&&(wcschr(wzFile,':')==NULL))
+                                 &&(wcschr(wzFile,DIRECTORY_SEPARATOR_CHAR_A)==NULL)
+#ifdef TARGET_WINDOWS
+                                 &&(wcschr(wzFile,':')==NULL)
+#endif
+                                )
                                 {
                                     PathString wzFullName;
 
@@ -929,14 +1056,6 @@ Its_An_Id:
                                     tok = parse_literal(curSym, curPos, FALSE);
                                     if(tok == QSTRING)
                                     {
-                                        // if not ANSI, then string is in UTF-8,
-                                        // insert prefix
-                                        if(nextchar != nextcharA)
-                                        {
-                                            yylval.binstr->insertInt8(0xEF);
-                                            yylval.binstr->insertInt8(0xBB);
-                                            yylval.binstr->insertInt8(0xBF);
-                                        }
                                         yylval.binstr->appendInt8(' ');
                                         DefineVar(newstr, yylval.binstr);
                                     }
@@ -1488,12 +1607,6 @@ AsmParse::~AsmParse()
 }
 
 /**************************************************************************/
-DWORD AsmParse::IsItUnicode(CONST LPVOID pBuff, int cb, LPINT lpi)
-{
-    return IsTextUnicode(pBuff,cb,lpi);
-}
-
-/**************************************************************************/
 void AsmParse::CreateEnvironment(ReadStream* stream)
 {
     penv = new PARSING_ENVIRONMENT;
@@ -1520,19 +1633,21 @@ void AsmParse::ParseFile(ReadStream* stream)
 char* AsmParse::fillBuff(__in_opt __nullterminated char* pos)
 {
     int iPutToBuffer;
-    int iOptions = IS_TEXT_UNICODE_UNICODE_MASK;
-    g_uCodePage = CP_ACP;
+    g_uCodePage = CP_UTF8;
     iPutToBuffer = (int)penv->in->getAll(&(penv->curPos));
 
     penv->endPos = penv->curPos + iPutToBuffer;
     if(iPutToBuffer > 128) iPutToBuffer = 128;
-    if(IsItUnicode(penv->curPos,iPutToBuffer,&iOptions))
+    if(iPutToBuffer >= 4 && (penv->curPos[0] & 0xFF) == 0xFF && (penv->curPos[1] & 0xFF) == 0xFE)
     {
-        g_uCodePage = CP_UTF8;
-        if(iOptions & IS_TEXT_UNICODE_SIGNATURE)
+        // U+FFFE followed by U+0000 is UTF-32 LE, any other value than 0 is a true UTF-16 LE
+        if((penv->curPos[2] & 0xFF) == 0x00 && (penv->curPos[3] & 0xFF) == 0x00)
         {
-            penv->curPos += 2;
+            error("UTF-32 LE is not supported\n\n");
+            return NULL;
         }
+
+        penv->curPos += 2; // skip signature
         if(assem->m_fReportProgress) printf("Source file is UNICODE\n\n");
         penv->pfn_Sym = SymW;
         penv->pfn_nextchar = nextcharW;
@@ -1542,18 +1657,13 @@ char* AsmParse::fillBuff(__in_opt __nullterminated char* pos)
     }
     else
     {
-        if(((penv->curPos[0]&0xFF)==0xEF)&&((penv->curPos[1]&0xFF)==0xBB)&&((penv->curPos[2]&0xFF)==0xBF))
+        if((penv->curPos[0] & 0xFF) == 0xEF && (penv->curPos[1] & 0xFF) == 0xBB && (penv->curPos[2] & 0xFF) == 0xBF)
         {
-            g_uCodePage = CP_UTF8;
             penv->curPos += 3;
-            if(assem->m_fReportProgress) printf("Source file is UTF-8\n\n");
-            penv->pfn_nextchar = nextcharU;
         }
-        else
-        {
-            if(assem->m_fReportProgress) printf("Source file is ANSI\n\n");
-            penv->pfn_nextchar = nextcharA;
-        }
+
+        if(assem->m_fReportProgress) printf("Source file is UTF-8\n\n");
+        penv->pfn_nextchar = nextcharU;
         penv->pfn_Sym = SymAU;
         penv->pfn_NewStrFromToken = NewStrFromTokenAU;
         penv->pfn_NewStaticStrFromToken = NewStaticStrFromTokenAU;

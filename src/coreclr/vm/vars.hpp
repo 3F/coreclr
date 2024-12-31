@@ -73,9 +73,6 @@ class LoaderHeap;
 class IGCHeap;
 class Object;
 class StringObject;
-#ifdef FEATURE_UTF8STRING
-class Utf8StringObject;
-#endif // FEATURE_UTF8STRING
 class ArrayClass;
 class MethodTable;
 class MethodDesc;
@@ -160,6 +157,8 @@ class OBJECTREF {
     };
 
     public:
+        enum class tagVolatileLoadWithoutBarrier { tag };
+
         //-------------------------------------------------------------
         // Default constructor, for non-initializing declarations:
         //
@@ -171,6 +170,12 @@ class OBJECTREF {
         // Copy constructor, for passing OBJECTREF's as function arguments.
         //-------------------------------------------------------------
         OBJECTREF(const OBJECTREF & objref);
+
+        //-------------------------------------------------------------
+        // Copy constructor, for passing OBJECTREF's as function arguments
+        // using a volatile without barrier load
+        //-------------------------------------------------------------
+        OBJECTREF(const OBJECTREF * pObjref, tagVolatileLoadWithoutBarrier tag);
 
         //-------------------------------------------------------------
         // To allow NULL to be used as an OBJECTREF.
@@ -301,18 +306,15 @@ class REF : public OBJECTREF
 
 };
 
-// the while (0) syntax below is to force a trailing semicolon on users of the macro
-#define VALIDATEOBJECTREF(objref) do {if ((objref) != NULL) (objref).Validate();} while (0)
-#define VALIDATEOBJECT(obj) do {if ((obj) != NULL) (obj)->Validate();} while (0)
-
 #define ObjectToOBJECTREF(obj)     (OBJECTREF(obj))
 #define OBJECTREFToObject(objref)  ((objref).operator-> ())
 #define ObjectToSTRINGREF(obj)     (STRINGREF(obj))
 #define STRINGREFToObject(objref)  (*( (StringObject**) &(objref) ))
-#ifdef FEATURE_UTF8STRING
-#define ObjectToUTF8STRINGREF(obj)   (UTF8STRINGREF(obj))
-#define UTF8STRINGREFToObject(objref) (*( (Utf8StringObject**) &(objref) ))
-#endif // FEATURE_UTF8STRING
+#define VolatileLoadWithoutBarrierOBJECTREF(pObj) (OBJECTREF(pObj, OBJECTREF::tagVolatileLoadWithoutBarrier::tag))
+
+// the while (0) syntax below is to force a trailing semicolon on users of the macro
+#define VALIDATEOBJECT(obj) do {if ((obj) != NULL) (obj)->Validate();} while (0)
+#define VALIDATEOBJECTREF(objref) do { Object* validateObjectRefObj = OBJECTREFToObject(objref); VALIDATEOBJECT(validateObjectRefObj); } while (0)
 
 #else   // _DEBUG_IMPL
 
@@ -323,10 +325,7 @@ class REF : public OBJECTREF
 #define OBJECTREFToObject(objref) ((PTR_Object) (objref))
 #define ObjectToSTRINGREF(obj)    ((PTR_StringObject) (obj))
 #define STRINGREFToObject(objref) ((PTR_StringObject) (objref))
-#ifdef FEATURE_UTF8STRING
-#define ObjectToUTF8STRINGREF(obj)    ((PTR_Utf8StringObject) (obj))
-#define UTF8STRINGREFToObject(objref) ((PTR_Utf8StringObject) (objref))
-#endif // FEATURE_UTF8STRING
+#define VolatileLoadWithoutBarrierOBJECTREF(pObj) VolatileLoadWithoutBarrier(pObj)
 
 #endif // _DEBUG_IMPL
 
@@ -344,9 +343,8 @@ class Module;
 // For [<I1, etc. up to and including [Object
 GARY_DECL(TypeHandle, g_pPredefinedArrayTypes, ELEMENT_TYPE_MAX);
 
-extern "C" Volatile<LONG>   g_TrapReturningThreads;
+extern "C" Volatile<int32_t>   g_TrapReturningThreads;
 
-EXTERN HINSTANCE            g_hThisInst;
 EXTERN BBSweep              g_BBSweep;
 EXTERN IBCLogger            g_IBCLogger;
 
@@ -366,9 +364,6 @@ GPTR_DECL(MethodTable,      g_pObjectClass);
 GPTR_DECL(MethodTable,      g_pRuntimeTypeClass);
 GPTR_DECL(MethodTable,      g_pCanonMethodTableClass);  // System.__Canon
 GPTR_DECL(MethodTable,      g_pStringClass);
-#ifdef FEATURE_UTF8STRING
-GPTR_DECL(MethodTable,      g_pUtf8StringClass);
-#endif // FEATURE_UTF8STRING
 GPTR_DECL(MethodTable,      g_pArrayClass);
 GPTR_DECL(MethodTable,      g_pSZArrayHelperClass);
 GPTR_DECL(MethodTable,      g_pNullableClass);
@@ -406,6 +401,9 @@ GVAL_DECL(DWORD,            g_debuggerWordTLSIndex);
 #endif
 GVAL_DECL(DWORD,            g_TlsIndex);
 
+// Full path to the managed entry assembly - stored for ease of identifying the entry asssembly for diagnostics
+GVAL_DECL(PTR_WSTR, g_EntryAssemblyPath);
+
 // Global System Information
 extern SYSTEM_INFO g_SystemInfo;
 
@@ -414,18 +412,9 @@ extern SYSTEM_INFO g_SystemInfo;
 EXTERN OBJECTHANDLE         g_pPreallocatedOutOfMemoryException;
 EXTERN OBJECTHANDLE         g_pPreallocatedStackOverflowException;
 EXTERN OBJECTHANDLE         g_pPreallocatedExecutionEngineException;
-EXTERN OBJECTHANDLE         g_pPreallocatedRudeThreadAbortException;
-
-// We may not be able to create a normal thread abort exception if OOM or StackOverFlow.
-// When this happens, we will use our pre-allocated thread abort exception.
-EXTERN OBJECTHANDLE         g_pPreallocatedThreadAbortException;
 
 // we use this as a dummy object to indicate free space in the handle tables -- this object is never visible to the world
 EXTERN OBJECTHANDLE         g_pPreallocatedSentinelObject;
-
-// We use this object to return a preallocated System.Exception instance when we have nothing
-// better to return.
-EXTERN OBJECTHANDLE         g_pPreallocatedBaseException;
 
 GPTR_DECL(Thread,g_pFinalizerThread);
 GPTR_DECL(Thread,g_pSuspensionThread);
@@ -496,6 +485,9 @@ EXTERN DWORD g_fFastExitProcess;
 EXTERN BOOL g_fFatalErrorOccurredOnGCThread;
 EXTERN Volatile<LONG> g_fForbidEnterEE;
 GVAL_DECL(bool, g_fProcessDetach);
+#ifdef EnC_SUPPORTED
+GVAL_DECL(bool, g_metadataUpdatesApplied);
+#endif
 EXTERN bool g_fManagedAttach;
 EXTERN bool g_fNoExceptions;
 

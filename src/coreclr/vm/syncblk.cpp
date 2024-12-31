@@ -71,7 +71,7 @@ InteropSyncBlockInfo::~InteropSyncBlockInfo()
     }
     CONTRACTL_END;
 
-    FreeUMEntryThunkOrInterceptStub();
+    FreeUMEntryThunk();
 }
 
 #ifndef TARGET_UNIX
@@ -98,7 +98,7 @@ void InteropSyncBlockInfo::FlushStandbyList()
 }
 #endif // !TARGET_UNIX
 
-void InteropSyncBlockInfo::FreeUMEntryThunkOrInterceptStub()
+void InteropSyncBlockInfo::FreeUMEntryThunk()
 {
     CONTRACTL
     {
@@ -117,22 +117,8 @@ void InteropSyncBlockInfo::FreeUMEntryThunkOrInterceptStub()
             COMDelegate::RemoveEntryFromFPtrHash((UPTR)pUMEntryThunk);
             UMEntryThunk::FreeUMEntryThunk((UMEntryThunk *)pUMEntryThunk);
         }
-        else
-        {
-#if defined(TARGET_X86)
-            Stub *pInterceptStub = GetInterceptStub();
-            if (pInterceptStub != NULL)
-            {
-                // There may be multiple chained stubs
-                pInterceptStub->DecRef();
-            }
-#else // TARGET_X86
-            // Intercept stubs are currently not used on other platforms.
-            _ASSERTE(GetInterceptStub() == NULL);
-#endif // TARGET_X86
-        }
     }
-    m_pUMEntryThunkOrInterceptStub = NULL;
+    m_pUMEntryThunk = NULL;
 }
 
 #ifdef FEATURE_COMINTEROP
@@ -726,14 +712,14 @@ void    SyncBlockCache::InsertCleanupSyncBlock(SyncBlock* psb)
             continue;
     }
 
-#ifdef FEATURE_COMINTEROP
+#if defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)
     if (psb->m_pInteropInfo)
     {
         // called during GC
         // so do only minorcleanup
         MinorCleanupSyncBlockComData(psb->m_pInteropInfo);
     }
-#endif // FEATURE_COMINTEROP
+#endif // FEATURE_COMINTEROP || FEATURE_COMWRAPPERS
 
     // This method will be called only by the GC thread
     //<TODO>@todo add an assert for the above statement</TODO>
@@ -854,7 +840,7 @@ void SyncBlockCache::Grow()
 
     if (!(newSyncTableSize > m_SyncTableSize)) // Make sure we actually found room to grow!
     {
-        COMPlusThrowOM();
+        EX_THROW(EEMessageException, (kOutOfMemoryException, IDS_EE_OUT_OF_SYNCBLOCKS));
     }
 
     newSyncTable = new SyncTableEntry[newSyncTableSize];
@@ -988,9 +974,9 @@ void SyncBlockCache::DeleteSyncBlock(SyncBlock *psb)
     // clean up comdata
     if (psb->m_pInteropInfo)
     {
-#ifdef FEATURE_COMINTEROP
+#if defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)
         CleanupSyncBlockComData(psb->m_pInteropInfo);
-#endif // FEATURE_COMINTEROP
+#endif // FEATURE_COMINTEROP || FEATURE_COMWRAPPERS
 
 #ifndef TARGET_UNIX
         if (g_fEEShutDown)
@@ -1706,7 +1692,7 @@ BOOL ObjHeader::LeaveObjMonitor()
 
     for (;;)
     {
-        AwareLock::LeaveHelperAction action = thisObj->GetHeader ()->LeaveObjMonitorHelper(GetThread());
+        AwareLock::LeaveHelperAction action = thisObj->GetHeader()->LeaveObjMonitorHelper(GetThread());
 
         switch(action)
         {
@@ -1937,7 +1923,7 @@ DEBUG_NOINLINE void ObjHeader::EnterSpinLock()
             __SwitchToThread(0, ++dwSwitchCount);
     }
 
-    INCONTRACT(Thread* pThread = GetThread());
+    INCONTRACT(Thread* pThread = GetThreadNULLOk());
     INCONTRACT(if (pThread != NULL) pThread->BeginNoTriggerGC(__FILE__, __LINE__));
 }
 #else
@@ -1973,7 +1959,7 @@ DEBUG_NOINLINE void ObjHeader::EnterSpinLock()
         __SwitchToThread(0, ++dwSwitchCount);
     }
 
-    INCONTRACT(Thread* pThread = GetThread());
+    INCONTRACT(Thread* pThread = GetThreadNULLOk());
     INCONTRACT(if (pThread != NULL) pThread->BeginNoTriggerGC(__FILE__, __LINE__));
 }
 #endif //MP_LOCKS
@@ -1983,7 +1969,7 @@ DEBUG_NOINLINE void ObjHeader::ReleaseSpinLock()
     SCAN_SCOPE_END;
     LIMITED_METHOD_CONTRACT;
 
-    INCONTRACT(Thread* pThread = GetThread());
+    INCONTRACT(Thread* pThread = GetThreadNULLOk());
     INCONTRACT(if (pThread != NULL) pThread->EndNoTriggerGC());
 
     FastInterlockAnd(&m_SyncBlockValue, ~BIT_SBLK_SPIN_LOCK);
@@ -2254,7 +2240,7 @@ SyncBlock *ObjHeader::GetSyncBlock()
     RETURN syncBlock;
 }
 
-BOOL ObjHeader::Wait(INT32 timeOut, BOOL exitContext)
+BOOL ObjHeader::Wait(INT32 timeOut)
 {
     CONTRACTL
     {
@@ -2277,7 +2263,7 @@ BOOL ObjHeader::Wait(INT32 timeOut, BOOL exitContext)
     if (!pSB->DoesCurrentThreadOwnMonitor())
         COMPlusThrow(kSynchronizationLockException);
 
-    return pSB->Wait(timeOut,exitContext);
+    return pSB->Wait(timeOut);
 }
 
 void ObjHeader::Pulse()
@@ -2789,7 +2775,7 @@ BOOL AwareLock::OwnedByCurrentThread()
 //    When we pulse a thread, we find the event from this queue to set, and we also
 //    or in a 1 bit in the syncblock value saved in the queue, so that we can return
 //    immediately from SyncBlock::Wait if the syncblock has been pulsed.
-BOOL SyncBlock::Wait(INT32 timeOut, BOOL exitContext)
+BOOL SyncBlock::Wait(INT32 timeOut)
 {
     CONTRACTL
     {
@@ -2966,5 +2952,4 @@ void ObjHeader::IllegalAlignPad()
     _ASSERTE(m_alignpad == 0);
 }
 #endif // HOST_64BIT && _DEBUG
-
 

@@ -17,12 +17,6 @@ using MdToken = System.Reflection.MetadataToken;
 
 namespace System
 {
-    // this is a work around to get the concept of a calli. It's not as fast but it would be interesting to
-    // see how it compares to the current implementation.
-    // This delegate will disappear at some point in favor of calli
-
-    internal delegate void CtorDelegate(object instance);
-
     // Keep this in sync with FormatFlags defined in typestring.h
     internal enum TypeNameFormatFlags
     {
@@ -140,7 +134,7 @@ namespace System
             }
         }
 
-        internal class RuntimeTypeCache
+        internal sealed class RuntimeTypeCache
         {
             private const int MAXNAMELEN = 1024;
 
@@ -209,7 +203,7 @@ namespace System
                 }
             }
 
-            private class MemberInfoCache<T> where T : MemberInfo
+            private sealed class MemberInfoCache<T> where T : MemberInfo
             {
                 #region Private Data Members
 
@@ -809,6 +803,10 @@ namespace System
                     return list.ToArray();
                 }
 
+                [UnconditionalSuppressMessage ("ReflectionAnalysis", "IL2075:UnrecognizedReflectionPattern",
+                    Justification = "Calls to GetInterfaces technically require all interfaces on ReflectedType" +
+                        "But this is not a public API to enumerate reflection items, all the public APIs which do that" +
+                        "should be annotated accordingly.")]
                 private RuntimeFieldInfo[] PopulateFields(Filter filter)
                 {
                     ListBuilder<RuntimeFieldInfo> list = default;
@@ -989,7 +987,11 @@ namespace System
                     }
                 }
 
-                private void AddSpecialInterface(ref ListBuilder<RuntimeType> list, Filter filter, RuntimeType iList, bool addSubInterface)
+                private void AddSpecialInterface(
+                    ref ListBuilder<RuntimeType> list,
+                    Filter filter,
+                    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)] RuntimeType iList,
+                    bool addSubInterface)
                 {
                     if (iList.IsAssignableFrom(ReflectedType))
                     {
@@ -1009,6 +1011,10 @@ namespace System
                     }
                 }
 
+                [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2065:UnrecognizedReflectionPattern",
+                    Justification = "Calls to GetInterfaces technically require all interfaces on ReflectedType" +
+                        "But this is not a public API to enumerate reflection items, all the public APIs which do that" +
+                        "should be annotated accordingly.")]
                 private RuntimeType[] PopulateInterfaces(Filter filter)
                 {
                     ListBuilder<RuntimeType> list = default;
@@ -1083,6 +1089,10 @@ namespace System
                     return list.ToArray();
                 }
 
+                [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2026:UnrecognizedReflectionPattern",
+                    Justification = "Calls to ResolveTypeHandle technically require all types to be kept " +
+                        "But this is not a public API to enumerate reflection items, all the public APIs which do that " +
+                        "should be annotated accordingly.")]
                 private RuntimeType[] PopulateNestedClasses(Filter filter)
                 {
                     RuntimeType declaringType = ReflectedType;
@@ -1100,8 +1110,8 @@ namespace System
 
                     ListBuilder<RuntimeType> list = default;
 
-                    RuntimeModule moduleHandle = RuntimeTypeHandle.GetModule(declaringType);
-                    MetadataImport scope = ModuleHandle.GetMetadataImport(moduleHandle);
+                    ModuleHandle moduleHandle = new ModuleHandle(RuntimeTypeHandle.GetModule(declaringType));
+                    MetadataImport scope = ModuleHandle.GetMetadataImport(moduleHandle.GetRuntimeModule());
 
                     scope.EnumNestedTypes(tkEnclosingType, out MetadataEnumResult tkNestedClasses);
 
@@ -1111,7 +1121,7 @@ namespace System
 
                         try
                         {
-                            nestedType = ModuleHandle.ResolveTypeHandleInternal(moduleHandle, tkNestedClasses[i], null, null);
+                            nestedType = moduleHandle.ResolveTypeHandle(tkNestedClasses[i]).GetRuntimeType();
                         }
                         catch (System.TypeLoadException)
                         {
@@ -1727,9 +1737,10 @@ namespace System
                 typeName, throwOnError, ignoreCase, ref stackMark);
         }
 
+        [RequiresUnreferencedCode("Trimming changes metadata tokens")]
         internal static MethodBase? GetMethodBase(RuntimeModule scope, int typeMetadataToken)
         {
-            return GetMethodBase(ModuleHandle.ResolveMethodHandleInternal(scope, typeMetadataToken));
+            return GetMethodBase(new ModuleHandle(scope).ResolveMethodHandle(typeMetadataToken).GetMethodInfo());
         }
 
         internal static MethodBase? GetMethodBase(IRuntimeMethodInfo methodHandle)
@@ -1744,6 +1755,9 @@ namespace System
             return retval;
         }
 
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2070:UnrecognizedReflectionPattern",
+            Justification = "The code in this method looks up the method by name, but it always starts with a method handle." +
+                            "To get here something somwhere had to get the method handle and thus the method must exist.")]
         internal static MethodBase? GetMethodBase(RuntimeType? reflectedType, RuntimeMethodHandleInternal methodHandle)
         {
             Debug.Assert(!methodHandle.IsNullHandle());
@@ -1938,47 +1952,22 @@ namespace System
             throw new SystemException();
         }
 
-        private static void ThrowIfTypeNeverValidGenericArgument(RuntimeType type)
-        {
-            if (type.IsPointer || type.IsByRef || type == typeof(void))
-                throw new ArgumentException(
-                    SR.Format(SR.Argument_NeverValidGenericArgument, type));
-        }
-
-        internal static void SanityCheckGenericArguments(RuntimeType[] genericArguments, RuntimeType[] genericParamters)
-        {
-            if (genericArguments == null)
-                throw new ArgumentNullException();
-
-            for (int i = 0; i < genericArguments.Length; i++)
-            {
-                if (genericArguments[i] == null)
-                    throw new ArgumentNullException();
-
-                ThrowIfTypeNeverValidGenericArgument(genericArguments[i]);
-            }
-
-            if (genericArguments.Length != genericParamters.Length)
-                throw new ArgumentException(
-                    SR.Format(SR.Argument_NotEnoughGenArguments, genericArguments.Length, genericParamters.Length));
-        }
-
         internal static void ValidateGenericArguments(MemberInfo definition, RuntimeType[] genericArguments, Exception? e)
         {
             RuntimeType[]? typeContext = null;
             RuntimeType[]? methodContext = null;
-            RuntimeType[] genericParamters;
+            RuntimeType[] genericParameters;
 
             if (definition is Type)
             {
                 RuntimeType genericTypeDefinition = (RuntimeType)definition;
-                genericParamters = genericTypeDefinition.GetGenericArgumentsInternal();
+                genericParameters = genericTypeDefinition.GetGenericArgumentsInternal();
                 typeContext = genericArguments;
             }
             else
             {
                 RuntimeMethodInfo genericMethodDefinition = (RuntimeMethodInfo)definition;
-                genericParamters = genericMethodDefinition.GetGenericArgumentsInternal();
+                genericParameters = genericMethodDefinition.GetGenericArgumentsInternal();
                 methodContext = genericArguments;
 
                 RuntimeType? declaringType = (RuntimeType?)genericMethodDefinition.DeclaringType;
@@ -1991,7 +1980,7 @@ namespace System
             for (int i = 0; i < genericArguments.Length; i++)
             {
                 Type genericArgument = genericArguments[i];
-                Type genericParameter = genericParamters[i];
+                Type genericParameter = genericParameters[i];
 
                 if (!RuntimeTypeHandle.SatisfiesConstraints(genericParameter.GetTypeHandleInternal().GetTypeChecked(),
                     typeContext, methodContext, genericArgument.GetTypeHandleInternal().GetTypeChecked()))
@@ -2203,7 +2192,7 @@ namespace System
         private static bool FilterApplyType(
             Type type, BindingFlags bindingFlags, string name, bool prefixLookup, string? ns)
         {
-            Debug.Assert((object)type != null);
+            Debug.Assert(type is not null);
             Debug.Assert(type is RuntimeType);
 
             bool isPublic = type.IsNestedPublic || type.IsPublic;
@@ -2341,7 +2330,7 @@ namespace System
                             for (int i = 0; i < parameterInfos.Length; i++)
                             {
                                 // a null argument type implies a null arg which is always a perfect match
-                                if ((object)argumentTypes[i] != null && !argumentTypes[i].MatchesParameterTypeExactly(parameterInfos[i]))
+                                if (argumentTypes[i] is Type t && !t.MatchesParameterTypeExactly(parameterInfos[i]))
                                     return false;
                             }
                         }
@@ -2444,6 +2433,18 @@ namespace System
 
             Debug.Assert(cache != null);
             return cache;
+        }
+
+        internal void ClearCache()
+        {
+            // If there isn't a GCHandle yet, there's nothing more to do.
+            if (Volatile.Read(ref m_cache) == IntPtr.Zero)
+            {
+                return;
+            }
+
+            // Set the GCHandle to null. The cache will be re-created next time it is needed.
+            GCHandle.InternalSet(m_cache, null);
         }
 
         private string? GetDefaultMemberName()
@@ -2627,6 +2628,7 @@ namespace System
             return GetFieldCandidates(null, bindingAttr, false).ToArray();
         }
 
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
         public override Type[] GetInterfaces()
         {
             RuntimeType[] candidates = Cache.GetInterfaceList(MemberListType.All, null);
@@ -2639,7 +2641,7 @@ namespace System
             return GetNestedTypeCandidates(null, bindingAttr, false).ToArray();
         }
 
-        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
+        [DynamicallyAccessedMembers(GetAllMembers)]
         public override MemberInfo[] GetMembers(BindingFlags bindingAttr)
         {
             ListBuilder<MethodInfo> methods = GetMethodCandidates(null, GenericParameterCountAny, bindingAttr, CallingConventions.Any, null, false);
@@ -2670,7 +2672,7 @@ namespace System
             return members;
         }
 
-        public override InterfaceMapping GetInterfaceMap(Type ifaceType)
+        public override InterfaceMapping GetInterfaceMap([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type ifaceType)
         {
             if (IsGenericParameter)
                 throw new InvalidOperationException(SR.Arg_GenericParameter);
@@ -2694,15 +2696,15 @@ namespace System
             if (IsSZArray && ifaceType.IsGenericType)
                 throw new ArgumentException(SR.Argument_ArrayGetInterfaceMap);
 
-            int ifaceInstanceMethodCount = RuntimeTypeHandle.GetNumVirtuals(ifaceRtType);
+            int ifaceVirtualMethodCount = RuntimeTypeHandle.GetNumVirtualsAndStaticVirtuals(ifaceRtType);
 
             InterfaceMapping im;
             im.InterfaceType = ifaceType;
             im.TargetType = this;
-            im.InterfaceMethods = new MethodInfo[ifaceInstanceMethodCount];
-            im.TargetMethods = new MethodInfo[ifaceInstanceMethodCount];
+            im.InterfaceMethods = new MethodInfo[ifaceVirtualMethodCount];
+            im.TargetMethods = new MethodInfo[ifaceVirtualMethodCount];
 
-            for (int i = 0; i < ifaceInstanceMethodCount; i++)
+            for (int i = 0; i < ifaceVirtualMethodCount; i++)
             {
                 RuntimeMethodHandleInternal ifaceRtMethodHandle = RuntimeTypeHandle.GetMethodAt(ifaceRtType, i);
 
@@ -2834,7 +2836,7 @@ namespace System
                 {
                     PropertyInfo firstCandidate = candidates[0];
 
-                    if ((object?)returnType != null && !returnType.IsEquivalentTo(firstCandidate.PropertyType))
+                    if (returnType is not null && !returnType.IsEquivalentTo(firstCandidate.PropertyType))
                         return null;
 
                     return firstCandidate;
@@ -2919,6 +2921,8 @@ namespace System
             return match;
         }
 
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
+        [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
         public override Type? GetInterface(string fullname, bool ignoreCase)
         {
             if (fullname is null) throw new ArgumentNullException(nameof(fullname));
@@ -2982,7 +2986,7 @@ namespace System
             return match;
         }
 
-        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
+        [DynamicallyAccessedMembers(GetAllMembers)]
         public override MemberInfo[] GetMember(string name, MemberTypes type, BindingFlags bindingAttr)
         {
             if (name is null) throw new ArgumentNullException(nameof(name));
@@ -3063,6 +3067,131 @@ namespace System
             Debug.Assert(i == compressMembers.Length);
 
             return compressMembers;
+        }
+
+        public override MemberInfo GetMemberWithSameMetadataDefinitionAs(MemberInfo member)
+        {
+            if (member is null) throw new ArgumentNullException(nameof(member));
+
+            RuntimeType? runtimeType = this;
+            while (runtimeType != null)
+            {
+                MemberInfo? result = member.MemberType switch
+                {
+                    MemberTypes.Method => GetMethodWithSameMetadataDefinitionAs(runtimeType, member),
+                    MemberTypes.Constructor => GetConstructorWithSameMetadataDefinitionAs(runtimeType, member),
+                    MemberTypes.Property => GetPropertyWithSameMetadataDefinitionAs(runtimeType, member),
+                    MemberTypes.Field => GetFieldWithSameMetadataDefinitionAs(runtimeType, member),
+                    MemberTypes.Event => GetEventWithSameMetadataDefinitionAs(runtimeType, member),
+                    MemberTypes.NestedType => GetNestedTypeWithSameMetadataDefinitionAs(runtimeType, member),
+                    _ => null
+                };
+
+                if (result != null)
+                {
+                    return result;
+                }
+
+                runtimeType = runtimeType.GetBaseType();
+            }
+
+            throw CreateGetMemberWithSameMetadataDefinitionAsNotFoundException(member);
+        }
+
+        private static MemberInfo? GetMethodWithSameMetadataDefinitionAs(RuntimeType runtimeType, MemberInfo method)
+        {
+            RuntimeMethodInfo[] cache = runtimeType.Cache.GetMethodList(MemberListType.CaseSensitive, method.Name);
+
+            for (int i = 0; i < cache.Length; i++)
+            {
+                RuntimeMethodInfo candidate = cache[i];
+                if (candidate.HasSameMetadataDefinitionAs(method))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static MemberInfo? GetConstructorWithSameMetadataDefinitionAs(RuntimeType runtimeType, MemberInfo constructor)
+        {
+            RuntimeConstructorInfo[] cache = runtimeType.Cache.GetConstructorList(MemberListType.CaseSensitive, constructor.Name);
+
+            for (int i = 0; i < cache.Length; i++)
+            {
+                RuntimeConstructorInfo candidate = cache[i];
+                if (candidate.HasSameMetadataDefinitionAs(constructor))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static MemberInfo? GetPropertyWithSameMetadataDefinitionAs(RuntimeType runtimeType, MemberInfo property)
+        {
+            RuntimePropertyInfo[] cache = runtimeType.Cache.GetPropertyList(MemberListType.CaseSensitive, property.Name);
+
+            for (int i = 0; i < cache.Length; i++)
+            {
+                RuntimePropertyInfo candidate = cache[i];
+                if (candidate.HasSameMetadataDefinitionAs(property))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static MemberInfo? GetFieldWithSameMetadataDefinitionAs(RuntimeType runtimeType, MemberInfo field)
+        {
+            RuntimeFieldInfo[] cache = runtimeType.Cache.GetFieldList(MemberListType.CaseSensitive, field.Name);
+
+            for (int i = 0; i < cache.Length; i++)
+            {
+                RuntimeFieldInfo candidate = cache[i];
+                if (candidate.HasSameMetadataDefinitionAs(field))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static MemberInfo? GetEventWithSameMetadataDefinitionAs(RuntimeType runtimeType, MemberInfo eventInfo)
+        {
+            RuntimeEventInfo[] cache = runtimeType.Cache.GetEventList(MemberListType.CaseSensitive, eventInfo.Name);
+
+            for (int i = 0; i < cache.Length; i++)
+            {
+                RuntimeEventInfo candidate = cache[i];
+                if (candidate.HasSameMetadataDefinitionAs(eventInfo))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private static MemberInfo? GetNestedTypeWithSameMetadataDefinitionAs(RuntimeType runtimeType, MemberInfo nestedType)
+        {
+            RuntimeType[] cache = runtimeType.Cache.GetNestedTypeList(MemberListType.CaseSensitive, nestedType.Name);
+
+            for (int i = 0; i < cache.Length; i++)
+            {
+                RuntimeType candidate = cache[i];
+                if (candidate.HasSameMetadataDefinitionAs(nestedType))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
         }
         #endregion
 
@@ -3227,22 +3356,37 @@ namespace System
         public override Type[] GetGenericArguments()
         {
             Type[] types = GetRootElementType().GetTypeHandleInternal().GetInstantiationPublic();
-            return types ?? Array.Empty<Type>();
+            return types ?? Type.EmptyTypes;
         }
 
+        [RequiresUnreferencedCode("If some of the generic arguments are annotated (either with DynamicallyAccessedMembersAttribute, or generic constraints), trimming can't validate that the requirements of those annotations are met.")]
         public override Type MakeGenericType(Type[] instantiation)
         {
             if (instantiation == null)
                 throw new ArgumentNullException(nameof(instantiation));
 
-            RuntimeType[] instantiationRuntimeType = new RuntimeType[instantiation.Length];
-
             if (!IsGenericTypeDefinition)
-                throw new InvalidOperationException(
-                    SR.Format(SR.Arg_NotGenericTypeDefinition, this));
+                throw new InvalidOperationException(SR.Format(SR.Arg_NotGenericTypeDefinition, this));
 
-            if (GetGenericArguments().Length != instantiation.Length)
+            RuntimeType[] genericParameters = GetGenericArgumentsInternal();
+            if (genericParameters.Length != instantiation.Length)
                 throw new ArgumentException(SR.Argument_GenericArgsCount, nameof(instantiation));
+
+            if (instantiation.Length == 1 && instantiation[0] is RuntimeType rt)
+            {
+                ThrowIfTypeNeverValidGenericArgument(rt);
+                try
+                {
+                    return new RuntimeTypeHandle(this).Instantiate(rt);
+                }
+                catch (TypeLoadException e)
+                {
+                    ValidateGenericArguments(this, new[] { rt }, e);
+                    throw;
+                }
+            }
+
+            RuntimeType[] instantiationRuntimeType = new RuntimeType[instantiation.Length];
 
             bool foundSigType = false;
             bool foundNonRuntimeType = false;
@@ -3273,8 +3417,6 @@ namespace System
 
                 return System.Reflection.Emit.TypeBuilderInstantiation.MakeGenericType(this, (Type[])(instantiation.Clone()));
             }
-
-            RuntimeType[] genericParameters = GetGenericArgumentsInternal();
 
             SanityCheckGenericArguments(instantiationRuntimeType, genericParameters);
 
@@ -3312,7 +3454,7 @@ namespace System
                 throw new InvalidOperationException(SR.Arg_NotGenericParameter);
 
             Type[] constraints = new RuntimeTypeHandle(this).GetConstraints();
-            return constraints ?? Array.Empty<Type>();
+            return constraints ?? Type.EmptyTypes;
         }
         #endregion
 
@@ -3339,12 +3481,6 @@ namespace System
 
         #region Invoke Member
 
-        private const BindingFlags MemberBindingMask = (BindingFlags)0x000000FF;
-        private const BindingFlags InvocationMask = (BindingFlags)0x0000FF00;
-        private const BindingFlags BinderNonCreateInstance = BindingFlags.InvokeMethod | BinderGetSetField | BinderGetSetProperty;
-        private const BindingFlags BinderGetSetProperty = BindingFlags.GetProperty | BindingFlags.SetProperty;
-        private const BindingFlags BinderGetSetField = BindingFlags.GetField | BindingFlags.SetField;
-        private const BindingFlags BinderNonFieldGetSet = (BindingFlags)0x00FFF300;
         private static readonly RuntimeType s_typedRef = (RuntimeType)typeof(TypedReference);
 
         [MethodImpl(MethodImplOptions.InternalCall)]
@@ -3460,373 +3596,6 @@ namespace System
             throw new ArgumentException(SR.Format(SR.Arg_ObjObjEx, value.GetType(), this));
         }
 
-        [DebuggerStepThrough]
-        [DebuggerHidden]
-        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
-        public override object? InvokeMember(
-            string name, BindingFlags bindingFlags, Binder? binder, object? target,
-            object?[]? providedArgs, ParameterModifier[]? modifiers, CultureInfo? culture, string[]? namedParams)
-        {
-            if (IsGenericParameter)
-                throw new InvalidOperationException(SR.Arg_GenericParameter);
-
-            if ((bindingFlags & InvocationMask) == 0)
-                // "Must specify binding flags describing the invoke operation required."
-                throw new ArgumentException(SR.Arg_NoAccessSpec, nameof(bindingFlags));
-
-            // Provide a default binding mask if none is provided
-            if ((bindingFlags & MemberBindingMask) == 0)
-            {
-                bindingFlags |= BindingFlags.Instance | BindingFlags.Public;
-
-                if ((bindingFlags & BindingFlags.CreateInstance) == 0)
-                    bindingFlags |= BindingFlags.Static;
-            }
-
-            // There must not be more named parameters than provided arguments
-            if (namedParams != null)
-            {
-                if (providedArgs != null)
-                {
-                    if (namedParams.Length > providedArgs.Length)
-                        throw new ArgumentException(SR.Arg_NamedParamTooBig, nameof(namedParams));
-                }
-                else
-                {
-                    if (namedParams.Length != 0)
-                        throw new ArgumentException(SR.Arg_NamedParamTooBig, nameof(namedParams));
-                }
-            }
-
-#if FEATURE_COMINTEROP
-            if (target != null && target.GetType().IsCOMObject)
-            {
-                const BindingFlags ClassicBindingMask =
-                    BindingFlags.InvokeMethod | BindingFlags.GetProperty | BindingFlags.SetProperty |
-                    BindingFlags.PutDispProperty | BindingFlags.PutRefDispProperty;
-
-                if ((bindingFlags & ClassicBindingMask) == 0)
-                    throw new ArgumentException(SR.Arg_COMAccess, nameof(bindingFlags));
-
-                if ((bindingFlags & BindingFlags.GetProperty) != 0 && (bindingFlags & ClassicBindingMask & ~(BindingFlags.GetProperty | BindingFlags.InvokeMethod)) != 0)
-                    throw new ArgumentException(SR.Arg_PropSetGet, nameof(bindingFlags));
-
-                if ((bindingFlags & BindingFlags.InvokeMethod) != 0 && (bindingFlags & ClassicBindingMask & ~(BindingFlags.GetProperty | BindingFlags.InvokeMethod)) != 0)
-                    throw new ArgumentException(SR.Arg_PropSetInvoke, nameof(bindingFlags));
-
-                if ((bindingFlags & BindingFlags.SetProperty) != 0 && (bindingFlags & ClassicBindingMask & ~BindingFlags.SetProperty) != 0)
-                    throw new ArgumentException(SR.Arg_COMPropSetPut, nameof(bindingFlags));
-
-                if ((bindingFlags & BindingFlags.PutDispProperty) != 0 && (bindingFlags & ClassicBindingMask & ~BindingFlags.PutDispProperty) != 0)
-                    throw new ArgumentException(SR.Arg_COMPropSetPut, nameof(bindingFlags));
-
-                if ((bindingFlags & BindingFlags.PutRefDispProperty) != 0 && (bindingFlags & ClassicBindingMask & ~BindingFlags.PutRefDispProperty) != 0)
-                    throw new ArgumentException(SR.Arg_COMPropSetPut, nameof(bindingFlags));
-
-                if (name == null)
-                    throw new ArgumentNullException(nameof(name));
-
-                bool[]? isByRef = modifiers?[0].IsByRefArray;
-
-                // pass LCID_ENGLISH_US if no explicit culture is specified to match the behavior of VB
-                int lcid = (culture == null ? 0x0409 : culture.LCID);
-
-                // If a request to not wrap exceptions was made, we will unwrap
-                // the TargetInvocationException since that is what will be thrown.
-                bool unwrapExceptions = (bindingFlags & BindingFlags.DoNotWrapExceptions) != 0;
-                try
-                {
-                    return InvokeDispMethod(name, bindingFlags, target, providedArgs, isByRef, lcid, namedParams);
-                }
-                catch (TargetInvocationException e) when (unwrapExceptions)
-                {
-                    // For target invocation exceptions, we need to unwrap the inner exception and
-                    // re-throw it.
-                    throw e.InnerException!;
-                }
-            }
-#endif // FEATURE_COMINTEROP
-
-            if (namedParams != null && Array.IndexOf(namedParams, null!) != -1)
-                throw new ArgumentException(SR.Arg_NamedParamNull, nameof(namedParams));
-
-            int argCnt = (providedArgs != null) ? providedArgs.Length : 0;
-
-            binder ??= DefaultBinder;
-
-            // Delegate to Activator.CreateInstance
-            if ((bindingFlags & BindingFlags.CreateInstance) != 0)
-            {
-                if ((bindingFlags & BindingFlags.CreateInstance) != 0 && (bindingFlags & BinderNonCreateInstance) != 0)
-                    // "Can not specify both CreateInstance and another access type."
-                    throw new ArgumentException(SR.Arg_CreatInstAccess, nameof(bindingFlags));
-
-                return Activator.CreateInstance(this, bindingFlags, binder, providedArgs, culture);
-            }
-
-            // PutDispProperty and\or PutRefDispProperty ==> SetProperty.
-            if ((bindingFlags & (BindingFlags.PutDispProperty | BindingFlags.PutRefDispProperty)) != 0)
-                bindingFlags |= BindingFlags.SetProperty;
-
-            if (name == null)
-                throw new ArgumentNullException(nameof(name));
-
-            if (name.Length == 0 || name.Equals("[DISPID=0]"))
-            {
-                // in InvokeMember we always pretend there is a default member if none is provided and we make it ToString
-                name = GetDefaultMemberName()! ?? "ToString";
-            }
-
-            // GetField or SetField
-            bool IsGetField = (bindingFlags & BindingFlags.GetField) != 0;
-            bool IsSetField = (bindingFlags & BindingFlags.SetField) != 0;
-
-            if (IsGetField || IsSetField)
-            {
-                if (IsGetField)
-                {
-                    if (IsSetField)
-                        throw new ArgumentException(SR.Arg_FldSetGet, nameof(bindingFlags));
-
-                    if ((bindingFlags & BindingFlags.SetProperty) != 0)
-                        throw new ArgumentException(SR.Arg_FldGetPropSet, nameof(bindingFlags));
-                }
-                else
-                {
-                    Debug.Assert(IsSetField);
-
-                    if (providedArgs == null)
-                        throw new ArgumentNullException(nameof(providedArgs));
-
-                    if ((bindingFlags & BindingFlags.GetProperty) != 0)
-                        throw new ArgumentException(SR.Arg_FldSetPropGet, nameof(bindingFlags));
-
-                    if ((bindingFlags & BindingFlags.InvokeMethod) != 0)
-                        throw new ArgumentException(SR.Arg_FldSetInvoke, nameof(bindingFlags));
-                }
-
-                // Lookup Field
-                FieldInfo? selFld = null;
-                FieldInfo[]? flds = GetMember(name, MemberTypes.Field, bindingFlags) as FieldInfo[];
-
-                Debug.Assert(flds != null);
-
-                if (flds.Length == 1)
-                {
-                    selFld = flds[0];
-                }
-                else if (flds.Length > 0)
-                {
-                    selFld = binder.BindToField(bindingFlags, flds, IsGetField ? Empty.Value : providedArgs![0]!, culture);
-                }
-
-                if (selFld != null)
-                {
-                    // Invocation on a field
-                    if (selFld.FieldType.IsArray || ReferenceEquals(selFld.FieldType, typeof(Array)))
-                    {
-                        // Invocation of an array Field
-                        int idxCnt;
-                        if ((bindingFlags & BindingFlags.GetField) != 0)
-                        {
-                            idxCnt = argCnt;
-                        }
-                        else
-                        {
-                            idxCnt = argCnt - 1;
-                        }
-
-                        if (idxCnt > 0)
-                        {
-                            // Verify that all of the index values are ints
-                            int[] idx = new int[idxCnt];
-                            for (int i = 0; i < idxCnt; i++)
-                            {
-                                try
-                                {
-                                    idx[i] = ((IConvertible)providedArgs![i]!).ToInt32(null);
-                                }
-                                catch (InvalidCastException)
-                                {
-                                    throw new ArgumentException(SR.Arg_IndexMustBeInt);
-                                }
-                            }
-
-                            // Set or get the value...
-                            Array a = (Array)selFld.GetValue(target)!;
-
-                            // Set or get the value in the array
-                            if ((bindingFlags & BindingFlags.GetField) != 0)
-                            {
-                                return a.GetValue(idx);
-                            }
-                            else
-                            {
-                                a.SetValue(providedArgs![idxCnt], idx);
-                                return null;
-                            }
-                        }
-                    }
-
-                    if (IsGetField)
-                    {
-                        if (argCnt != 0)
-                            throw new ArgumentException(SR.Arg_FldGetArgErr, nameof(bindingFlags));
-
-                        return selFld.GetValue(target);
-                    }
-                    else
-                    {
-                        if (argCnt != 1)
-                            throw new ArgumentException(SR.Arg_FldSetArgErr, nameof(bindingFlags));
-
-                        selFld.SetValue(target, providedArgs![0], bindingFlags, binder, culture);
-                        return null;
-                    }
-                }
-
-                if ((bindingFlags & BinderNonFieldGetSet) == 0)
-                    throw new MissingFieldException(FullName, name);
-            }
-
-            // @Legacy - This is RTM behavior
-            bool isGetProperty = (bindingFlags & BindingFlags.GetProperty) != 0;
-            bool isSetProperty = (bindingFlags & BindingFlags.SetProperty) != 0;
-
-            if (isGetProperty || isSetProperty)
-            {
-                if (isGetProperty)
-                {
-                    Debug.Assert(!IsSetField);
-
-                    if (isSetProperty)
-                        throw new ArgumentException(SR.Arg_PropSetGet, nameof(bindingFlags));
-                }
-                else
-                {
-                    Debug.Assert(isSetProperty);
-
-                    Debug.Assert(!IsGetField);
-
-                    if ((bindingFlags & BindingFlags.InvokeMethod) != 0)
-                        throw new ArgumentException(SR.Arg_PropSetInvoke, nameof(bindingFlags));
-                }
-            }
-
-            MethodInfo[]? finalists = null;
-            MethodInfo? finalist = null;
-
-            if ((bindingFlags & BindingFlags.InvokeMethod) != 0)
-            {
-                // Lookup Methods
-                MethodInfo[] semiFinalists = (GetMember(name, MemberTypes.Method, bindingFlags) as MethodInfo[])!;
-                List<MethodInfo>? results = null;
-
-                for (int i = 0; i < semiFinalists.Length; i++)
-                {
-                    MethodInfo semiFinalist = semiFinalists[i];
-                    Debug.Assert(semiFinalist != null);
-
-                    if (!FilterApplyMethodInfo((RuntimeMethodInfo)semiFinalist, bindingFlags, CallingConventions.Any, new Type[argCnt]))
-                        continue;
-
-                    if (finalist == null)
-                    {
-                        finalist = semiFinalist;
-                    }
-                    else
-                    {
-                        results ??= new List<MethodInfo>(semiFinalists.Length) { finalist };
-                        results.Add(semiFinalist);
-                    }
-                }
-
-                if (results != null)
-                {
-                    Debug.Assert(results.Count > 1);
-                    finalists = results.ToArray();
-                }
-            }
-
-            Debug.Assert(finalists == null || finalist != null);
-
-            // BindingFlags.GetProperty or BindingFlags.SetProperty
-            if (finalist == null && isGetProperty || isSetProperty)
-            {
-                // Lookup Property
-                PropertyInfo[] semiFinalists = (GetMember(name, MemberTypes.Property, bindingFlags) as PropertyInfo[])!;
-                List<MethodInfo>? results = null;
-
-                for (int i = 0; i < semiFinalists.Length; i++)
-                {
-                    MethodInfo? semiFinalist = null;
-
-                    if (isSetProperty)
-                    {
-                        semiFinalist = semiFinalists[i].GetSetMethod(true);
-                    }
-                    else
-                    {
-                        semiFinalist = semiFinalists[i].GetGetMethod(true);
-                    }
-
-                    if (semiFinalist == null)
-                        continue;
-
-                    if (!FilterApplyMethodInfo((RuntimeMethodInfo)semiFinalist, bindingFlags, CallingConventions.Any, new Type[argCnt]))
-                        continue;
-
-                    if (finalist == null)
-                    {
-                        finalist = semiFinalist;
-                    }
-                    else
-                    {
-                        results ??= new List<MethodInfo>(semiFinalists.Length) { finalist };
-                        results.Add(semiFinalist);
-                    }
-                }
-
-                if (results != null)
-                {
-                    Debug.Assert(results.Count > 1);
-                    finalists = results.ToArray();
-                }
-            }
-
-            if (finalist != null)
-            {
-                // Invoke
-                if (finalists == null &&
-                    argCnt == 0 &&
-                    finalist.GetParametersNoCopy().Length == 0 &&
-                    (bindingFlags & BindingFlags.OptionalParamBinding) == 0)
-                {
-                    return finalist.Invoke(target, bindingFlags, binder, providedArgs, culture);
-                }
-
-                finalists ??= new MethodInfo[] { finalist };
-                providedArgs ??= Array.Empty<object>();
-                object? state = null;
-                MethodBase? invokeMethod = null;
-
-                try { invokeMethod = binder.BindToMethod(bindingFlags, finalists, ref providedArgs!, modifiers, culture, namedParams, out state); }
-                catch (MissingMethodException) { }
-
-                if (invokeMethod == null)
-                    throw new MissingMethodException(FullName, name);
-
-                object? result = ((MethodInfo)invokeMethod).Invoke(target, bindingFlags, binder, providedArgs, culture);
-
-                if (state != null)
-                    binder.ReorderArgumentArray(ref providedArgs, state);
-
-                return result;
-            }
-
-            throw new MissingMethodException(FullName, name);
-        }
-
         #endregion
 
         #endregion
@@ -3886,7 +3655,7 @@ namespace System
             if (args.Length == 0 && (bindingAttr & BindingFlags.Public) != 0 && (bindingAttr & BindingFlags.Instance) != 0
                 && (IsGenericCOMObjectImpl() || IsValueType))
             {
-                instance = CreateInstanceDefaultCtor(publicOnly, skipCheckThis: false, fillCache: true, wrapExceptions);
+                instance = CreateInstanceDefaultCtor(publicOnly, wrapExceptions);
             }
             else
             {
@@ -3897,9 +3666,9 @@ namespace System
                 Type[] argsType = new Type[args.Length];
                 for (int i = 0; i < args.Length; i++)
                 {
-                    if (args[i] != null)
+                    if (args[i] is object arg)
                     {
-                        argsType[i] = args[i]!.GetType(); // TODO-NULLABLE: Indexer nullability tracked (https://github.com/dotnet/roslyn/issues/34644)
+                        argsType[i] = arg.GetType();
                     }
                 }
 
@@ -3953,113 +3722,71 @@ namespace System
             return instance;
         }
 
-        // the cache entry
-        private sealed class ActivatorCache
-        {
-            // the delegate containing the call to the ctor
-            internal readonly RuntimeMethodHandleInternal _hCtorMethodHandle;
-            internal MethodAttributes _ctorAttributes;
-            internal CtorDelegate? _ctor;
-
-            // Lazy initialization was performed
-            internal volatile bool _isFullyInitialized;
-
-            private static ConstructorInfo? s_delegateCtorInfo;
-
-            internal ActivatorCache(RuntimeMethodHandleInternal rmh)
-            {
-                _hCtorMethodHandle = rmh;
-            }
-
-            private void Initialize()
-            {
-                if (!_hCtorMethodHandle.IsNullHandle())
-                {
-                    _ctorAttributes = RuntimeMethodHandle.GetAttributes(_hCtorMethodHandle);
-
-                    // The default ctor path is optimized for reference types only
-                    ConstructorInfo delegateCtorInfo = s_delegateCtorInfo ??= typeof(CtorDelegate).GetConstructor(new Type[] { typeof(object), typeof(IntPtr) })!;
-
-                    // No synchronization needed here. In the worst case we create extra garbage
-                    _ctor = (CtorDelegate)delegateCtorInfo.Invoke(new object?[] { null, RuntimeMethodHandle.GetFunctionPointer(_hCtorMethodHandle) });
-                }
-                _isFullyInitialized = true;
-            }
-
-            public void EnsureInitialized()
-            {
-                if (!_isFullyInitialized)
-                    Initialize();
-            }
-        }
-
-        /// <summary>
-        /// The slow path of CreateInstanceDefaultCtor
-        /// </summary>
-        private object? CreateInstanceDefaultCtorSlow(bool publicOnly, bool wrapExceptions, bool fillCache)
-        {
-            RuntimeMethodHandleInternal runtimeCtor = default;
-            bool canBeCached = false;
-            bool hasNoDefaultCtor = false;
-
-            object instance = RuntimeTypeHandle.CreateInstance(this, publicOnly, wrapExceptions, ref canBeCached, ref runtimeCtor, ref hasNoDefaultCtor);
-            if (hasNoDefaultCtor)
-            {
-                throw new MissingMethodException(SR.Format(SR.Arg_NoDefCTor, this));
-            }
-
-            if (canBeCached && fillCache)
-            {
-                // cache the ctor
-                GenericCache = new ActivatorCache(runtimeCtor);
-            }
-
-            return instance;
-        }
-
         /// <summary>
         /// Helper to invoke the default (parameterless) constructor.
         /// </summary>
         [DebuggerStepThrough]
         [DebuggerHidden]
-        internal object? CreateInstanceDefaultCtor(bool publicOnly, bool skipCheckThis, bool fillCache, bool wrapExceptions)
+        internal object? CreateInstanceDefaultCtor(bool publicOnly, bool wrapExceptions)
         {
-            // Call the cached
-            if (GenericCache is ActivatorCache cacheEntry)
+            // Get or create the cached factory. Creating the cache will fail if one
+            // of our invariant checks fails; e.g., no appropriate ctor found.
+
+            if (GenericCache is not ActivatorCache cache)
             {
-                cacheEntry.EnsureInitialized();
-
-                if (publicOnly)
-                {
-                    if (cacheEntry._ctor != null &&
-                        (cacheEntry._ctorAttributes & MethodAttributes.MemberAccessMask) != MethodAttributes.Public)
-                    {
-                        throw new MissingMethodException(SR.Format(SR.Arg_NoDefCTor, this));
-                    }
-                }
-
-                // Allocate empty object and call the default constructor if present.
-                object instance = RuntimeTypeHandle.Allocate(this);
-                Debug.Assert(cacheEntry._ctor != null || IsValueType);
-                if (cacheEntry._ctor != null)
-                {
-                    try
-                    {
-                        cacheEntry._ctor(instance);
-                    }
-                    catch (Exception e) when (wrapExceptions)
-                    {
-                        throw new TargetInvocationException(e);
-                    }
-                }
-
-                return instance;
+                cache = new ActivatorCache(this);
+                GenericCache = cache;
             }
 
-            if (!skipCheckThis)
-                CreateInstanceCheckThis();
+            if (!cache.CtorIsPublic && publicOnly)
+            {
+                throw new MissingMethodException(SR.Format(SR.Arg_NoDefCTor, this));
+            }
 
-            return CreateInstanceDefaultCtorSlow(publicOnly, wrapExceptions, fillCache);
+            // Compat: allocation always takes place outside the try block so that OOMs
+            // bubble up to the caller; the ctor invocation is within the try block so
+            // that it can be wrapped in TIE if needed.
+
+            object? obj = cache.CreateUninitializedObject(this);
+            try
+            {
+                cache.CallConstructor(obj);
+            }
+            catch (Exception e) when (wrapExceptions)
+            {
+                throw new TargetInvocationException(e);
+            }
+
+            return obj;
+        }
+
+        // Specialized version of the above for Activator.CreateInstance<T>()
+        [DebuggerStepThrough]
+        [DebuggerHidden]
+        internal object? CreateInstanceOfT()
+        {
+            if (GenericCache is not ActivatorCache cache)
+            {
+                cache = new ActivatorCache(this);
+                GenericCache = cache;
+            }
+
+            if (!cache.CtorIsPublic)
+            {
+                throw new MissingMethodException(SR.Format(SR.Arg_NoDefCTor, this));
+            }
+
+            object? obj = cache.CreateUninitializedObject(this);
+            try
+            {
+                cache.CallConstructor(obj);
+            }
+            catch (Exception e)
+            {
+                throw new TargetInvocationException(e);
+            }
+
+            return obj;
         }
 
         internal void InvalidateCachedNestedType() => Cache.InvalidateCachedNestedType();
@@ -4085,27 +3812,10 @@ namespace System
             bool[]? byrefModifiers, int culture, string[]? namedParameters);
 #endif // FEATURE_COMINTEROP
 
-#if FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern Type? GetTypeFromProgIDImpl(string progID, string? server, bool throwOnError);
-
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern Type? GetTypeFromCLSIDImpl(Guid clsid, string? server, bool throwOnError);
-#else // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
-        internal static Type GetTypeFromProgIDImpl(string progID, string? server, bool throwOnError)
-        {
-            throw new NotImplementedException("CoreCLR_REMOVED -- Unmanaged activation removed");
-        }
-
-        internal static Type GetTypeFromCLSIDImpl(Guid clsid, string? server, bool throwOnError)
-        {
-            throw new NotImplementedException("CoreCLR_REMOVED -- Unmanaged activation removed");
-        }
-#endif // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
-
         #endregion
 
 #if FEATURE_COMINTEROP
+        [RequiresUnreferencedCode("The member might be removed")]
         private object? ForwardCallToInvokeMember(
             string memberName,
             BindingFlags flags,
@@ -4116,6 +3826,11 @@ namespace System
             Type[] aArgsTypes,
             Type retType)
         {
+            if (!Marshal.IsBuiltInComSupported)
+            {
+                throw new NotSupportedException(SR.NotSupported_COM);
+            }
+
             Debug.Assert(
                 aArgs.Length == aArgsIsByRef.Length
                 && aArgs.Length == aArgsTypes.Length
@@ -4252,6 +3967,7 @@ namespace System
                             aArgs[i] = new UnknownWrapper(aArgs[i]);
                             break;
                         case DispatchWrapperType.Dispatch:
+                            Debug.Assert(OperatingSystem.IsWindows());
                             aArgs[i] = new DispatchWrapper(aArgs[i]);
                             break;
                         case DispatchWrapperType.Error:
@@ -4367,7 +4083,7 @@ namespace System.Reflection
     // reliable in the presence of asynchronous exceptions.
     internal struct CerHashtable<K, V> where K : class
     {
-        private class Table
+        private sealed class Table
         {
             // Note that m_keys and m_values arrays are immutable to allow lock-free reads. A new instance
             // of CerHashtable has to be allocated to grow the size of the hashtable.

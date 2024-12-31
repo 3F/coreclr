@@ -19,6 +19,7 @@
 #include "daccess.h"
 #include "binder.h"
 #include "win32threadpool.h"
+#include "runtimeinfo.h"
 
 #ifdef FEATURE_COMWRAPPERS
 #include <interoplibinterface.h>
@@ -235,6 +236,34 @@ HRESULT ClrDataAccess::EnumMemCLRStatic(IN CLRDataEnumMemoryFlags flags)
                   sizeof(TADDR)*ECall::NUM_DYNAMICALLY_ASSIGNED_FCALL_IMPLEMENTATIONS);
 
         ReportMem(g_gcDacGlobals.GetAddr(), sizeof(GcDacVars));
+
+        PTR_WSTR entryAssemblyPath = (PTR_WSTR)g_EntryAssemblyPath;
+        entryAssemblyPath.EnumMem();
+
+        // Triage dumps must not include full paths (PII data). Replace entry assembly path with file name only.
+        if (flags == CLRDATA_ENUM_MEM_TRIAGE)
+        {
+            WCHAR* path = entryAssemblyPath;
+            if (path != NULL)
+            {
+                size_t pathLen = wcslen(path) + 1;
+
+                // Get the file name based on the last directory separator
+                const WCHAR* name = wcsrchr(path, DIRECTORY_SEPARATOR_CHAR_W);
+                if (name != NULL)
+                {
+                    name += 1;
+                    size_t len = wcslen(name) + 1;
+                    wcscpy_s(path, len, name);
+
+                    // Null out the rest of the buffer
+                    for (size_t i = len; i < pathLen; ++i)
+                        path[i] = W('\0');
+
+                    DacUpdateMemoryRegion(entryAssemblyPath.GetAddr(), pathLen, (BYTE*)path);
+                }
+            }
+        }
 
         // We need all of the dac variables referenced by the GC DAC global struct.
         // This struct contains pointers to pointers, so we first dereference the pointers
@@ -542,9 +571,12 @@ HRESULT ClrDataAccess::DumpManagedExcepObject(CLRDataEnumMemoryFlags flags, OBJE
             PCODE addr = pMD->GetNativeCode();
             if (addr != NULL)
             {
-                IJitManager::MethodRegionInfo methodRegionInfo = { NULL, 0, NULL, 0 };
                 EECodeInfo codeInfo(addr);
-                codeInfo.GetMethodRegionInfo(&methodRegionInfo);
+                if (codeInfo.IsValid())
+                {
+                    IJitManager::MethodRegionInfo methodRegionInfo = { NULL, 0, NULL, 0 };
+                    codeInfo.GetMethodRegionInfo(&methodRegionInfo);
+                }
             }
         }
 
@@ -1061,10 +1093,10 @@ HRESULT ClrDataAccess::EnumMemDumpAllThreadsStack(CLRDataEnumMemoryFlags flags)
 {
     SUPPORTS_DAC;
 
-#ifdef FEATURE_COMINTEROP
+#if (defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)) && !defined(TARGET_UNIX)
     // Dump the exception object stored in the WinRT stowed exception
     EnumMemStowedException(flags);
-#endif
+#endif // defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)
 
     HRESULT     status = S_OK;
     TSIZE_T     cbMemoryReported = m_cbMemoryReported;
@@ -1294,7 +1326,7 @@ HRESULT ClrDataAccess::EnumMemDumpAllThreadsStack(CLRDataEnumMemoryFlags flags)
 }
 
 
-#if defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)
+#if (defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)) && !defined(TARGET_UNIX)
 //++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 //
 // WinRT stowed exception holds the (CCW)pointer to a managed exception object.
@@ -1382,6 +1414,10 @@ HRESULT ClrDataAccess::EnumMemStowedException(CLRDataEnumMemoryFlags flags)
         return S_OK;
     }
 
+    // Make sure we include the whole stowed exception array so we can debug a stowed exception
+    // in a minidump
+    ReportMem(remoteStowedExceptionArray, stowedExceptionCount * sizeof(TADDR));
+
     for (ULONG i = 0; i < stowedExceptionCount; ++i)
     {
         // Read the i-th stowed exception
@@ -1394,8 +1430,10 @@ HRESULT ClrDataAccess::EnumMemStowedException(CLRDataEnumMemoryFlags flags)
             continue;
         }
 
+        ReportMem(remoteStowedException, sizeof(STOWED_EXCEPTION_INFORMATION_HEADER));
+
         // check if this is a v2 stowed exception
-        STOWED_EXCEPTION_INFORMATION_V2 stowedException = { 0 };
+        STOWED_EXCEPTION_INFORMATION_V2 stowedException = { {0} };
         if (FAILED(m_pTarget->ReadVirtual(TO_CDADDR(remoteStowedException),
             (PBYTE)&stowedException, sizeof(STOWED_EXCEPTION_INFORMATION_HEADER), &bytesRead))
             || bytesRead != sizeof(STOWED_EXCEPTION_INFORMATION_HEADER)
@@ -1403,6 +1441,8 @@ HRESULT ClrDataAccess::EnumMemStowedException(CLRDataEnumMemoryFlags flags)
         {
             continue;
         }
+
+        ReportMem(remoteStowedException, sizeof(STOWED_EXCEPTION_INFORMATION_V2));
 
         // Read the full v2 stowed exception and get the CCW pointer out of it
         if (FAILED(m_pTarget->ReadVirtual(TO_CDADDR(remoteStowedException),
@@ -1448,7 +1488,7 @@ HRESULT ClrDataAccess::DumpStowedExceptionObject(CLRDataEnumMemoryFlags flags, C
 
         // And the MOW it points to
         TADDR mow = DACGetManagedObjectWrapperFromCCW(ccwPtr);
-        ReportMem(mow, sizeof(ManagedObjectWrapperDACInterface));
+        ReportMem(mow, sizeof(InteropLib::ABI::ManagedObjectWrapperLayout));
     }
 #endif
 #ifdef FEATURE_COMINTEROP
@@ -1547,6 +1587,27 @@ HRESULT ClrDataAccess::EnumMemCLRMainModuleInfo()
         status = E_UNEXPECTED;
     }
 
+    if (pe.HasDirectoryEntry(IMAGE_DIRECTORY_ENTRY_EXPORT))
+    {
+        COUNT_T size = 0;
+        TADDR pExportTablesOffset = pe.GetDirectoryEntryData(IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
+
+        ReportMem(pExportTablesOffset, size, true);
+
+        PTR_VOID runtimeExport = pe.GetExport(RUNTIME_INFO_SIGNATURE);
+        const char *runtimeExportSignature = dac_cast<PTR_STR>(runtimeExport);
+        if (runtimeExport != NULL &&
+            strcmp(runtimeExportSignature, RUNTIME_INFO_SIGNATURE) == 0)
+        {
+            ReportMem(dac_cast<TADDR>(runtimeExport), sizeof(RuntimeInfo), true);
+        }
+    }
+    else
+    {
+        // We always expect (attach state, metrics and such on windows, and dac table on mac and linux).
+        return E_UNEXPECTED;
+    }
+
     return status;
 }
 
@@ -1591,6 +1652,7 @@ HRESULT ClrDataAccess::EnumMemoryRegionsWorkerSkinny(IN CLRDataEnumMemoryFlags f
     //
     // collect CLR static
     CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( status = EnumMemCLRStatic(flags); )
+    CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( status = EnumMemCLRHeapCrticalStatic(flags); );
 
     // Dump AppDomain-specific info needed for MiniDumpNormal.
     CATCH_ALL_EXCEPT_RETHROW_COR_E_OPERATIONCANCELLED( status = EnumMemDumpAppDomainInfo(flags); )

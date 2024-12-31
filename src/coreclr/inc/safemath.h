@@ -24,7 +24,7 @@
 // we can rely on that is available everywhere.  In
 // several other tools we just take the recourse of disabling asserts,
 // we'll do the same here.
-// Ideally we'd have a collection of common utilities available evererywhere.
+// Ideally we'd have a collection of common utilities available everywhere.
 #define _ASSERTE_SAFEMATH(a)
 #endif
 #endif
@@ -481,6 +481,9 @@ public:
     Which ought to inline nicely
 */
     // Returns true if safe, false for overflow.
+#if defined(_MSC_VER) && defined(HOST_ARM64) // Workaround for https://github.com/dotnet/runtime/issues/93442
+#pragma optimize("", off)
+#endif
     static bool multiply(T lhs, T rhs, T &result)
     {
         if(Is64Bit())
@@ -675,6 +678,9 @@ public:
             }
         }
     }
+#if defined(_MSC_VER) && defined(HOST_ARM64) // Workaround for https://github.com/dotnet/runtime/issues/93442
+#pragma optimize("", on)
+#endif
 
     // Returns true if safe, false on overflow
     static inline bool addition(T lhs, T rhs, T &result)

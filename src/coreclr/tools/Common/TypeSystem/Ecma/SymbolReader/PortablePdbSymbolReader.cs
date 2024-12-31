@@ -7,6 +7,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 
 using Internal.IL;
 
@@ -74,6 +75,21 @@ namespace Internal.TypeSystem.Ecma
             return new PortablePdbSymbolReader(reader, mappedViewAccessor);
         }
 
+        public static PdbSymbolReader TryOpenEmbedded(PEReader peReader, MetadataStringDecoder stringDecoder)
+        {
+            foreach (DebugDirectoryEntry debugEntry in peReader.ReadDebugDirectory())
+            {
+                if (debugEntry.Type != DebugDirectoryEntryType.EmbeddedPortablePdb)
+                    continue;
+
+                MetadataReaderProvider embeddedReaderProvider = peReader.ReadEmbeddedPortablePdbDebugDirectoryData(debugEntry);
+                MetadataReader reader = embeddedReaderProvider.GetMetadataReader(MetadataReaderOptions.Default, stringDecoder);
+                return new PortablePdbSymbolReader(reader, mappedViewAccessor: null);
+            }
+
+            return null;
+        }
+
         private MetadataReader _reader;
         private MemoryMappedViewAccessor _mappedViewAccessor;
 
@@ -85,7 +101,18 @@ namespace Internal.TypeSystem.Ecma
 
         public override void Dispose()
         {
-            _mappedViewAccessor.Dispose();
+            if (_mappedViewAccessor != null)
+                _mappedViewAccessor.Dispose();
+        }
+
+        public override int GetStateMachineKickoffMethod(int methodToken)
+        {
+            var debugInformationHandle = ((MethodDefinitionHandle)MetadataTokens.EntityHandle(methodToken)).ToDebugInformationHandle();
+
+            var debugInformation = _reader.GetMethodDebugInformation(debugInformationHandle);
+
+            var kickoffMethod = debugInformation.GetStateMachineKickoffMethod();
+            return kickoffMethod.IsNil ? 0 : MetadataTokens.GetToken(kickoffMethod);
         }
 
         public override IEnumerable<ILSequencePoint> GetSequencePointsForMethod(int methodToken)
@@ -96,12 +123,25 @@ namespace Internal.TypeSystem.Ecma
 
             var sequencePoints = debugInformation.GetSequencePoints();
 
+            DocumentHandle previousDocumentHandle = default;
+            string previousDocumentUrl = null;
+
             foreach (var sequencePoint in sequencePoints)
             {
-                if (sequencePoint.StartLine == 0xFEEFEE)
+                if (sequencePoint.StartLine == SequencePoint.HiddenLine)
                     continue;
 
-                var url = _reader.GetString(_reader.GetDocument(sequencePoint.Document).Name);
+                string url;
+                if (sequencePoint.Document == previousDocumentHandle)
+                {
+                    url = previousDocumentUrl;
+                }
+                else
+                {
+                    url = _reader.GetString(_reader.GetDocument(sequencePoint.Document).Name);
+                    previousDocumentHandle = sequencePoint.Document;
+                    previousDocumentUrl = url;
+                }
 
                 yield return new ILSequencePoint(sequencePoint.Offset, url, sequencePoint.StartLine);
             }

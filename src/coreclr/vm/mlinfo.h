@@ -51,8 +51,7 @@ enum MarshalFlags
     MARSHAL_FLAG_HRESULT_SWAP       = 0x010,
     MARSHAL_FLAG_RETVAL             = 0x020,
     // unused                       = 0x040,
-    MARSHAL_FLAG_FIELD              = 0x080,
-    MARSHAL_FLAG_IN_MEMBER_FUNCTION = 0x100
+    MARSHAL_FLAG_FIELD              = 0x080
 };
 
 #include <pshpack1.h>
@@ -183,18 +182,9 @@ struct NativeTypeParamInfo
 #endif // FEATURE_COMINTEROP
 };
 
-HRESULT CheckForCompressedData(PCCOR_SIGNATURE pvNativeTypeStart, PCCOR_SIGNATURE pvNativeType, ULONG cbNativeType);
-
 BOOL ParseNativeTypeInfo(mdToken                    token,
                          IMDInternalImport*         pScope,
                          NativeTypeParamInfo*       pParamInfo);
-
-void VerifyAndAdjustNormalizedType(
-                         Module *                   pModule,
-                         SigPointer                 sigPtr,
-                         const SigTypeContext *     pTypeContext,
-                         CorElementType *           pManagedElemType,
-                         CorNativeType *            pNativeType);
 
 #ifdef _DEBUG
 BOOL IsFixedBuffer(mdFieldDef field, IMDInternalImport* pInternalImport);
@@ -321,7 +311,6 @@ public:
                 BOOL BestFit,
                 BOOL ThrowOnUnmappableChar,
                 BOOL fEmitsIL,
-                BOOL onInstanceMethod,
                 MethodDesc* pMD = NULL,
                 BOOL fUseCustomMarshal = TRUE
 #ifdef _DEBUG
@@ -469,10 +458,6 @@ public:
 
     // Helper functions used to map the specified type to its interface marshalling info.
     static void GetItfMarshalInfo(TypeHandle th, BOOL fDispItf, MarshalScenario ms, ItfMarshalInfo *pInfo);
-    static HRESULT TryGetItfMarshalInfo(TypeHandle th, BOOL fDispItf, ItfMarshalInfo *pInfo);
-
-    VOID MarshalTypeToString(SString& strMarshalType, BOOL fSizeIsSpecified);
-    static VOID VarTypeToString(VARTYPE vt, SString& strVarType);
 
     // Returns true if the specified marshaler requires COM to have been started.
     bool MarshalerRequiresCOM();
@@ -495,10 +480,17 @@ public:
         return m_ms == MarshalInfo::MARSHAL_SCENARIO_FIELD;
     }
 
+    UINT GetErrorResourceId()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_resID;
+    }
+
 private:
 
     UINT16                      GetNativeSize(MarshalType mtype);
     static bool                 IsInOnly(MarshalType mtype);
+    static bool                 IsValueClass(MarshalType mtype);
 
     static OVERRIDEPROC         GetArgumentOverrideProc(MarshalType mtype);
     static RETURNOVERRIDEPROC   GetReturnOverrideProc(MarshalType mtype);
@@ -519,7 +511,6 @@ private:
     VARTYPE         m_arrayElementType;
     int             m_iArrayRank;
     BOOL            m_nolowerbounds;  // if managed type is SZARRAY, don't allow lower bounds
-    BOOL            m_onInstanceMethod;
 
     // for NT_ARRAY only
     UINT32          m_multiplier;     // multipler for "sizeis"
@@ -709,9 +700,6 @@ VOID ThrowInteropParamException(UINT resID, UINT paramIdx);
 
 VOID CollateParamTokens(IMDInternalImport *pInternalImport, mdMethodDef md, ULONG numargs, mdParamDef *aParams);
 bool IsUnsupportedTypedrefReturn(MetaSig& msig);
-
-void FindCopyCtor(Module *pModule, MethodTable *pMT, MethodDesc **pMDOut);
-void FindDtor(Module *pModule, MethodTable *pMT, MethodDesc **pMDOut);
 
 // We'll cap the total native size at a (somewhat) arbitrary limit to ensure
 // that we don't expose some overflow bug later on.

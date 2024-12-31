@@ -437,8 +437,8 @@ namespace ILCompiler.PEWriter
         /// <param name="data">Block to add</param>
         /// <param name="sectionIndex">Section index</param>
         /// <param name="name">Node name to emit in the map file</param>
-        /// <param name="mapFileBuilder">Optional map file to emit</param>
-        public void AddObjectData(ObjectNode.ObjectData objectData, int sectionIndex, string name, MapFileBuilder mapFileBuilder)
+        /// <param name="outputInfoBuilder">Optional output info to collect (used for creating maps and symbols)</param>
+        public void AddObjectData(ObjectNode.ObjectData objectData, int sectionIndex, string name, OutputInfoBuilder outputInfoBuilder)
         {
             Section section = _sections[sectionIndex];
 
@@ -475,10 +475,10 @@ namespace ILCompiler.PEWriter
                 }
             }
 
-            if (mapFileBuilder != null)
+            if (outputInfoBuilder != null)
             {
-                MapFileNode node = new MapFileNode(sectionIndex, alignedOffset, objectData.Data.Length, name);
-                mapFileBuilder.AddNode(node);
+                var node = new OutputNode(sectionIndex, alignedOffset, objectData.Data.Length, name);
+                outputInfoBuilder.AddNode(node, objectData.DefinedSymbols[0]);
                 if (objectData.Relocs != null)
                 {
                     foreach (Relocation reloc in objectData.Relocs)
@@ -486,7 +486,7 @@ namespace ILCompiler.PEWriter
                         RelocType fileReloc = Relocation.GetFileRelocationType(reloc.RelocType);
                         if (fileReloc != RelocType.IMAGE_REL_BASED_ABSOLUTE)
                         {
-                            mapFileBuilder.AddRelocation(node, fileReloc);
+                            outputInfoBuilder.AddRelocation(node, fileReloc);
                         }
                     }
                 }
@@ -498,12 +498,12 @@ namespace ILCompiler.PEWriter
             {
                 foreach (ISymbolDefinitionNode symbol in objectData.DefinedSymbols)
                 {
-                    if (mapFileBuilder != null)
+                    if (outputInfoBuilder != null)
                     {
                         Utf8StringBuilder sb = new Utf8StringBuilder();
                         symbol.AppendMangledName(GetNameMangler(), sb);
                         int sectionRelativeOffset = alignedOffset + symbol.Offset;
-                        mapFileBuilder.AddSymbol(new MapFileSymbol(sectionIndex, sectionRelativeOffset, sb.ToString()));
+                        outputInfoBuilder.AddSymbol(new OutputSymbol(sectionIndex, sectionRelativeOffset, sb.ToString()));
                     }
                     _symbolMap.Add(symbol, new SymbolTarget(
                         sectionIndex: sectionIndex,
@@ -551,11 +551,11 @@ namespace ILCompiler.PEWriter
             return sectionList;
         }
 
-        public void AddSections(MapFileBuilder mapFileBuilder)
+        public void AddSections(OutputInfoBuilder outputInfoBuilder)
         {
             foreach (Section section in _sections)
             {
-                mapFileBuilder.AddSection(section);
+                outputInfoBuilder.AddSection(section);
             }
         }
 
@@ -703,6 +703,13 @@ namespace ILCompiler.PEWriter
         /// <param name="offsetsAndTypes">16-bit entries encoding offset relative to the base RVA (low 12 bits) and relocation type (top 4 bite)</param>
         private static void FlushRelocationBlock(BlobBuilder builder, int baseRVA, List<ushort> offsetsAndTypes)
         {
+            // Ensure blocks are 4-byte aligned. This is required by kernel memory manager
+            // on Windows 8.1 and earlier.
+            if ((offsetsAndTypes.Count & 1) == 1)
+            {
+                offsetsAndTypes.Add(0);
+            }
+
             // First, emit the block header: 4 bytes starting RVA,
             builder.WriteInt32(baseRVA);
             // followed by the total block size comprising this header
@@ -756,6 +763,7 @@ namespace ILCompiler.PEWriter
             // Emit the name pointer table; it should be alphabetically sorted.
             // Also, we can now fill in the export address table as we've detected its size
             // in the previous pass.
+            builder.Align(4);
             int namePointerTableRVA = sectionLocation.RelativeVirtualAddress + builder.Count;
             foreach (ExportSymbol symbol in _exportSymbols)
             {
@@ -774,6 +782,7 @@ namespace ILCompiler.PEWriter
             }
 
             // Emit the address table
+            builder.Align(4);
             int addressTableRVA = sectionLocation.RelativeVirtualAddress + builder.Count;
             foreach (int addressTableEntry in addressTable)
             {
@@ -781,6 +790,7 @@ namespace ILCompiler.PEWriter
             }
             
             // Emit the export directory table
+            builder.Align(4);
             int exportDirectoryTableRVA = sectionLocation.RelativeVirtualAddress + builder.Count;
             // +0x00: reserved
             builder.WriteInt32(0);
@@ -831,6 +841,16 @@ namespace ILCompiler.PEWriter
                 SymbolTarget symbolTarget = _symbolMap[_win32ResourcesSymbol];
                 Section section = _sections[symbolTarget.SectionIndex];
                 Debug.Assert(section.RVAWhenPlaced != 0);
+
+                // Windows has a bug in its resource processing logic that occurs when 
+                // 1. A PE file is loaded as a data file
+                // 2. The resource data found in the resources has an RVA which has a magnitude greater than the size of the section which holds the resources
+                // 3. The offset of the start of the resource data from the start of the section is not zero.
+                //
+                // As it is impossible to effect condition 1 in the compiler, and changing condition 2 would require bloating the virtual size of the sections,
+                // instead require that the resource data is located at offset 0 within the section.
+                // We achieve that by sorting the Win32ResourcesNode as the first node.
+                Debug.Assert(symbolTarget.Offset == 0);
                 directoriesBuilder.ResourceTable = new DirectoryEntry(section.RVAWhenPlaced + symbolTarget.Offset, _win32ResourcesSize);
             }
 

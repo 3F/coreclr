@@ -5,6 +5,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
+using System.Linq;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
@@ -15,9 +16,9 @@ using System.Text;
 using Internal.CorConstants;
 using Internal.Runtime;
 using Internal.ReadyToRunConstants;
+using Internal.TypeSystem;
 
 using Debug = System.Diagnostics.Debug;
-using System.Linq;
 
 namespace ILCompiler.Reflection.ReadyToRun
 {
@@ -47,26 +48,53 @@ namespace ILCompiler.Reflection.ReadyToRun
         }
     }
 
+    public class ReadyToRunAssembly
+    {
+        private ReadyToRunReader _reader;
+        internal List<string> _availableTypes;
+        internal List<ReadyToRunMethod> _methods;
+
+        internal ReadyToRunAssembly(ReadyToRunReader reader)
+        {
+            _reader = reader;
+        }
+
+        public IReadOnlyList<string> AvailableTypes
+        {
+            get
+            {
+                _reader.EnsureAvailableTypes();
+                return _availableTypes;
+            }
+        }
+
+        public IReadOnlyList<ReadyToRunMethod> Methods
+        {
+            get
+            {
+                _reader.EnsureMethods();
+                return _methods;
+            }
+        }
+    }
+
     public sealed class ReadyToRunReader
     {
+        public const int GuidByteSize = 16;
+
         private const string SystemModuleName = "System.Private.CoreLib";
 
         /// <summary>
         /// MetadataReader for the system module (normally System.Private.CoreLib)
         /// </summary>
-        private MetadataReader _systemModuleReader;
+        private IAssemblyMetadata _systemModuleReader;
 
         private readonly IAssemblyResolver _assemblyResolver;
 
         /// <summary>
         /// Reference assembly cache indexed by module indices as used in signatures
         /// </summary>
-        private List<MetadataReader> _assemblyCache;
-
-        /// <summary>
-        /// Assembly headers for composite R2R images
-        /// </summary>
-        private List<ReadyToRunCoreHeader> _assemblyHeaders;
+        private List<IAssemblyMetadata> _assemblyCache;
 
         // Header
         private OperatingSystem _operatingSystem;
@@ -78,6 +106,7 @@ namespace ILCompiler.Reflection.ReadyToRun
         private int _readyToRunHeaderRVA;
         private ReadyToRunHeader _readyToRunHeader;
         private List<ReadyToRunCoreHeader> _readyToRunAssemblyHeaders;
+        private List<ReadyToRunAssembly> _readyToRunAssemblies;
 
         // DebugInfo
         private Dictionary<int, int> _runtimeFunctionIdToDebugOffset;
@@ -91,16 +120,14 @@ namespace ILCompiler.Reflection.ReadyToRun
         private Dictionary<int, EHInfo> _runtimeFunctionToEHInfo;
 
         // Methods
-        private Dictionary<ReadyToRunSection, List<ReadyToRunMethod>> _methods;
         private List<InstanceMethod> _instanceMethods;
+
+        // PgoData
+        private Dictionary<PgoInfoKey, PgoInfo> _pgoInfos;
 
         // ImportSections
         private List<ReadyToRunImportSection> _importSections;
-        private Dictionary<int, string> _importCellNames;
         private Dictionary<int, ReadyToRunSignature> _importSignatures;
-
-        // AvailableType
-        private Dictionary<ReadyToRunSection, List<string>> _availableTypes;
 
         // CompilerIdentifier
         private string _compilerIdentifier;
@@ -109,7 +136,7 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// Underlying PE image reader is used to access raw PE structures like header
         /// or section list.
         /// </summary>
-        public PEReader PEReader { get; private set; }
+        public PEReader CompositeReader { get; private set; }
 
         /// <summary>
         /// Byte array containing the ReadyToRun image
@@ -153,6 +180,33 @@ namespace ILCompiler.Reflection.ReadyToRun
         }
 
         /// <summary>
+        /// Conversion of the PE machine ID to TargetArchitecture used by TargetDetails.
+        /// </summary>
+        public TargetArchitecture TargetArchitecture
+        {
+            get
+            {
+                switch (Machine)
+                {
+                    case Machine.I386:
+                        return TargetArchitecture.X86;
+
+                    case Machine.Amd64:
+                        return TargetArchitecture.X64;
+
+                    case Machine.ArmThumb2:
+                        return TargetArchitecture.ARM;
+
+                    case Machine.Arm64:
+                        return TargetArchitecture.ARM64;
+
+                    default:
+                        throw new NotImplementedException(_machine.ToString());
+                }
+            }
+        }
+
+        /// <summary>
         /// Targeting operating system for the R2R executable
         /// </summary>
         public OperatingSystem OperatingSystem
@@ -161,6 +215,36 @@ namespace ILCompiler.Reflection.ReadyToRun
             {
                 EnsureHeader();
                 return _operatingSystem;
+            }
+        }
+
+        /// <summary>
+        /// Targeting operating system converted to the enumeration used by TargetDetails.
+        /// </summary>
+        public TargetOS TargetOperatingSystem
+        {
+            get
+            {
+                switch (OperatingSystem)
+                {
+                    case OperatingSystem.Windows:
+                        return TargetOS.Windows;
+
+                    case OperatingSystem.Linux:
+                        return TargetOS.Linux;
+
+                    case OperatingSystem.Apple:
+                        return TargetOS.OSX;
+
+                    case OperatingSystem.FreeBSD:
+                        return TargetOS.FreeBSD;
+
+                    case OperatingSystem.NetBSD:
+                        return TargetOS.FreeBSD;
+
+                    default:
+                        throw new NotImplementedException(OperatingSystem.ToString());
+                }
             }
         }
 
@@ -234,15 +318,12 @@ namespace ILCompiler.Reflection.ReadyToRun
             }
         }
 
-        /// <summary>
-        /// The runtime functions and method signatures of each method
-        /// </summary>
-        public Dictionary<ReadyToRunSection, List<ReadyToRunMethod>> Methods
+        public IReadOnlyList<ReadyToRunAssembly> ReadyToRunAssemblies
         {
             get
             {
-                EnsureMethods();
-                return _methods;
+                EnsureHeader();
+                return _readyToRunAssemblies;
             }
         }
 
@@ -256,20 +337,6 @@ namespace ILCompiler.Reflection.ReadyToRun
                 EnsureMethods();
                 return _instanceMethods;
             }
-        }
-
-        /// <summary>
-        /// The available types from READYTORUN_SECTION_AVAILABLE_TYPES
-        /// </summary>
-        public Dictionary<ReadyToRunSection, List<string>> AvailableTypes
-        {
-
-            get
-            {
-                EnsureAvailableTypes();
-                return _availableTypes;
-            }
-
         }
 
         /// <summary>
@@ -294,19 +361,6 @@ namespace ILCompiler.Reflection.ReadyToRun
                 EnsureImportSections();
                 return _importSections;
             }
-        }
-
-        /// <summary>
-        /// Map from import cell addresses to their symbolic names.
-        /// </summary>
-        public IReadOnlyDictionary<int, string> ImportCellNames
-        {
-            get
-            {
-                EnsureImportSections();
-                return _importCellNames;
-            }
-
         }
 
         /// <summary>
@@ -363,10 +417,10 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// </summary>
         /// <param name="filename">PE image</param>
         /// <exception cref="BadImageFormatException">The Cor header flag must be ILLibrary</exception>
-        public ReadyToRunReader(IAssemblyResolver assemblyResolver, MetadataReader metadata, PEReader peReader, string filename)
+        public ReadyToRunReader(IAssemblyResolver assemblyResolver, IAssemblyMetadata metadata, PEReader peReader, string filename)
         {
             _assemblyResolver = assemblyResolver;
-            PEReader = peReader;
+            CompositeReader = peReader;
             Filename = filename;
             Initialize(metadata);
         }
@@ -383,32 +437,49 @@ namespace ILCompiler.Reflection.ReadyToRun
             Initialize(metadata: null);
         }
 
-        private unsafe void Initialize(MetadataReader metadata)
+        public static bool IsReadyToRunImage(PEReader peReader)
         {
-            _assemblyCache = new List<MetadataReader>();
-            _assemblyHeaders = new List<ReadyToRunCoreHeader>();
+            if (peReader.PEHeaders == null)
+                return false;
 
-            if (PEReader == null)
+            if (peReader.PEHeaders.CorHeader == null)
+                return false;
+
+            if ((peReader.PEHeaders.CorHeader.Flags & CorFlags.ILLibrary) == 0)
+            {
+                return TryLocateNativeReadyToRunHeader(peReader, out _);
+            }
+            else
+            {
+                return peReader.PEHeaders.CorHeader.ManagedNativeHeaderDirectory.Size != 0;
+            }
+        }
+
+        private unsafe void Initialize(IAssemblyMetadata metadata)
+        {
+            _assemblyCache = new List<IAssemblyMetadata>();
+
+            if (CompositeReader == null)
             {
                 byte[] image = File.ReadAllBytes(Filename);
                 Image = image;
 
-                PEReader = new PEReader(Unsafe.As<byte[], ImmutableArray<byte>>(ref image));
+                CompositeReader = new PEReader(Unsafe.As<byte[], ImmutableArray<byte>>(ref image));
             }
             else
             {
-                ImmutableArray<byte> content = PEReader.GetEntireImage().GetContent();
+                ImmutableArray<byte> content = CompositeReader.GetEntireImage().GetContent();
                 Image = Unsafe.As<ImmutableArray<byte>, byte[]>(ref content);
             }
 
-            if (metadata == null && PEReader.HasMetadata)
+            if (metadata == null && CompositeReader.HasMetadata)
             {
-                metadata = PEReader.GetMetadataReader();
+                metadata = new StandaloneAssemblyMetadata(CompositeReader);
             }
 
             if (metadata != null)
             {
-                if ((PEReader.PEHeaders.CorHeader.Flags & CorFlags.ILLibrary) == 0)
+                if ((CompositeReader.PEHeaders.CorHeader.Flags & CorFlags.ILLibrary) == 0)
                 {
                     if (!TryLocateNativeReadyToRunHeader())
                         throw new BadImageFormatException("The file is not a ReadyToRun image");
@@ -419,7 +490,7 @@ namespace ILCompiler.Reflection.ReadyToRun
                 {
                     _assemblyCache.Add(metadata);
 
-                    DirectoryEntry r2rHeaderDirectory = PEReader.PEHeaders.CorHeader.ManagedNativeHeaderDirectory;
+                    DirectoryEntry r2rHeaderDirectory = CompositeReader.PEHeaders.CorHeader.ManagedNativeHeaderDirectory;
                     _readyToRunHeaderRVA = r2rHeaderDirectory.RelativeVirtualAddress;
                     Debug.Assert(!Composite);
                 }
@@ -431,15 +502,24 @@ namespace ILCompiler.Reflection.ReadyToRun
             }
         }
 
-        private void EnsureMethods()
+        internal void EnsureMethods()
         {
-            if (_methods != null)
+            EnsureHeader();
+            if (_instanceMethods != null)
             {
                 return;
             }
 
-            _methods = new Dictionary<ReadyToRunSection, List<ReadyToRunMethod>>();
+            if (ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.PgoInstrumentationData, out _))
+            {
+                ParsePgoMethods();
+            }
+
             _instanceMethods = new List<InstanceMethod>();
+            foreach (ReadyToRunAssembly assembly in _readyToRunAssemblies)
+            {
+                assembly._methods = new List<ReadyToRunMethod>();
+            }
 
             if (ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.RuntimeFunctions, out ReadyToRunSection runtimeFunctionSection))
             {
@@ -463,13 +543,10 @@ namespace ILCompiler.Reflection.ReadyToRun
             if (_runtimeFunctionToMethod == null)
             {
                 _runtimeFunctionToMethod = new Dictionary<int, ReadyToRunMethod>();
-                foreach (var section in _methods)
+                foreach (var method in Methods)
                 {
-                    foreach (var method in section.Value)
-                    {
-                        if (!_runtimeFunctionToMethod.ContainsKey(method.EntryPointRuntimeFunctionId))
-                            _runtimeFunctionToMethod.Add(method.EntryPointRuntimeFunctionId, method);
-                    }
+                    if (!_runtimeFunctionToMethod.ContainsKey(method.EntryPointRuntimeFunctionId))
+                        _runtimeFunctionToMethod.Add(method.EntryPointRuntimeFunctionId, method);
                 }
             }
         }
@@ -488,18 +565,21 @@ namespace ILCompiler.Reflection.ReadyToRun
             return customMethods;
         }
 
-        private bool TryLocateNativeReadyToRunHeader()
+        private static bool TryLocateNativeReadyToRunHeader(PEReader reader, out int readyToRunHeaderRVA)
         {
-            PEExportTable exportTable = PEReader.GetExportTable();
-            if (exportTable.TryGetValue("RTR_HEADER", out _readyToRunHeaderRVA))
-            {
-                _composite = true;
-                return true;
-            }
-            return false;
+            PEExportTable exportTable = reader.GetExportTable();
+
+            return exportTable.TryGetValue("RTR_HEADER", out readyToRunHeaderRVA);
         }
 
-        private MetadataReader GetSystemModuleMetadataReader()
+        private bool TryLocateNativeReadyToRunHeader()
+        {
+            _composite = TryLocateNativeReadyToRunHeader(CompositeReader, out _readyToRunHeaderRVA);
+
+            return _composite;
+        }
+
+        private IAssemblyMetadata GetSystemModuleMetadataReader()
         {
             if (_systemModuleReader == null)
             {
@@ -511,10 +591,16 @@ namespace ILCompiler.Reflection.ReadyToRun
             return _systemModuleReader;
         }
 
-        public MetadataReader GetGlobalMetadataReader()
+        public IAssemblyMetadata GetGlobalMetadata()
         {
             EnsureHeader();
             return (_composite ? null : _assemblyCache[0]);
+        }
+
+        public string GetGlobalAssemblyName()
+        {
+            MetadataReader mdReader = GetGlobalMetadata().MetadataReader;
+            return mdReader.GetString(mdReader.GetAssemblyDefinition().Name);
         }
 
         private unsafe void EnsureHeader()
@@ -523,7 +609,7 @@ namespace ILCompiler.Reflection.ReadyToRun
             {
                 return;
             }
-            uint machine = (uint)PEReader.PEHeaders.CoffHeader.Machine;
+            uint machine = (uint)CompositeReader.PEHeaders.CoffHeader.Machine;
             _operatingSystem = OperatingSystem.Unknown;
             foreach (OperatingSystem os in Enum.GetValues(typeof(OperatingSystem)))
             {
@@ -568,16 +654,21 @@ namespace ILCompiler.Reflection.ReadyToRun
             }
 
 
-            _imageBase = PEReader.PEHeaders.PEHeader.ImageBase;
+            _imageBase = CompositeReader.PEHeaders.PEHeader.ImageBase;
 
             // Initialize R2RHeader
             Debug.Assert(_readyToRunHeaderRVA != 0);
             int r2rHeaderOffset = GetOffset(_readyToRunHeaderRVA);
             _readyToRunHeader = new ReadyToRunHeader(Image, _readyToRunHeaderRVA, r2rHeaderOffset);
 
+            _readyToRunAssemblies = new List<ReadyToRunAssembly>();
             if (_composite)
             {
                 ParseComponentAssemblies();
+            }
+            else
+            {
+                _readyToRunAssemblies.Add(new ReadyToRunAssembly(this));
             }
         }
 
@@ -670,20 +761,6 @@ namespace ILCompiler.Reflection.ReadyToRun
             }
         }
 
-        public bool InputArchitectureSupported()
-        {
-            return Machine != Machine.ArmThumb2; // CoreDisTools often fails to decode when disassembling ARM images (see https://github.com/dotnet/runtime/issues/10959)
-        }
-
-        // TODO: Fix R2RDump issue where an R2R image cannot be dissassembled with the x86 CoreDisTools
-        // For the short term, we want to error out with a decent message explaining the unexpected error
-        // Issue https://github.com/dotnet/runtime/issues/10928
-        public bool DisassemblerArchitectureSupported()
-        {
-            System.Runtime.InteropServices.Architecture val = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture;
-            return val != System.Runtime.InteropServices.Architecture.X86;
-        }
-
         /// <summary>
         /// Each runtime function entry has 3 fields for Amd64 machines (StartAddress, EndAddress, UnwindRVA), otherwise 2 fields (StartAddress, UnwindRVA)
         /// </summary>
@@ -699,12 +776,12 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// <summary>
         /// Initialize non-generic R2RMethods with method signatures from MethodDefHandle, and runtime function indices from MethodDefEntryPoints
         /// </summary>
-        private void ParseMethodDefEntrypoints(Action<ReadyToRunSection, MetadataReader> methodDefSectionReader)
+        private void ParseMethodDefEntrypoints(Action<ReadyToRunSection, IAssemblyMetadata> methodDefSectionReader)
         {
             ReadyToRunSection methodEntryPointSection;
             if (ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.MethodDefEntryPoints, out methodEntryPointSection))
             {
-                methodDefSectionReader(methodEntryPointSection, GetGlobalMetadataReader());
+                methodDefSectionReader(methodEntryPointSection, GetGlobalMetadata());
             }
             else if (ReadyToRunAssemblyHeaders != null)
             {
@@ -723,10 +800,11 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// are method entrypoints are stored separately for each component assembly of the composite R2R executable.
         /// </summary>
         /// <param name="section">Method entrypoint section to parse</param>
-        /// <param name="metadataReader">ECMA metadata reader representing this method entrypoint section</param>
+        /// <param name="componentReader">Assembly metadata reader representing this method entrypoint section</param>
         /// <param name="isEntryPoint">Set to true for each runtime function index representing a method entrypoint</param>
-        private void ParseMethodDefEntrypointsSection(ReadyToRunSection section, MetadataReader metadataReader, bool[] isEntryPoint)
+        private void ParseMethodDefEntrypointsSection(ReadyToRunSection section, IAssemblyMetadata componentReader, bool[] isEntryPoint)
         {
+            int assemblyIndex = GetAssemblyIndex(section);
             int methodDefEntryPointsOffset = GetOffset(section.RelativeVirtualAddress);
             NativeArray methodEntryPoints = new NativeArray(Image, (uint)methodDefEntryPointsOffset);
             uint nMethodEntryPoints = methodEntryPoints.GetCount();
@@ -740,23 +818,17 @@ namespace ILCompiler.Reflection.ReadyToRun
                     int runtimeFunctionId;
                     int? fixupOffset;
                     GetRuntimeFunctionIndexFromOffset(offset, out runtimeFunctionId, out fixupOffset);
-                    ReadyToRunMethod method = new ReadyToRunMethod(this, this.PEReader, metadataReader, methodHandle, runtimeFunctionId, owningType: null, constrainedType: null, instanceArgs: null, fixupOffset: fixupOffset);
+                    ReadyToRunMethod method = new ReadyToRunMethod(this, componentReader, methodHandle, runtimeFunctionId, owningType: null, constrainedType: null, instanceArgs: null, fixupOffset: fixupOffset);
 
                     if (method.EntryPointRuntimeFunctionId < 0 || method.EntryPointRuntimeFunctionId >= isEntryPoint.Length)
                     {
                         throw new BadImageFormatException("EntryPointRuntimeFunctionId out of bounds");
                     }
                     isEntryPoint[method.EntryPointRuntimeFunctionId] = true;
-                    if (!_methods.TryGetValue(section, out List<ReadyToRunMethod> sectionMethods))
-                    {
-                        sectionMethods = new List<ReadyToRunMethod>();
-                        _methods.Add(section, sectionMethods);
-                    }
-                    sectionMethods.Add(method);
+                    _readyToRunAssemblies[assemblyIndex]._methods.Add(method);
                 }
             }
         }
-
         /// <summary>
         /// Parse a single method def entrypoint section. For composite R2R images, this method is called multiple times
         /// are method entrypoints are stored separately for each component assembly of the composite R2R executable.
@@ -764,7 +836,7 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// <param name="section">Method entrypoint section to parse</param>
         /// <param name="metadataReader">ECMA metadata reader representing this method entrypoint section</param>
         /// <param name="isEntryPoint">Set to true for each runtime function index representing a method entrypoint</param>
-        private void ParseMethodDefEntrypointsSectionCustom<TType, TMethod, TGenericContext>(IR2RSignatureTypeProvider<TType, TMethod, TGenericContext> provider, Dictionary<TMethod, ReadyToRunMethod> foundMethods, ReadyToRunSection section, MetadataReader metadataReader)
+        private void ParseMethodDefEntrypointsSectionCustom<TType, TMethod, TGenericContext>(IR2RSignatureTypeProvider<TType, TMethod, TGenericContext> provider, Dictionary<TMethod, ReadyToRunMethod> foundMethods, ReadyToRunSection section, IAssemblyMetadata metadataReader)
         {
             int methodDefEntryPointsOffset = GetOffset(section.RelativeVirtualAddress);
             NativeArray methodEntryPoints = new NativeArray(Image, (uint)methodDefEntryPointsOffset);
@@ -780,8 +852,8 @@ namespace ILCompiler.Reflection.ReadyToRun
                     int? fixupOffset;
                     GetRuntimeFunctionIndexFromOffset(offset, out runtimeFunctionId, out fixupOffset);
                     ReadyToRunMethod r2rMethod = _runtimeFunctionToMethod[runtimeFunctionId];
-                    var customMethod = provider.GetMethodFromMethodDef(metadataReader, MetadataTokens.MethodDefinitionHandle((int)rid), default(TType));
-                    
+                    var customMethod = provider.GetMethodFromMethodDef(metadataReader.MetadataReader, MetadataTokens.MethodDefinitionHandle((int)rid), default(TType));
+
                     if (!Object.ReferenceEquals(customMethod, null) && !foundMethods.ContainsKey(customMethod))
                         foundMethods.Add(customMethod, r2rMethod);
                 }
@@ -804,8 +876,8 @@ namespace ILCompiler.Reflection.ReadyToRun
             NativeParser curParser = allEntriesEnum.GetNext();
             while (!curParser.IsNull())
             {
-                MetadataReader mdReader = _composite ? null : _assemblyCache[0];
-                var decoder = new R2RSignatureDecoder<TType, TMethod, TGenericContext>(provider, default(TGenericContext), mdReader, this, (int)curParser.Offset);
+                IAssemblyMetadata mdReader = GetGlobalMetadata();
+                var decoder = new R2RSignatureDecoder<TType, TMethod, TGenericContext>(provider, default(TGenericContext), mdReader.MetadataReader, this, (int)curParser.Offset);
 
                 TMethod customMethod = decoder.ParseMethod();
 
@@ -836,8 +908,9 @@ namespace ILCompiler.Reflection.ReadyToRun
             NativeParser curParser = allEntriesEnum.GetNext();
             while (!curParser.IsNull())
             {
-                MetadataReader mdReader = _composite ? null : _assemblyCache[0];
-                SignatureDecoder decoder = new SignatureDecoder(_assemblyResolver, mdReader, this, (int)curParser.Offset);
+                IAssemblyMetadata mdReader = GetGlobalMetadata();
+                SignatureFormattingOptions dummyOptions = new SignatureFormattingOptions();
+                SignatureDecoder decoder = new SignatureDecoder(_assemblyResolver, dummyOptions, mdReader?.MetadataReader, this, (int)curParser.Offset);
 
                 string owningType = null;
 
@@ -888,7 +961,6 @@ namespace ILCompiler.Reflection.ReadyToRun
                 GetRuntimeFunctionIndexFromOffset((int)decoder.Offset, out runtimeFunctionId, out fixupOffset);
                 ReadyToRunMethod method = new ReadyToRunMethod(
                     this,
-                    this.PEReader,
                     mdReader,
                     methodHandle,
                     runtimeFunctionId,
@@ -900,20 +972,150 @@ namespace ILCompiler.Reflection.ReadyToRun
                 {
                     isEntryPoint[method.EntryPointRuntimeFunctionId] = true;
                 }
-                if (!Methods.TryGetValue(instMethodEntryPointSection, out List<ReadyToRunMethod> sectionMethods))
-                {
-                    sectionMethods = new List<ReadyToRunMethod>();
-                    Methods.Add(instMethodEntryPointSection, sectionMethods);
-                }
-                sectionMethods.Add(method);
                 _instanceMethods.Add(new InstanceMethod(curParser.LowHashcode, method));
                 curParser = allEntriesEnum.GetNext();
             }
         }
 
+        public IEnumerable<ReadyToRunMethod> Methods
+        {
+            get
+            {
+                EnsureMethods();
+                return _readyToRunAssemblies.SelectMany(assembly => assembly.Methods).Concat(_instanceMethods.Select(im => im.Method));
+            }
+        }
+
+        public IEnumerable<PgoInfo> AllPgoInfos
+        {
+            get
+            {
+                EnsureMethods();
+
+                if (_pgoInfos != null)
+                    return _pgoInfos.Values;
+                else
+                    return Array.Empty<PgoInfo>();
+            }
+        }
+
+        public PgoInfo GetPgoInfoByKey(PgoInfoKey key)
+        {
+            EnsureMethods();
+            if (_pgoInfos != null)
+            {
+                _pgoInfos.TryGetValue(key, out var returnValue);
+                return returnValue;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Initialize generic method instances with argument types and runtime function indices from InstanceMethodEntrypoints
+        /// </summary>
+        private void ParsePgoMethods()
+        {
+            _pgoInfos = new Dictionary<PgoInfoKey, PgoInfo>();
+            if (!ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.PgoInstrumentationData, out ReadyToRunSection pgoInstrumentationDataSection))
+            {
+                return;
+            }
+            int pgoInstrumentationDataOffset = GetOffset(pgoInstrumentationDataSection.RelativeVirtualAddress);
+            NativeParser parser = new NativeParser(Image, (uint)pgoInstrumentationDataOffset);
+            NativeHashtable pgoInstrumentationData = new NativeHashtable(Image, parser, (uint)(pgoInstrumentationDataOffset + pgoInstrumentationDataSection.Size));
+            NativeHashtable.AllEntriesEnumerator allEntriesEnum = pgoInstrumentationData.EnumerateAllEntries();
+            NativeParser curParser = allEntriesEnum.GetNext();
+            while (!curParser.IsNull())
+            {
+                IAssemblyMetadata mdReader = GetGlobalMetadata();
+                SignatureFormattingOptions dummyOptions = new SignatureFormattingOptions();
+                SignatureDecoder decoder = new SignatureDecoder(_assemblyResolver, dummyOptions, mdReader?.MetadataReader, this, (int)curParser.Offset);
+
+                string owningType = null;
+
+                uint methodFlags = decoder.ReadUInt();
+                if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_OwnerType) != 0)
+                {
+                    mdReader = decoder.GetMetadataReaderFromModuleOverride() ?? mdReader;
+                    if ((_composite) && mdReader == null)
+                    {
+                        // The only types that don't have module overrides on them in composite images are primitive types within the system module
+                        mdReader = GetSystemModuleMetadataReader();
+                    }
+                    owningType = decoder.ReadTypeSignatureNoEmit();
+                }
+                if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_SlotInsteadOfToken) != 0)
+                {
+                    throw new NotImplementedException();
+                }
+                EntityHandle methodHandle;
+                int rid = (int)decoder.ReadUInt();
+                if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_MemberRefToken) != 0)
+                {
+                    methodHandle = MetadataTokens.MemberReferenceHandle(rid);
+                }
+                else
+                {
+                    methodHandle = MetadataTokens.MethodDefinitionHandle(rid);
+                }
+                string[] methodTypeArgs = null;
+                if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_MethodInstantiation) != 0)
+                {
+                    uint typeArgCount = decoder.ReadUInt();
+                    methodTypeArgs = new string[typeArgCount];
+                    for (int typeArgIndex = 0; typeArgIndex < typeArgCount; typeArgIndex++)
+                    {
+                        methodTypeArgs[typeArgIndex] = decoder.ReadTypeSignatureNoEmit();
+                    }
+                }
+
+                string constrainedType = null;
+                if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_Constrained) != 0)
+                {
+                    constrainedType = decoder.ReadTypeSignatureNoEmit();
+                }
+
+                GetPgoOffsetAndVersion(decoder.Offset, out int pgoFormatVersion, out int pgoOffset);
+
+                PgoInfoKey key = new PgoInfoKey(GetGlobalMetadata(), owningType, methodHandle, methodTypeArgs);
+                PgoInfo info = new PgoInfo(key, this, pgoFormatVersion, Image, pgoOffset);
+                _pgoInfos.Add(key, info);
+                curParser = allEntriesEnum.GetNext();
+            }
+
+            return;
+
+            // Broken out into helper function in case we ever implement pgo data that isn't tied to a signature
+            void GetPgoOffsetAndVersion(int offset, out int version, out int pgoDataOffset)
+            {
+                version = 0;
+                // get the id of the entry point runtime function from the MethodEntryPoints NativeArray
+                uint versionAndFlags = 0; // the RUNTIME_FUNCTIONS index
+                offset = (int)NativeReader.DecodeUnsigned(Image, (uint)offset, ref versionAndFlags);
+
+                switch (versionAndFlags & 3)
+                {
+                    case 3:
+                        uint val = 0;
+                        NativeReader.DecodeUnsigned(Image, (uint)offset, ref val);
+                        offset -= (int)val;
+                        break;
+                    case 1:
+                        // Offset already correct
+                        break;
+                    default:
+                        throw new Exception("Invalid Pgo format");
+                }
+
+                version = (int)(versionAndFlags >> 2);
+                pgoDataOffset = offset;
+            }
+        }
+
         private void CountRuntimeFunctions(bool[] isEntryPoint)
         {
-            foreach (ReadyToRunMethod method in Methods.Values.SelectMany(sectionMethods => sectionMethods))
+            foreach (ReadyToRunMethod method in Methods)
             {
                 int runtimeFunctionId = method.EntryPointRuntimeFunctionId;
                 if (runtimeFunctionId == -1)
@@ -930,20 +1132,66 @@ namespace ILCompiler.Reflection.ReadyToRun
             }
         }
 
+        public int GetAssemblyIndex(ReadyToRunSection section)
+        {
+            EnsureHeader();
+            if (_composite)
+            {
+                for (int assemblyIndex = 0; assemblyIndex < _readyToRunAssemblyHeaders.Count; assemblyIndex++)
+                {
+                    ReadyToRunSection toMatch;
+                    if (_readyToRunAssemblyHeaders[assemblyIndex].Sections.TryGetValue(section.Type, out toMatch) && section.RelativeVirtualAddress == toMatch.RelativeVirtualAddress)
+                    {
+                        return assemblyIndex;
+                    }
+                }
+                return -1;
+            }
+            else
+            {
+                return 0;
+            }
+        }
+
+        public Guid GetAssemblyMvid(int assemblyIndex)
+        {
+            EnsureHeader();
+            if (_composite)
+            {
+                if (!ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.ManifestAssemblyMvids, out ReadyToRunSection mvidSection))
+                {
+                    return Guid.Empty;
+                }
+                int mvidOffset = GetOffset(mvidSection.RelativeVirtualAddress) + GuidByteSize * assemblyIndex;
+                byte[] mvidBytes = new byte[ReadyToRunReader.GuidByteSize];
+                for (int i = 0; i < mvidBytes.Length; i++)
+                {
+                    mvidBytes[i] = Image[mvidOffset + i];
+                }
+                return new Guid(mvidBytes);
+            }
+            else
+            {
+                Debug.Assert(assemblyIndex == 0);
+                MetadataReader mdReader = GetGlobalMetadata().MetadataReader;
+                return mdReader.GetGuid(mdReader.GetModuleDefinition().Mvid);
+            }
+        }
+
         /// <summary>
         /// Iterates through a native hashtable to get all RIDs
         /// </summary>
-        private void EnsureAvailableTypes()
+        internal void EnsureAvailableTypes()
         {
-            if (_availableTypes != null)
+            EnsureHeader();
+            if (_readyToRunAssemblies[0]._availableTypes != null)
             {
                 return;
             }
-            _availableTypes = new Dictionary<ReadyToRunSection, List<string>>();
             ReadyToRunSection availableTypesSection;
             if (ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.AvailableTypes, out availableTypesSection))
             {
-                ParseAvailableTypesSection(availableTypesSection, GetGlobalMetadataReader());
+                ParseAvailableTypesSection(0, availableTypesSection, GetGlobalMetadata());
             }
             else if (_readyToRunAssemblyHeaders != null)
             {
@@ -952,7 +1200,7 @@ namespace ILCompiler.Reflection.ReadyToRun
                     if (_readyToRunAssemblyHeaders[assemblyIndex].Sections.TryGetValue(
                         ReadyToRunSectionType.AvailableTypes, out availableTypesSection))
                     {
-                        ParseAvailableTypesSection(availableTypesSection, OpenReferenceAssembly(assemblyIndex + 1));
+                        ParseAvailableTypesSection(assemblyIndex, availableTypesSection, OpenReferenceAssembly(assemblyIndex + 1));
                     }
                 }
             }
@@ -963,8 +1211,9 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// as available types are stored separately for each component assembly of the composite R2R executable.
         /// </summary>
         /// <param name="availableTypesSection"></param>
-        private void ParseAvailableTypesSection(ReadyToRunSection availableTypesSection, MetadataReader metadataReader)
+        private void ParseAvailableTypesSection(int assemblyIndex, ReadyToRunSection availableTypesSection, IAssemblyMetadata metadataReader)
         {
+            _readyToRunAssemblies[assemblyIndex]._availableTypes = new List<string>();
             int availableTypesOffset = GetOffset(availableTypesSection.RelativeVirtualAddress);
             NativeParser parser = new NativeParser(Image, (uint)availableTypesOffset);
             NativeHashtable availableTypes = new NativeHashtable(Image, parser, (uint)(availableTypesOffset + availableTypesSection.Size));
@@ -980,24 +1229,15 @@ namespace ILCompiler.Reflection.ReadyToRun
                 if (isExportedType)
                 {
                     ExportedTypeHandle exportedTypeHandle = MetadataTokens.ExportedTypeHandle((int)rid);
-                    string exportedTypeName = GetExportedTypeFullName(metadataReader, exportedTypeHandle);
-                    if (!AvailableTypes.TryGetValue(availableTypesSection, out List<string> sectionTypes))
-                    {
-                        sectionTypes = new List<string>();
-                        AvailableTypes.Add(availableTypesSection, sectionTypes);
-                    }
-                    sectionTypes.Add("exported " + exportedTypeName);
+                    string exportedTypeName = GetExportedTypeFullName(metadataReader.MetadataReader, exportedTypeHandle);
+
+                    _readyToRunAssemblies[assemblyIndex]._availableTypes.Add("exported " + exportedTypeName);
                 }
                 else
                 {
                     TypeDefinitionHandle typeDefHandle = MetadataTokens.TypeDefinitionHandle((int)rid);
-                    string typeDefName = MetadataNameFormatter.FormatHandle(metadataReader, typeDefHandle);
-                    if (!AvailableTypes.TryGetValue(availableTypesSection, out List<string> sectionTypes))
-                    {
-                        sectionTypes = new List<string>();
-                        AvailableTypes.Add(availableTypesSection, sectionTypes);
-                    }
-                    sectionTypes.Add(typeDefName);
+                    string typeDefName = MetadataNameFormatter.FormatHandle(metadataReader.MetadataReader, typeDefHandle);
+                    _readyToRunAssemblies[assemblyIndex]._availableTypes.Add(typeDefName);
                 }
 
                 curParser = allEntriesEnum.GetNext();
@@ -1047,6 +1287,7 @@ namespace ILCompiler.Reflection.ReadyToRun
 
                 ReadyToRunCoreHeader assemblyHeader = new ReadyToRunCoreHeader(Image, ref headerOffset);
                 _readyToRunAssemblyHeaders.Add(assemblyHeader);
+                _readyToRunAssemblies.Add(new ReadyToRunAssembly(this));
             }
         }
 
@@ -1060,7 +1301,6 @@ namespace ILCompiler.Reflection.ReadyToRun
                 return;
             }
             _importSections = new List<ReadyToRunImportSection>();
-            _importCellNames = new Dictionary<int, string>();
             _importSignatures = new Dictionary<int, ReadyToRunSignature>();
             if (!ReadyToRunHeader.Sections.TryGetValue(ReadyToRunSectionType.ImportSections, out ReadyToRunSection importSectionsSection))
             {
@@ -1114,10 +1354,8 @@ namespace ILCompiler.Reflection.ReadyToRun
                     long section = NativeReader.ReadInt64(Image, ref sectionOffset);
                     uint sigRva = NativeReader.ReadUInt32(Image, ref signatureOffset);
                     int sigOffset = GetOffset((int)sigRva);
-                    ReadyToRunSignature signature;
-                    string cellName = MetadataNameFormatter.FormatSignature(_assemblyResolver, this, sigOffset, out signature);
-                    entries.Add(new ReadyToRunImportSection.ImportSectionEntry(entries.Count, entryOffset, entryOffset + rva, section, sigRva, cellName));
-                    _importCellNames.Add(rva + entrySize * i, cellName);
+                    ReadyToRunSignature signature = MetadataNameFormatter.FormatSignature(_assemblyResolver, this, sigOffset);
+                    entries.Add(new ReadyToRunImportSection.ImportSectionEntry(entries.Count, entryOffset, entryOffset + rva, section, sigRva, signature));
                     _importSignatures.Add(rva + entrySize * i, signature);
                 }
 
@@ -1137,7 +1375,7 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// <param name="rva">The relative virtual address</param>
         public int GetOffset(int rva)
         {
-            return PEReader.GetOffset(rva);
+            return CompositeReader.GetOffset(rva);
         }
 
         /// <summary>
@@ -1196,11 +1434,11 @@ namespace ILCompiler.Reflection.ReadyToRun
         {
             Debug.Assert(refAsmIndex != 0);
 
-            int assemblyRefCount = (_composite ? 0 : _assemblyCache[0].GetTableRowCount(TableIndex.AssemblyRef) + 1);
+            int assemblyRefCount = (_composite ? 0 : _assemblyCache[0].MetadataReader.GetTableRowCount(TableIndex.AssemblyRef) + 1);
             AssemblyReferenceHandle assemblyReferenceHandle;
             if (refAsmIndex < assemblyRefCount)
             {
-                metadataReader = _assemblyCache[0];
+                metadataReader = _assemblyCache[0].MetadataReader;
                 assemblyReferenceHandle = MetadataTokens.AssemblyReferenceHandle(refAsmIndex);
             }
             else
@@ -1223,9 +1461,9 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// </summary>
         /// <param name="refAsmIndex">Reference assembly index</param>
         /// <returns>MetadataReader instance representing the reference assembly</returns>
-        internal MetadataReader OpenReferenceAssembly(int refAsmIndex)
+        internal IAssemblyMetadata OpenReferenceAssembly(int refAsmIndex)
         {
-            MetadataReader result = (refAsmIndex < _assemblyCache.Count ? _assemblyCache[refAsmIndex] : null);
+            IAssemblyMetadata result = (refAsmIndex < _assemblyCache.Count ? _assemblyCache[refAsmIndex] : null);
             if (result == null)
             {
                 AssemblyReferenceHandle assemblyReferenceHandle = GetAssemblyAtIndex(refAsmIndex, out MetadataReader metadataReader);

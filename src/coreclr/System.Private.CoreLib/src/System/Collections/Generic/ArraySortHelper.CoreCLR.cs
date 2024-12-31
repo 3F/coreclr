@@ -13,7 +13,7 @@ namespace System.Collections.Generic
     }
 
     [TypeDependency("System.Collections.Generic.GenericArraySortHelper`1")]
-    internal partial class ArraySortHelper<T>
+    internal sealed partial class ArraySortHelper<T>
         : IArraySortHelper<T>
     {
         private static readonly IArraySortHelper<T> s_defaultArraySortHelper = CreateArraySortHelper();
@@ -27,7 +27,7 @@ namespace System.Collections.Generic
 
             if (typeof(IComparable<T>).IsAssignableFrom(typeof(T)))
             {
-                defaultArraySortHelper = (IArraySortHelper<T>)RuntimeTypeHandle.Allocate(typeof(GenericArraySortHelper<string>).TypeHandle.Instantiate(new Type[] { typeof(T) }));
+                defaultArraySortHelper = (IArraySortHelper<T>)RuntimeTypeHandle.CreateInstanceForAnotherGenericParameter((RuntimeType)typeof(GenericArraySortHelper<string>), (RuntimeType)typeof(T));
             }
             else
             {
@@ -37,7 +37,7 @@ namespace System.Collections.Generic
         }
     }
 
-    internal partial class GenericArraySortHelper<T>
+    internal sealed partial class GenericArraySortHelper<T>
         : IArraySortHelper<T>
     {
     }
@@ -48,7 +48,7 @@ namespace System.Collections.Generic
     }
 
     [TypeDependency("System.Collections.Generic.GenericArraySortHelper`2")]
-    internal partial class ArraySortHelper<TKey, TValue>
+    internal sealed partial class ArraySortHelper<TKey, TValue>
         : IArraySortHelper<TKey, TValue>
     {
         private static readonly IArraySortHelper<TKey, TValue> s_defaultArraySortHelper = CreateArraySortHelper();
@@ -62,7 +62,7 @@ namespace System.Collections.Generic
 
             if (typeof(IComparable<TKey>).IsAssignableFrom(typeof(TKey)))
             {
-                defaultArraySortHelper = (IArraySortHelper<TKey, TValue>)RuntimeTypeHandle.Allocate(typeof(GenericArraySortHelper<string, string>).TypeHandle.Instantiate(new Type[] { typeof(TKey), typeof(TValue) }));
+                defaultArraySortHelper = (IArraySortHelper<TKey, TValue>)RuntimeTypeHandle.CreateInstanceForAnotherGenericParameter((RuntimeType)typeof(GenericArraySortHelper<string, string>), (RuntimeType)typeof(TKey), (RuntimeType)typeof(TValue));
             }
             else
             {
@@ -72,7 +72,7 @@ namespace System.Collections.Generic
         }
     }
 
-    internal partial class GenericArraySortHelper<TKey, TValue>
+    internal sealed partial class GenericArraySortHelper<TKey, TValue>
         : IArraySortHelper<TKey, TValue>
     {
     }

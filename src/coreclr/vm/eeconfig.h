@@ -75,19 +75,22 @@ public:
     bool          GetTrackDynamicMethodDebugInfo(void)      const {LIMITED_METHOD_CONTRACT;  return fTrackDynamicMethodDebugInfo; }
     unsigned int  GenOptimizeType(void)                     const {LIMITED_METHOD_CONTRACT;  return iJitOptimizeType; }
     bool          JitFramed(void)                           const {LIMITED_METHOD_CONTRACT;  return fJitFramed; }
-    bool          JitAlignLoops(void)                       const {LIMITED_METHOD_CONTRACT;  return fJitAlignLoops; }
     bool          JitMinOpts(void)                          const {LIMITED_METHOD_CONTRACT;  return fJitMinOpts; }
+
+    void          DisableDefaultCodeVersioning()            { fDisableDefaultCodeVersioning = TRUE; }
+    bool          DefaultCodeVersioningDisabled()           const {LIMITED_METHOD_CONTRACT;  return fDisableDefaultCodeVersioning; }
 
     // Tiered Compilation config
 #if defined(FEATURE_TIERED_COMPILATION)
-    bool          TieredCompilation(void)           const { LIMITED_METHOD_CONTRACT;  return fTieredCompilation; }
-    bool          TieredCompilation_QuickJit() const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_QuickJit; }
-    bool          TieredCompilation_QuickJitForLoops() const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_QuickJitForLoops; }
-    bool          TieredCompilation_CallCounting()  const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_CallCounting; }
-    UINT16        TieredCompilation_CallCountThreshold() const { LIMITED_METHOD_CONTRACT; return tieredCompilation_CallCountThreshold; }
-    DWORD         TieredCompilation_CallCountingDelayMs() const { LIMITED_METHOD_CONTRACT; return tieredCompilation_CallCountingDelayMs; }
-    bool          TieredCompilation_UseCallCountingStubs() const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_UseCallCountingStubs; }
-    DWORD         TieredCompilation_DeleteCallCountingStubsAfter() const { LIMITED_METHOD_CONTRACT; return tieredCompilation_DeleteCallCountingStubsAfter; }
+    bool          TieredCompilation(void)           const { LIMITED_METHOD_CONTRACT;  return fTieredCompilation && !fDisableDefaultCodeVersioning; }
+    bool          TieredCompilation_QuickJit() const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_QuickJit && !fDisableDefaultCodeVersioning; }
+    bool          TieredCompilation_QuickJitForLoops() const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_QuickJitForLoops && !fDisableDefaultCodeVersioning; }
+    DWORD         TieredCompilation_BackgroundWorkerTimeoutMs() const { LIMITED_METHOD_CONTRACT; return fDisableDefaultCodeVersioning ? 0 : tieredCompilation_BackgroundWorkerTimeoutMs; }
+    bool          TieredCompilation_CallCounting()  const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_CallCounting && !fDisableDefaultCodeVersioning; }
+    UINT16        TieredCompilation_CallCountThreshold() const { LIMITED_METHOD_CONTRACT; return fDisableDefaultCodeVersioning ? 1 : tieredCompilation_CallCountThreshold; }
+    DWORD         TieredCompilation_CallCountingDelayMs() const { LIMITED_METHOD_CONTRACT; return fDisableDefaultCodeVersioning ? 0 : tieredCompilation_CallCountingDelayMs; }
+    bool          TieredCompilation_UseCallCountingStubs() const { LIMITED_METHOD_CONTRACT; return fTieredCompilation_UseCallCountingStubs && !fDisableDefaultCodeVersioning; }
+    DWORD         TieredCompilation_DeleteCallCountingStubsAfter() const { LIMITED_METHOD_CONTRACT; return fDisableDefaultCodeVersioning ? 0 : tieredCompilation_DeleteCallCountingStubsAfter; }
 #endif
 
 #if defined(FEATURE_ON_STACK_REPLACEMENT)
@@ -287,6 +290,8 @@ public:
         LIMITED_METHOD_CONTRACT;
         return fEnableRCWCleanupOnSTAShutdown;
     }
+
+    bool IsBuiltInCOMSupported() const { LIMITED_METHOD_CONTRACT;  return m_fBuiltInCOMInteropSupported; }
 #endif // FEATURE_COMINTEROP
 
 #ifdef _DEBUG
@@ -306,16 +311,6 @@ public:
         LIMITED_METHOD_CONTRACT;
         return fProbeForStackOverflow;
     }
-
-#ifdef _DEBUG
-    inline bool AppDomainLeaks() const
-    {
-        // Workaround for CoreCLR bug #12075, until this configuration option is removed
-        // (CoreCLR Bug #12094)
-        LIMITED_METHOD_DAC_CONTRACT;
-        return false;
-    }
-#endif
 
 #ifdef TEST_DATA_CONSISTENCY
     // get the value of fTestDataConsistency, which controls whether we test that we can correctly detect
@@ -417,22 +412,11 @@ public:
         LIMITED_METHOD_CONTRACT;
         return iInjectFatalError;
     }
-
-    inline BOOL SaveThreadInfo() const
-    {
-        return fSaveThreadInfo;
-    }
-
-    inline DWORD SaveThreadInfoMask() const
-    {
-        return dwSaveThreadInfoMask;
-    }
 #endif
 
 
 #ifdef _DEBUG
     // Interop config
-    IUnknown* GetTraceIUnknown()            const {LIMITED_METHOD_CONTRACT;  return m_pTraceIUnknown; }
     int     GetTraceWrapper()               const {LIMITED_METHOD_CONTRACT;  return m_TraceWrapper;      }
 #endif
 
@@ -463,40 +447,11 @@ public:
 
     bool    StressLog()                     const { LIMITED_METHOD_CONTRACT; return fStressLog; }
     bool    ForceEnc()                      const { LIMITED_METHOD_CONTRACT; return fForceEnc; }
+    bool    DebugAssembliesModifiable()     const { LIMITED_METHOD_CONTRACT; return fDebugAssembliesModifiable; }
 
     // Optimizations to improve working set
 
     HRESULT sync();    // check the registry again and update local state
-
-    // Helpers to read configuration
-
-    //
-    // NOTE: The following function is deprecated; use the CLRConfig class instead.
-    // To access a configuration value through CLRConfig, add an entry in file:../inc/CLRConfigValues.h.
-    //
-    static HRESULT GetConfigString_DontUse_(__in_z LPCWSTR name, __deref_out_z LPWSTR*out, BOOL fPrependCOMPLUS = TRUE); // Note that you own the returned string!
-
-    //
-    // NOTE: The following function is deprecated; use the CLRConfig class instead.
-    // To access a configuration value through CLRConfig, add an entry in file:../inc/CLRConfigValues.h.
-    //
-    static DWORD GetConfigDWORD_DontUse_(__in_z LPCWSTR name, DWORD defValue,
-                                DWORD level=(DWORD) REGUTIL::COR_CONFIG_ALL,
-                                BOOL fPrependCOMPLUS = TRUE);
-
-    //
-    // NOTE: The following function is deprecated; use the CLRConfig class instead.
-    // To access a configuration value through CLRConfig, add an entry in file:../inc/CLRConfigValues.h.
-    //
-    static ULONGLONG GetConfigULONGLONG_DontUse_(__in_z LPCWSTR name, ULONGLONG defValue,
-                                             DWORD level=(DWORD) REGUTIL::COR_CONFIG_ALL,
-                                             BOOL fPrependCOMPLUS = TRUE);
-
-    //
-    // NOTE: The following function is deprecated; use the CLRConfig class instead.
-    // To access a configuration value through CLRConfig, add an entry in file:../inc/CLRConfigValues.h.
-    //
-    static DWORD GetConfigFlag_DontUse_(__in_z LPCWSTR name, DWORD bitToSet, bool defValue = FALSE);
 
 #ifdef _DEBUG
     // GC alloc logging
@@ -511,15 +466,6 @@ public:
     DWORD  NgenForceFailureCount()    { LIMITED_METHOD_CONTRACT; return dwNgenForceFailureCount; }
     DWORD  NgenForceFailureKind()     { LIMITED_METHOD_CONTRACT; return dwNgenForceFailureKind;  }
 #endif
-    enum GCPollType
-    {
-        GCPOLL_TYPE_DEFAULT,    // Use the default gc poll for the platform
-        GCPOLL_TYPE_HIJACK,     // Depend on thread hijacking for gc suspension
-        GCPOLL_TYPE_POLL,       // Emit function calls to a helper for GC Poll
-        GCPOLL_TYPE_INLINE,     // Emit inlined tests to the helper for GC Poll
-        GCPOLL_TYPE_COUNT
-    };
-    GCPollType GetGCPollType() { LIMITED_METHOD_CONTRACT; return iGCPollType; }
 
 #ifdef _DEBUG
 
@@ -537,6 +483,9 @@ public:
 
 #endif
 
+    int ThreadPoolThreadTimeoutMs() const { LIMITED_METHOD_CONTRACT; return threadPoolThreadTimeoutMs; }
+    int ThreadPoolThreadsToKeepAlive() const { LIMITED_METHOD_CONTRACT; return threadPoolThreadsToKeepAlive; }
+
 private: //----------------------------------------------------------------
 
     bool fInited;                   // have we synced to the registry at least once?
@@ -546,7 +495,6 @@ private: //----------------------------------------------------------------
     DWORD dwJitHostMaxSlabCache;       // max size for jit host slab cache
     bool fTrackDynamicMethodDebugInfo; //  Enable/Disable tracking dynamic method debug info
     bool fJitFramed;                   // Enable/Disable EBP based frames
-    bool fJitAlignLoops;               // Enable/Disable loop alignment
     bool fJitMinOpts;                  // Enable MinOpts for all jitted methods
 
     unsigned iJitOptimizeType; // 0=Blended,1=SmallCode,2=FastCode,              default is 0=Blended
@@ -606,6 +554,7 @@ private: //----------------------------------------------------------------
     LPCUTF8 pszLogCCWRefCountChange;      // OutputDebugString when AddRef/Release is called on a CCW
                                           // for the specified type(s)
     bool fEnableRCWCleanupOnSTAShutdown;  // Register our IInitializeSpy even in classic processes
+    bool m_fBuiltInCOMInteropSupported;   // COM built-in support
 #endif // FEATURE_COMINTEROP
 
 #ifdef FEATURE_DOUBLE_ALIGNMENT_HINT
@@ -669,9 +618,6 @@ private: //----------------------------------------------------------------
 
     DWORD iInjectFatalError;
 
-    BOOL fSaveThreadInfo;
-    DWORD dwSaveThreadInfoMask;
-
     AssemblyNamesList *pSkipGCCoverageList;
 #endif
 
@@ -701,6 +647,7 @@ private: //----------------------------------------------------------------
 
     bool fStressLog;
     bool fForceEnc;
+    bool fDebugAssembliesModifiable;
     bool fProbeForStackOverflow;
 
     // Stackwalk optimization flag
@@ -711,7 +658,6 @@ private: //----------------------------------------------------------------
 
 #ifdef _DEBUG
     // interop logging
-    IUnknown* m_pTraceIUnknown;
     int       m_TraceWrapper;
 #endif
 
@@ -732,12 +678,15 @@ private: //----------------------------------------------------------------
     DWORD dwNgenForceFailureKind;
 #endif
 
-    GCPollType iGCPollType;
-
 #ifdef _DEBUG
     DWORD fShouldInjectFault;
     DWORD testThreadAbort;
 #endif
+
+    int threadPoolThreadTimeoutMs;
+    int threadPoolThreadsToKeepAlive;
+
+    bool fDisableDefaultCodeVersioning;
 
 #if defined(FEATURE_TIERED_COMPILATION)
     bool fTieredCompilation;
@@ -746,6 +695,7 @@ private: //----------------------------------------------------------------
     bool fTieredCompilation_CallCounting;
     bool fTieredCompilation_UseCallCountingStubs;
     UINT16 tieredCompilation_CallCountThreshold;
+    DWORD tieredCompilation_BackgroundWorkerTimeoutMs;
     DWORD tieredCompilation_CallCountingDelayMs;
     DWORD tieredCompilation_DeleteCallCountingStubsAfter;
 #endif
@@ -772,10 +722,6 @@ private: //----------------------------------------------------------------
     bool fGDBJitEmitDebugFrame;
 #endif
 public:
-
-    DWORD GetConfigDWORDInternal_DontUse_ (__in_z LPCWSTR name, DWORD defValue,    //for getting data in the constructor of EEConfig
-                                    DWORD level=(DWORD) REGUTIL::COR_CONFIG_ALL,
-                                    BOOL fPrependCOMPLUS = TRUE);
 
     enum BitForMask {
         CallSite_1 = 0x0001,

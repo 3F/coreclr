@@ -2,207 +2,396 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.CommandLine;
+using System.Collections;
+using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
+using System.Reflection;
+using System.Text;
+
+using Internal.CommandLine;
+using Internal.TypeSystem;
 
 namespace ILCompiler
 {
-    public class CommandLineOptions
+    internal class CommandLineOptions
     {
-        public FileInfo[] InputFilePaths { get; set; }
-        public FileInfo[] UnrootedInputFilePaths { get; set; }
-        public FileInfo[] Mibc { get; set; }
-        public string[] Reference { get; set; }
-        public string InstructionSet { get; set; }
-        public FileInfo OutputFilePath { get; set; }
+        public const int DefaultPerfMapFormatVersion = 0;
 
-        public DirectoryInfo CompositeRootPath { get; set; }
-        public bool Optimize { get; set; }
-        public bool OptimizeSpace { get; set; }
-        public bool OptimizeTime { get; set; }
-        public bool InputBubble { get; set; }
-        public bool CompileBubbleGenerics { get; set; }
-        public bool Verbose { get; set; }
-        public bool Composite { get; set; }
-        public bool CompileNoMethods { get; set; }
+        public bool Help;
+        public string HelpText;
 
-        public FileInfo DgmlLogFileName { get; set; }
-        public bool GenerateFullDgmlLog { get; set; }
+        public IReadOnlyList<string> InputFilePaths;
+        public IReadOnlyList<string> InputBubbleReferenceFilePaths;
+        public IReadOnlyList<string> UnrootedInputFilePaths;
+        public IReadOnlyList<string> ReferenceFilePaths;
+        public IReadOnlyList<string> MibcFilePaths;
+        public string InstructionSet;
+        public string OutputFilePath;
 
-        public string TargetArch { get; set; }
-        public string TargetOS { get; set; }
-        public FileInfo JitPath { get; set; }
-        public string SystemModule { get; set; }
-        public bool WaitForDebugger { get; set; }
-        public bool Tuning { get; set; }
-        public bool Partial { get; set; }
-        public bool Resilient { get; set; }
-        public bool Map { get; set; }
-        public int Parallelism { get; set; }
-        public ReadyToRunMethodLayoutAlgorithm MethodLayout { get; set; }
-        public ReadyToRunFileLayoutAlgorithm FileLayout { get; set; }
-        public int? CustomPESectionAlignment { get; set; }
-        public bool VerifyTypeAndFieldLayout { get; set; }
+        public string CompositeRootPath;
+        public bool Optimize;
+        public bool OptimizeDisabled;
+        public bool OptimizeSpace;
+        public bool OptimizeTime;
+        public bool InputBubble;
+        public bool CompileBubbleGenerics;
+        public bool Verbose;
+        public bool Composite;
+        public string CompositeKeyFile;
+        public bool CompileNoMethods;
+        public bool EmbedPgoData;
+        public bool OutNearInput;
+        public bool SingleFileCompilation;
 
-        public string SingleMethodTypeName { get; set; }
-        public string SingleMethodName { get; set; }
-        public string[] SingleMethodGenericArg { get; set; }
+        public string DgmlLogFileName;
+        public bool GenerateFullDgmlLog;
 
-        public string[] CodegenOptions { get; set; }
+        public string TargetArch;
+        public string TargetOS;
+        public string JitPath;
+        public string SystemModule;
+        public bool WaitForDebugger;
+        public bool Tuning;
+        public bool Partial;
+        public bool Resilient;
+        public bool Map;
+        public bool MapCsv;
+        public bool PrintReproInstructions;
+        public bool Pdb;
+        public string PdbPath;
+        public bool PerfMap;
+        public string PerfMapPath;
+        public int PerfMapFormatVersion;
+        public int Parallelism;
+        public int CustomPESectionAlignment;
+        public string MethodLayout;
+        public string FileLayout;
+        public bool VerifyTypeAndFieldLayout;
+        public string CallChainProfileFile;
+
+        public string SingleMethodTypeName;
+        public string SingleMethodName;
+        public int SingleMethodIndex;
+        public IReadOnlyList<string> SingleMethodGenericArg;
+
+        public IReadOnlyList<string> CodegenOptions;
+
+        public string MakeReproPath;
 
         public bool CompositeOrInputBubble => Composite || InputBubble;
 
-        public static Command RootCommand()
+        public CommandLineOptions(string[] args)
         {
-            // For some reason, arity caps at 255 by default
-            ArgumentArity arbitraryArity = new ArgumentArity(0, 100000);
+            InputFilePaths = Array.Empty<string>();
+            InputBubbleReferenceFilePaths = Array.Empty<string>();
+            UnrootedInputFilePaths = Array.Empty<string>();
+            ReferenceFilePaths = Array.Empty<string>();
+            MibcFilePaths = Array.Empty<string>();
+            CodegenOptions = Array.Empty<string>();
 
-            return new Command("Crossgen2Compilation")
+            PerfMapFormatVersion = DefaultPerfMapFormatVersion;
+            Parallelism = Environment.ProcessorCount;
+            SingleMethodGenericArg = null;
+
+            bool forceHelp = false;
+            if (args.Length == 0)
             {
-                new Argument<FileInfo[]>() 
-                { 
-                    Name = "input-file-paths", 
-                    Description = SR.InputFilesToCompile,
-                    Arity = arbitraryArity,
-                },
-                new Option(new[] { "--unrooted-input-file-paths", "-u" }, SR.UnrootedInputFilesToCompile)
+                forceHelp = true;
+            }
+
+            foreach (string arg in args)
+            {
+                if (arg == "-?")
+                    forceHelp = true;
+            }
+
+            if (forceHelp)
+            {
+                args = new string[] {"--help"};
+            }
+
+            ArgumentSyntax argSyntax = ArgumentSyntax.Parse(args, syntax =>
+            {
+                syntax.ApplicationName = typeof(Program).Assembly.GetName().Name.ToString();
+
+                // HandleHelp writes to error, fails fast with crash dialog and lacks custom formatting.
+                syntax.HandleHelp = false;
+                syntax.HandleErrors = true;
+
+                syntax.DefineOptionList("u|unrooted-input-file-paths", ref UnrootedInputFilePaths, SR.UnrootedInputFilesToCompile);
+                syntax.DefineOptionList("r|reference", ref ReferenceFilePaths, SR.ReferenceFiles);
+                syntax.DefineOption("instruction-set", ref InstructionSet, SR.InstructionSets);
+                syntax.DefineOptionList("m|mibc", ref MibcFilePaths, SR.MibcFiles);
+                syntax.DefineOption("o|out|outputfilepath", ref OutputFilePath, SR.OutputFilePath);
+                syntax.DefineOption("crp|compositerootpath", ref CompositeRootPath, SR.CompositeRootPath);
+                syntax.DefineOption("O|optimize", ref Optimize, SR.EnableOptimizationsOption);
+                syntax.DefineOption("Od|optimize-disabled", ref OptimizeDisabled, SR.DisableOptimizationsOption);
+                syntax.DefineOption("Os|optimize-space", ref OptimizeSpace, SR.OptimizeSpaceOption);
+                syntax.DefineOption("Ot|optimize-time", ref OptimizeTime, SR.OptimizeSpeedOption);
+                syntax.DefineOption("inputbubble", ref InputBubble, SR.InputBubbleOption);
+                syntax.DefineOptionList("inputbubbleref", ref InputBubbleReferenceFilePaths, SR.InputBubbleReferenceFiles);
+                syntax.DefineOption("composite", ref Composite, SR.CompositeBuildMode);
+                syntax.DefineOption("compositekeyfile", ref CompositeKeyFile, SR.CompositeKeyFile);
+                syntax.DefineOption("compile-no-methods", ref CompileNoMethods, SR.CompileNoMethodsOption);
+                syntax.DefineOption("out-near-input", ref OutNearInput, SR.OutNearInputOption);
+                syntax.DefineOption("single-file-compilation", ref SingleFileCompilation, SR.SingleFileCompilationOption);
+                syntax.DefineOption("tuning", ref Tuning, SR.TuningImageOption);
+                syntax.DefineOption("partial", ref Partial, SR.PartialImageOption);
+                syntax.DefineOption("compilebubblegenerics", ref CompileBubbleGenerics, SR.BubbleGenericsOption);
+                syntax.DefineOption("embed-pgo-data", ref EmbedPgoData, SR.EmbedPgoDataOption);
+                syntax.DefineOption("dgmllog|dgml-log-file-name", ref DgmlLogFileName, SR.SaveDependencyLogOption);
+                syntax.DefineOption("fulllog|generate-full-dmgl-log", ref GenerateFullDgmlLog, SR.SaveDetailedLogOption);
+                syntax.DefineOption("verbose", ref Verbose, SR.VerboseLoggingOption);
+                syntax.DefineOption("systemmodule", ref SystemModule, SR.SystemModuleOverrideOption);
+                syntax.DefineOption("waitfordebugger", ref WaitForDebugger, SR.WaitForDebuggerOption);
+                syntax.DefineOptionList("codegenopt|codegen-options", ref CodegenOptions, SR.CodeGenOptions);
+                syntax.DefineOption("resilient", ref Resilient, SR.ResilientOption);
+
+                syntax.DefineOption("targetarch", ref TargetArch, SR.TargetArchOption);
+                syntax.DefineOption("targetos", ref TargetOS, SR.TargetOSOption);
+                syntax.DefineOption("jitpath", ref JitPath, SR.JitPathOption);
+
+                syntax.DefineOption("print-repro-instructions", ref PrintReproInstructions, SR.PrintReproInstructionsOption);
+                syntax.DefineOption("singlemethodtypename", ref SingleMethodTypeName, SR.SingleMethodTypeName);
+                syntax.DefineOption("singlemethodname", ref SingleMethodName, SR.SingleMethodMethodName);
+                syntax.DefineOption("singlemethodindex", ref SingleMethodIndex, SR.SingleMethodIndex);
+                syntax.DefineOptionList("singlemethodgenericarg", ref SingleMethodGenericArg, SR.SingleMethodGenericArgs);
+
+                syntax.DefineOption("parallelism", ref Parallelism, SR.ParalellismOption);
+                syntax.DefineOption("custom-pe-section-alignment", ref CustomPESectionAlignment, SR.CustomPESectionAlignmentOption);
+                syntax.DefineOption("map", ref Map, SR.MapFileOption);
+                syntax.DefineOption("mapcsv", ref MapCsv, SR.MapCsvFileOption);
+                syntax.DefineOption("pdb", ref Pdb, SR.PdbFileOption);
+                syntax.DefineOption("pdb-path", ref PdbPath, SR.PdbFilePathOption);
+                syntax.DefineOption("perfmap", ref PerfMap, SR.PerfMapFileOption);
+                syntax.DefineOption("perfmap-path", ref PerfMapPath, SR.PerfMapFilePathOption);
+                syntax.DefineOption("perfmap-format-version", ref PerfMapFormatVersion, SR.PerfMapFormatVersionOption);
+
+                syntax.DefineOption("method-layout", ref MethodLayout, SR.MethodLayoutOption);
+                syntax.DefineOption("file-layout", ref FileLayout, SR.FileLayoutOption);
+                syntax.DefineOption("verify-type-and-field-layout", ref VerifyTypeAndFieldLayout, SR.VerifyTypeAndFieldLayoutOption);
+                syntax.DefineOption("callchain-profile", ref CallChainProfileFile, SR.CallChainProfileFile);
+
+                syntax.DefineOption("make-repro-path", ref MakeReproPath, SR.MakeReproPathHelp);
+
+                syntax.DefineOption("h|help", ref Help, SR.HelpOption);
+
+                syntax.DefineParameterList("in", ref InputFilePaths, SR.InputFilesToCompile);
+            });
+
+            if (Help)
+            {
+                List<string> extraHelp = new List<string>();
+                extraHelp.Add(SR.OptionPassingHelp);
+                extraHelp.Add("");
+                extraHelp.Add(SR.DashDashHelp);
+                extraHelp.Add("");
+
+                string[] ValidArchitectures = new string[] {"arm", "armel", "arm64", "x86", "x64"};
+                string[] ValidOS = new string[] {"windows", "linux", "osx"};
+                TargetOS defaultOs;
+                TargetArchitecture defaultArch;
+                Program.ComputeDefaultOptions(out defaultOs, out defaultArch);
+
+                extraHelp.Add(String.Format(SR.SwitchWithDefaultHelp, "--targetos", String.Join("', '", ValidOS), defaultOs.ToString().ToLowerInvariant()));
+
+                extraHelp.Add("");
+
+                extraHelp.Add(String.Format(SR.SwitchWithDefaultHelp, "--targetarch", String.Join("', '", ValidArchitectures), defaultArch.ToString().ToLowerInvariant()));
+
+                extraHelp.Add("");
+
+                extraHelp.Add(SR.InstructionSetHelp);
+                foreach (string arch in ValidArchitectures)
                 {
-                    Argument = new Argument<FileInfo[]>()
+                    StringBuilder archString = new StringBuilder();
+
+                    archString.Append(arch);
+                    archString.Append(": ");
+
+                    TargetArchitecture targetArch = Program.GetTargetArchitectureFromArg(arch, out _);
+                    bool first = true;
+                    foreach (var instructionSet in Internal.JitInterface.InstructionSetFlags.ArchitectureToValidInstructionSets(targetArch))
                     {
-                        Arity = arbitraryArity
+                        // Only instruction sets with are specifiable should be printed to the help text
+                        if (instructionSet.Specifiable)
+                        {
+                            if (first)
+                            {
+                                first = false;
+                            }
+                            else
+                            {
+                                archString.Append(", ");
+                            }
+                            archString.Append(instructionSet.Name);
+                        }
                     }
-                },
-                new Option(new[] { "--reference", "-r" }, SR.ReferenceFiles)
-                {
-                    Argument = new Argument<string[]>() 
-                    { 
-                        Arity = arbitraryArity
-                    } 
-                },
-                new Option(new[] { "--instruction-set" }, SR.InstructionSets)
-                {
-                    Argument = new Argument<string>() 
-                },
-                new Option(new[] { "--mibc", "-m" }, SR.MibcFiles)
-                {
-                    Argument = new Argument<string[]>()
-                    {
-                        Arity = arbitraryArity
-                    }
-                },
-                new Option(new[] { "--outputfilepath", "--out", "-o" }, SR.OutputFilePath)
-                {
-                    Argument = new Argument<FileInfo>()
-                },
-                new Option(new[] { "--compositerootpath", "--crp" }, SR.CompositeRootPath)
-                {
-                    Argument = new Argument<DirectoryInfo>()
-                },
-                new Option(new[] { "--optimize", "-O" }, SR.EnableOptimizationsOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--optimize-space", "--Os" }, SR.OptimizeSpaceOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--optimize-time", "--Ot" }, SR.OptimizeSpeedOption),
-                new Option(new[] { "--inputbubble" }, SR.InputBubbleOption),
-                new Option(new[] { "--composite" }, SR.CompositeBuildMode),
-                new Option(new[] { "--compile-no-methods" }, SR.CompileNoMethodsOption),
-                new Option(new[] { "--tuning" }, SR.TuningImageOption) 
-                {
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--partial" }, SR.PartialImageOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--compilebubblegenerics" }, SR.BubbleGenericsOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--dgml-log-file-name", "--dmgllog" }, SR.SaveDependencyLogOption) 
-                { 
-                    Argument = new Argument<FileInfo>() 
-                },
-                new Option(new[] { "--generate-full-dmgl-log", "--fulllog" }, SR.SaveDetailedLogOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--verbose" }, SR.VerboseLoggingOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--systemmodule" }, SR.SystemModuleOverrideOption) 
-                { 
-                    Argument = new Argument<string>() 
-                },
-                new Option(new[] { "--waitfordebugger" }, SR.WaitForDebuggerOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--codegen-options", "--codegenopt" }, SR.CodeGenOptions) 
-                { 
-                    Argument = new Argument<string[]>()
-                    {
-                        Arity = arbitraryArity
-                    }
-                },
-                new Option(new[] { "--resilient" }, SR.ResilientOption) 
-                { 
-                    Argument = new Argument<bool>() 
-                },
-                new Option(new[] { "--targetarch" }, SR.TargetArchOption) 
-                { 
-                    Argument = new Argument<string>() 
-                },
-                new Option(new[] { "--targetos" }, SR.TargetOSOption) 
-                { 
-                    Argument = new Argument<string>() 
-                },
-                new Option(new[] { "--jitpath" }, SR.JitPathOption) 
-                { 
-                    Argument =  new Argument<FileInfo>() 
-                },
-                new Option(new[] { "--singlemethodtypename" }, SR.SingleMethodTypeName) 
-                { 
-                    Argument = new Argument<string>() 
-                },
-                new Option(new[] { "--singlemethodname" }, SR.SingleMethodMethodName) 
-                { 
-                    Argument = new Argument<string>() 
-                },
-                new Option(new[] { "--singlemethodgenericarg" }, SR.SingleMethodGenericArgs) 
-                { 
-                    // We don't need to override arity here as 255 is the maximum number of generic arguments
-                    Argument = new Argument<string[]>()
-                },
-                new Option(new[] { "--parallelism" }, SR.ParalellismOption)
-                { 
-                    Argument = new Argument<int>(() => Environment.ProcessorCount)
-                },
-                new Option(new[] { "--custom-pe-section-alignment" }, SR.CustomPESectionAlignmentOption)
-                { 
-                    Argument = new Argument<int?>()
-                },
-                new Option(new[] { "--map" }, SR.MapFileOption)
-                {
-                    Argument = new Argument<bool>()
-                },
-                new Option(new[] { "--method-layout" }, SR.MethodLayoutOption)
-                {
-                    Argument = new Argument<ReadyToRunMethodLayoutAlgorithm>()
-                },
-                new Option(new[] { "--file-layout" }, SR.FileLayoutOption)
-                {
-                    Argument = new Argument<ReadyToRunFileLayoutAlgorithm>()
-                },
-                new Option(new[] { "--verify-type-and-field-layout" }, SR.VerifyTypeAndFieldLayoutOption)
-                {
-                    Argument = new Argument<bool>()
+
+                    extraHelp.Add(archString.ToString());
                 }
-            };
+
+                argSyntax.ExtraHelpParagraphs = extraHelp;
+
+                HelpText = argSyntax.GetHelpText();
+            }
+
+            if (MakeReproPath != null)
+            {
+                // Create a repro package in the specified path
+                // This package will have the set of input files needed for compilation
+                // + the original command line arguments
+                // + a rsp file that should work to directly run out of the zip file
+
+                string makeReproPath = MakeReproPath;
+                Directory.CreateDirectory(makeReproPath);
+
+                List<string> crossgenDetails = new List<string>();
+                crossgenDetails.Add("CrossGen2 version");
+                try
+                {
+                    crossgenDetails.Add(Environment.GetCommandLineArgs()[0]);
+                } catch  {}
+                try
+                {
+                    crossgenDetails.Add(System.Diagnostics.FileVersionInfo.GetVersionInfo(Environment.GetCommandLineArgs()[0]).ToString());
+                } catch  {}
+
+                crossgenDetails.Add("------------------------");
+                crossgenDetails.Add("Actual Command Line Args");
+                crossgenDetails.Add("------------------------");
+                crossgenDetails.AddRange(args);
+                foreach (string arg in args)
+                {
+                    if (arg.StartsWith('@'))
+                    {
+                        string rspFileName = arg.Substring(1);
+                        crossgenDetails.Add("------------------------");
+                        crossgenDetails.Add(rspFileName);
+                        crossgenDetails.Add("------------------------");
+                        try
+                        {
+                            crossgenDetails.AddRange(File.ReadAllLines(rspFileName));
+                        } catch  {}
+                    }
+                }
+
+                HashCode hashCodeOfArgs = new HashCode();
+                foreach (string s in crossgenDetails)
+                    hashCodeOfArgs.Add(s);
+
+                string zipFileName = ((uint)hashCodeOfArgs.ToHashCode()).ToString();
+
+                if (OutputFilePath != null)
+                    zipFileName = zipFileName + "_" + Path.GetFileName(OutputFilePath);
+
+                zipFileName = Path.Combine(MakeReproPath, Path.ChangeExtension(zipFileName, ".zip"));
+
+                Console.WriteLine($"Creating {zipFileName}");
+                using (var archive = ZipFile.Open(zipFileName, ZipArchiveMode.Create))
+                {
+                    ZipArchiveEntry commandEntry = archive.CreateEntry("crossgen2command.txt");
+                    using (StreamWriter writer = new StreamWriter(commandEntry.Open()))
+                    {
+                        foreach (string s in crossgenDetails)
+                            writer.WriteLine(s);
+                    }
+
+                    HashSet<string> inputOptionNames = new HashSet<string>();
+                    inputOptionNames.Add("-r");
+                    inputOptionNames.Add("-u");
+                    inputOptionNames.Add("-m");
+                    inputOptionNames.Add("--inputbubbleref");
+                    Dictionary<string, string> inputToReproPackageFileName = new Dictionary<string, string>();
+
+                    List<string> rspFile = new List<string>();
+                    foreach (var option in argSyntax.GetOptions())
+                    {
+                        if (option.GetDisplayName() == "--make-repro-path")
+                        {
+                            continue;
+                        }
+
+                        if (option.Value != null && !option.Value.Equals(option.DefaultValue))
+                        {
+                            if (option.IsList)
+                            {
+                                if (inputOptionNames.Contains(option.GetDisplayName()))
+                                {
+                                    Dictionary<string, string> dictionary = new Dictionary<string, string>();
+                                    foreach (string optInList in (IEnumerable)option.Value)
+                                    {
+                                        Helpers.AppendExpandedPaths(dictionary, optInList, false);
+                                    }
+                                    foreach (string inputFile in dictionary.Values)
+                                    {
+                                        rspFile.Add($"{option.GetDisplayName()}:{ConvertFromInputPathToReproPackagePath(inputFile)}");
+                                    }
+                                }
+                                else
+                                {
+                                    foreach (object optInList in (IEnumerable)option.Value)
+                                    {
+                                        rspFile.Add($"{option.GetDisplayName()}:{optInList}");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                rspFile.Add($"{option.GetDisplayName()}:{option.Value}");
+                            }
+                        }
+                    }
+
+                    foreach (var parameter in argSyntax.GetParameters())
+                    {
+                        if (parameter.Value != null)
+                        {
+                            if (parameter.IsList)
+                            {
+                                foreach (object optInList in (IEnumerable)parameter.Value)
+                                {
+                                    rspFile.Add($"{ConvertFromInputPathToReproPackagePath((string)optInList)}");
+                                }
+                            }
+                            else
+                            {
+                                rspFile.Add($"{ConvertFromInputPathToReproPackagePath((string)parameter.Value.ToString())}");
+                            }
+                        }
+                    }
+
+                    ZipArchiveEntry rspEntry = archive.CreateEntry("crossgen2repro.rsp");
+                    using (StreamWriter writer = new StreamWriter(rspEntry.Open()))
+                    {
+                        foreach (string s in rspFile)
+                            writer.WriteLine(s);
+                    }
+
+                    string ConvertFromInputPathToReproPackagePath(string inputPath)
+                    {
+                        if (inputToReproPackageFileName.TryGetValue(inputPath, out string reproPackagePath))
+                        {
+                            return reproPackagePath;
+                        }
+
+                        try
+                        {
+                            string inputFileDir = inputToReproPackageFileName.Count.ToString();
+                            reproPackagePath = Path.Combine(inputFileDir, Path.GetFileName(inputPath));
+                            archive.CreateEntryFromFile(inputPath, reproPackagePath);
+                            inputToReproPackageFileName.Add(inputPath, reproPackagePath);
+
+                            return reproPackagePath;
+                        }
+                        catch
+                        {
+                            return inputPath;
+                        }
+                    }
+                }
+            }
         }
     }
 }

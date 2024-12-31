@@ -2,7 +2,7 @@ parameters:
   dependsOn: []
   PublishRidAgnosticPackagesFromPlatform: ''
   isOfficialBuild: false
-  logArtifactName: 'Logs-PrepareSignedArtifacts'
+  logArtifactName: 'Logs-PrepareSignedArtifacts_Attempt$(System.JobAttempt)'
 
 jobs:
 - job: PrepareSignedArtifacts
@@ -10,9 +10,9 @@ jobs:
   dependsOn: ${{ parameters.dependsOn }}
   pool:
     name: NetCore1ESPool-Svc-Internal
-    demands: ImageOverride -equals Build.Windows.10.Amd64.VS2019
+    demands: ImageOverride -equals windows.vs2019.amd64
   # Double the default timeout.
-  timeoutInMinutes: 120
+  timeoutInMinutes: 180
   workspace:
     clean: all
 
@@ -20,25 +20,21 @@ jobs:
   - name: SignType
     value: $[ coalesce(variables.OfficialSignType, 'real') ]
 
-  - ${{ if ne(variables['System.TeamProject'], 'public') }}:
-    - group: AzureDevOps-Artifact-Feeds-Pats
+  templateContext:
+    outputs:
+    - output: pipelineArtifact
+      displayName: 'Publish BuildLogs'
+      condition: succeededOrFailed()
+      targetPath: '$(Build.StagingDirectory)\BuildLogs'
+      artifactName: ${{ parameters.logArtifactName }}
 
   steps:
   - checkout: self
     clean: true
     fetchDepth: 20
 
-  - ${{ if ne(variables['System.TeamProject'], 'public') }}:
-    - task: PowerShell@2
-      displayName: Setup Private Feeds Credentials
-      inputs:
-        filePath: $(Build.SourcesDirectory)\eng\common\SetupNugetSources.ps1
-        arguments: -ConfigFile $(Build.SourcesDirectory)\NuGet.config -Password $Env:Token
-      env:
-        Token: $(dn-bot-dnceng-artifact-feeds-rw)
-
   - ${{ if eq(parameters.isOfficialBuild, true) }}:
-    - task: NuGetAuthenticate@0
+    - task: NuGetAuthenticate@1
 
   - task: MicroBuildSigningPlugin@2
     displayName: Install MicroBuild plugin for Signing
@@ -51,14 +47,15 @@ jobs:
                 in(variables['SignType'], 'real', 'test'))
 
   - task: DownloadBuildArtifacts@0
-    displayName: Download IntermediateUnsignedArtifacts
+    displayName: Download IntermediateArtifacts
     inputs:
-      artifactName: IntermediateUnsignedArtifacts
+      artifactName: IntermediateArtifacts
       downloadPath: $(Build.SourcesDirectory)\artifacts\PackageDownload
+      checkDownloadedFiles: true
 
   - script: >-
       build.cmd -ci
-      -subset installer.publish
+      -subset publish
       -configuration Release
       /p:PublishRidAgnosticPackagesFromPlatform=${{ parameters.PublishRidAgnosticPackagesFromPlatform }}
       /p:OfficialBuildId=$(Build.BuildNumber)
@@ -76,11 +73,4 @@ jobs:
         **/*.binlog
       TargetFolder: '$(Build.StagingDirectory)\BuildLogs'
     continueOnError: true
-    condition: succeededOrFailed()
-
-  - task: PublishPipelineArtifact@1
-    displayName: Publish BuildLogs
-    inputs:
-      targetPath: '$(Build.StagingDirectory)\BuildLogs'
-      artifactName: ${{ parameters.logArtifactName }}
     condition: succeededOrFailed()

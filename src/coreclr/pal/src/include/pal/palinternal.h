@@ -375,6 +375,7 @@ function_name() to call the system's implementation
 #undef strrchr
 #undef strpbrk
 #undef strtoul
+#undef strtoull
 #undef strtod
 #undef strspn
 #undef strtok
@@ -429,6 +430,7 @@ function_name() to call the system's implementation
 #undef va_list
 #undef va_start
 #undef va_end
+#undef va_arg
 #undef va_copy
 #undef stdin
 #undef stdout
@@ -457,8 +459,8 @@ function_name() to call the system's implementation
 #undef log10
 #undef modf
 #undef pow
-#undef scalbn
 #undef sin
+#undef sincos
 #undef sinh
 #undef sqrt
 #undef tan
@@ -485,8 +487,8 @@ function_name() to call the system's implementation
 #undef log10f
 #undef modff
 #undef powf
-#undef scalbnf
 #undef sinf
+#undef sincosf
 #undef sinhf
 #undef sqrtf
 #undef tanf
@@ -694,30 +696,30 @@ T* InterlockedCompareExchangePointerT(
 template <typename T>
 inline T* InterlockedExchangePointerT(
     T* volatile * target,
-    int           value) // When NULL is provided as argument.
+    std::nullptr_t           value) // When NULL is provided as argument.
 {
     //STATIC_ASSERT(value == 0);
-    return InterlockedExchangePointerT(target, reinterpret_cast<T*>(value));
+    return InterlockedExchangePointerT(target, (T*)(void*)value);
 }
 
 template <typename T>
 inline T* InterlockedCompareExchangePointerT(
     T* volatile * destination,
-    int           exchange,  // When NULL is provided as argument.
+    std::nullptr_t           exchange,  // When NULL is provided as argument.
     T*            comparand)
 {
     //STATIC_ASSERT(exchange == 0);
-    return InterlockedCompareExchangePointerT(destination, reinterpret_cast<T*>(exchange), comparand);
+    return InterlockedCompareExchangePointerT(destination, (T*)(void*)exchange, comparand);
 }
 
 template <typename T>
 inline T* InterlockedCompareExchangePointerT(
     T* volatile * destination,
     T*            exchange,
-    int           comparand) // When NULL is provided as argument.
+    std::nullptr_t           comparand) // When NULL is provided as argument.
 {
     //STATIC_ASSERT(comparand == 0);
-    return InterlockedCompareExchangePointerT(destination, exchange, reinterpret_cast<T*>(comparand));
+    return InterlockedCompareExchangePointerT(destination, exchange, (T*)(void*)comparand);
 }
 
 #undef InterlockedExchangePointer
@@ -730,5 +732,11 @@ inline T* InterlockedCompareExchangePointerT(
 const char StackOverflowMessage[] = "Stack overflow.\n";
 
 #endif // __cplusplus
+
+#if __has_cpp_attribute(fallthrough)
+#define FALLTHROUGH [[fallthrough]]
+#else
+#define FALLTHROUGH
+#endif
 
 #endif /* _PAL_INTERNAL_H_ */

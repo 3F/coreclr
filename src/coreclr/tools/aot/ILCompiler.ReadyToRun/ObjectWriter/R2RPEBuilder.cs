@@ -159,7 +159,7 @@ namespace ILCompiler.PEWriter
         /// If non-null, the PE file will be laid out such that it can naturally be mapped with a higher alignment than 4KB
         /// This is used to support loading via large pages on Linux
         /// </summary>
-        private readonly int? _customPESectionAlignment;
+        private readonly int _customPESectionAlignment;
 
         /// <summary>
         /// Constructor initializes the various control structures and combines the section list.
@@ -173,7 +173,7 @@ namespace ILCompiler.PEWriter
             ISymbolNode r2rHeaderExportSymbol,
             string outputFileSimpleName,
             Func<RuntimeFunctionsTableNode> getRuntimeFunctionsTable,
-            int? customPESectionAlignment,
+            int customPESectionAlignment,
             Func<IEnumerable<Blob>, BlobContentId> deterministicIdProvider)
             : base(peHeaderBuilder, deterministicIdProvider: deterministicIdProvider)
         {
@@ -241,8 +241,8 @@ namespace ILCompiler.PEWriter
         /// <param name="objectData">Object data to emit</param>
         /// <param name="section">Target section</param>
         /// <param name="name">Textual name of the object data for diagnostic purposese</param>
-        /// <param name="mapFileBuilder">Optional map file builder to output the data item to</param>
-        public void AddObjectData(ObjectNode.ObjectData objectData, ObjectNodeSection section, string name, MapFileBuilder mapFileBuilder)
+        /// <param name="outputInfoBuilder">Optional output info builder to output the data item to</param>
+        public void AddObjectData(DependencyAnalysis.ObjectNode.ObjectData objectData, ObjectNodeSection section, string name, OutputInfoBuilder outputInfoBuilder)
         {
             if (_written)
             {
@@ -266,7 +266,7 @@ namespace ILCompiler.PEWriter
                     throw new NotImplementedException();
             }
 
-            _sectionBuilder.AddObjectData(objectData, targetSectionIndex, name, mapFileBuilder);
+            _sectionBuilder.AddObjectData(objectData, targetSectionIndex, name, outputInfoBuilder);
         }
 
         /// <summary>
@@ -298,8 +298,8 @@ namespace ILCompiler.PEWriter
 
             UpdateSectionRVAs(outputStream);
 
-            if (_customPESectionAlignment.HasValue)
-                SetPEHeaderSectionAlignment(outputStream, _customPESectionAlignment.Value);
+            if (_customPESectionAlignment != 0)
+                SetPEHeaderSectionAlignment(outputStream, _customPESectionAlignment);
 
             ApplyMachineOSOverride(outputStream);
 
@@ -312,10 +312,10 @@ namespace ILCompiler.PEWriter
         /// <summary>
         /// Fill in map builder section table.
         /// </summary>
-        /// <param name="mapFileBuilder">Map file builder to set up</param>
-        public void AddSections(MapFileBuilder mapFileBuilder)
+        /// <param name="outputInfoBuilder">Object info builder to set up</param>
+        public void AddSections(OutputInfoBuilder outputInfoBuilder)
         {
-            _sectionBuilder.AddSections(mapFileBuilder);
+            _sectionBuilder.AddSections(outputInfoBuilder);
         }
 
         /// <summary>
@@ -403,7 +403,7 @@ namespace ILCompiler.PEWriter
             int sectionCount = _sectionRVAs.Length;
             for (int sectionIndex = 0; sectionIndex < sectionCount; sectionIndex++)
             {
-                if (_customPESectionAlignment != null)
+                if (_customPESectionAlignment != 0)
                 {
                     // When _customPESectionAlignment is set, the physical and virtual sizes are the same
                     byte[] sizeBytes = BitConverter.GetBytes(_sectionRawSizes[sectionIndex]);
@@ -489,7 +489,7 @@ namespace ILCompiler.PEWriter
                 DosHeaderSize +
                 PESignatureSize +
                 sizeof(short) +     // Machine
-                sizeof(short);      //NumberOfSections
+                sizeof(short);      // NumberOfSections
 
             outputStream.Seek(seekSize, SeekOrigin.Begin);
             outputStream.Write(patchedTimestamp, 0, patchedTimestamp.Length);
@@ -578,15 +578,15 @@ namespace ILCompiler.PEWriter
             }
 
             int injectedPadding = 0;
-            if (_customPESectionAlignment.HasValue && _customPESectionAlignment.Value != 0)
+            if (_customPESectionAlignment != 0)
             {
                 if (outputSectionIndex > 0)
                 {
                     sectionStartRva = Math.Max(sectionStartRva, _sectionRVAs[outputSectionIndex - 1] + _sectionRawSizes[outputSectionIndex - 1]);
                 }
 
-                int newSectionStartRva = AlignmentHelper.AlignUp(sectionStartRva, _customPESectionAlignment.Value);
-                int newSectionPointerToRawData = AlignmentHelper.AlignUp(location.PointerToRawData, _customPESectionAlignment.Value);
+                int newSectionStartRva = AlignmentHelper.AlignUp(sectionStartRva, _customPESectionAlignment);
+                int newSectionPointerToRawData = AlignmentHelper.AlignUp(location.PointerToRawData, _customPESectionAlignment);
                 if (newSectionPointerToRawData > location.PointerToRawData)
                 {
                     sectionDataBuilder = new BlobBuilder();
@@ -646,10 +646,10 @@ namespace ILCompiler.PEWriter
 
             int sectionRawSize = sectionDataBuilder.Count - injectedPadding;
 
-            if (_customPESectionAlignment.HasValue && _customPESectionAlignment.Value != 0)
+            if (_customPESectionAlignment != 0)
             {
                 // Align the end of the section to the padding offset
-                int count = AlignmentHelper.AlignUp(sectionRawSize, _customPESectionAlignment.Value);
+                int count = AlignmentHelper.AlignUp(sectionRawSize, _customPESectionAlignment);
                 sectionDataBuilder.WriteBytes(0, count - sectionRawSize);
                 sectionRawSize = count;
             }
@@ -664,52 +664,28 @@ namespace ILCompiler.PEWriter
     }
     
     /// <summary>
-    /// Simple helper for filling in PE header information by either copying over
-    /// data from a pre-existing input PE header (used for single-assembly R2R files)
-    /// or by explicitly specifying the image characteristics (for composite R2R).
+    /// Simple helper for filling in PE header information.
     /// </summary>
     static class PEHeaderProvider
     {
         /// <summary>
-        /// Copy PE headers into a PEHeaderBuilder used by PEBuilder.
-        /// </summary>
-        /// <param name="peHeaders">Headers to copy</param>
-        /// <param name="target">Target architecture to set in the header</param>
-        public static PEHeaderBuilder Copy(PEHeaders peHeaders, TargetDetails target)
-        {
-            return Create(
-                peHeaders.CoffHeader.Characteristics,
-                peHeaders.PEHeader.DllCharacteristics,
-                peHeaders.PEHeader.Subsystem,
-                target);
-        }
-
-        /// <summary>
         /// Fill in PE header information into a PEHeaderBuilder used by PEBuilder.
         /// </summary>
-        /// <param name="relocsStripped">Relocs are not present in the PE executable</param>
-        /// <param name="dllCharacteristics">Extra DLL characteristics to apply</param>
         /// <param name="subsystem">Targeting subsystem</param>
         /// <param name="target">Target architecture to set in the header</param>
-        public static PEHeaderBuilder Create(Characteristics imageCharacteristics, DllCharacteristics dllCharacteristics, Subsystem subsystem, TargetDetails target)
+        public static PEHeaderBuilder Create(Subsystem subsystem, TargetDetails target)
         {
             bool is64BitTarget = target.PointerSize == sizeof(long);
 
-            imageCharacteristics &= ~(Characteristics.Bit32Machine | Characteristics.LargeAddressAware);
-            imageCharacteristics |= (is64BitTarget ? Characteristics.LargeAddressAware : Characteristics.Bit32Machine);
+            Characteristics imageCharacteristics = Characteristics.ExecutableImage | Characteristics.Dll;
+            imageCharacteristics |= is64BitTarget ? Characteristics.LargeAddressAware : Characteristics.Bit32Machine;
 
-            ulong imageBase = PE32HeaderConstants.ImageBase;
-            if (target.IsWindows && is64BitTarget && (imageBase <= uint.MaxValue))
-            {
-                // Base addresses below 4 GiB are reserved for WoW on x64 and disallowed on ARM64.
-                // If the input assembly was compiled for anycpu, its base address is 32-bit and we need to fix it.
-                imageBase = (imageCharacteristics & Characteristics.Dll) != 0 ? PE64HeaderConstants.DllImageBase : PE64HeaderConstants.ExeImageBase;
-            }
+            ulong imageBase = is64BitTarget ? PE64HeaderConstants.DllImageBase : PE32HeaderConstants.ImageBase;
 
             int fileAlignment = 0x200;
             if (!target.IsWindows && !is64BitTarget)
             {
-                // To minimize wasted VA space on 32 bit systems align file to page bounaries (presumed to be 4K).
+                // To minimize wasted VA space on 32-bit systems, align file to page boundaries (presumed to be 4K)
                 fileAlignment = 0x1000;
             }
 
@@ -721,13 +697,11 @@ namespace ILCompiler.PEWriter
                 sectionAlignment = fileAlignment;
             }
 
-            dllCharacteristics &= DllCharacteristics.AppContainer;
-
-            // In Crossgen1, this is under a debug-specific condition 'if (0 == CLRConfig::GetConfigValue(CLRConfig::INTERNAL_NoASLRForNgen))'
-            dllCharacteristics |= DllCharacteristics.DynamicBase;
-
             // Without NxCompatible the PE executable cannot execute on Windows ARM64
-            dllCharacteristics |= DllCharacteristics.NxCompatible | DllCharacteristics.TerminalServerAware;
+            DllCharacteristics dllCharacteristics =
+                DllCharacteristics.DynamicBase |
+                DllCharacteristics.NxCompatible |
+                DllCharacteristics.TerminalServerAware;
 
             if (is64BitTarget)
             {

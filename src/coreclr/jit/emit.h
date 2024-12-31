@@ -190,6 +190,8 @@ public:
 
     UNATIVE_OFFSET GetFuncletPrologOffset(emitter* emit) const;
 
+    bool IsPreviousInsNum(emitter* emit) const;
+
 #ifdef DEBUG
     void Print(LONG compMethodID) const;
 #endif // DEBUG
@@ -245,11 +247,20 @@ struct insGroup
     double               igPerfScore; // The PerfScore for this insGroup
 #endif
 
+#ifdef DEBUG
+    BasicBlock*               lastGeneratedBlock; // The last block that generated code into this insGroup.
+    jitstd::list<BasicBlock*> igBlocks;           // All the blocks that generated code into this insGroup.
+#endif
+
     UNATIVE_OFFSET igNum;     // for ordering (and display) purposes
     UNATIVE_OFFSET igOffs;    // offset of this group within method
     unsigned int   igFuncIdx; // Which function/funclet does this belong to? (Index into Compiler::compFuncInfos array.)
     unsigned short igFlags;   // see IGF_xxx below
     unsigned short igSize;    // # of bytes of code in this group
+
+#if FEATURE_LOOP_ALIGN
+    insGroup* igLoopBackEdge; // "last" back-edge that branches back to an aligned loop head.
+#endif
 
 #define IGF_GC_VARS 0x0001    // new set of live GC ref variables
 #define IGF_BYREF_REGS 0x0002 // new set of live by-ref registers
@@ -264,6 +275,8 @@ struct insGroup
 #define IGF_PLACEHOLDER 0x0100    // this is a placeholder group, to be filled in later
 #define IGF_EXTEND 0x0200         // this block is conceptually an extension of the previous block
                                   // and the emitter should continue to track GC info as if there was no new block.
+#define IGF_LOOP_ALIGN 0x0400     // this group contains alignment instruction(s) at the end; the next IG is the
+                                  // head of a loop that needs alignment.
 
 // Mask of IGF_* flags that should be propagated to new blocks when they are created.
 // This allows prologs and epilogs to be any number of IGs, but still be
@@ -334,6 +347,11 @@ struct insGroup
         ptr -= sizeof(unsigned);
 
         return *(unsigned*)ptr;
+    }
+
+    bool isLoopAlign()
+    {
+        return (igFlags & IGF_LOOP_ALIGN) != 0;
     }
 
 }; // end of struct insGroup
@@ -492,6 +510,8 @@ protected:
 
     void emitRecomputeIGoffsets();
 
+    void emitDispCommentForHandle(size_t handle, GenTreeFlags flags);
+
     /************************************************************************/
     /*          The following describes a single instruction                */
     /************************************************************************/
@@ -527,7 +547,7 @@ protected:
         size_t            idSize;        // size of the instruction descriptor
         unsigned          idVarRefOffs;  // IL offset for LclVar reference
         size_t            idMemCookie;   // for display of method name  (also used by switch table)
-        unsigned          idFlags;       // for determining type of handle in idMemCookie
+        GenTreeFlags      idFlags;       // for determining type of handle in idMemCookie
         bool              idFinallyCall; // Branch instruction is a call to finally
         bool              idCatchRet;    // Instruction is for a catch 'return'
         CORINFO_SIG_INFO* idCallSig;     // Used to report native call site signatures to the EE
@@ -561,6 +581,7 @@ protected:
 #if defined(TARGET_XARCH)
         static_assert_no_msg(INS_count <= 1024);
         instruction _idIns : 10;
+#define MAX_ENCODED_SIZE 15
 #elif defined(TARGET_ARM64)
         static_assert_no_msg(INS_count <= 512);
         instruction _idIns : 9;
@@ -863,16 +884,6 @@ protected:
         }
         void idCodeSize(unsigned sz)
         {
-            if (sz > 15)
-            {
-                // This is a temporary workaround for non-precise instr size
-                // estimator on XARCH. It often overestimates sizes and can
-                // return value more than 15 that doesn't fit in 4 bits _idCodeSize.
-                // If somehow we generate instruction that needs more than 15 bytes we
-                // will fail on another assert in emit.cpp: noway_assert(id->idCodeSize() >= csz).
-                // Issue https://github.com/dotnet/runtime/issues/12840.
-                sz = 15;
-            }
             assert(sz <= 15); // Intel decoder limit.
             _idCodeSize = sz;
             assert(sz == _idCodeSize);
@@ -1215,6 +1226,8 @@ protected:
 
 #define PERFSCORE_THROUGHPUT_ILLEGAL -1024.0f
 
+#define PERFSCORE_THROUGHPUT_ZERO 0.0f // Only used for pseudo-instructions that don't generate code
+
 #define PERFSCORE_THROUGHPUT_6X (1.0f / 6.0f) // Hextuple issue
 #define PERFSCORE_THROUGHPUT_5X 0.20f         // Pentuple issue
 #define PERFSCORE_THROUGHPUT_4X 0.25f         // Quad issue
@@ -1361,6 +1374,14 @@ protected:
                                   // hot to cold and cold to hot jumps)
     };
 
+#if FEATURE_LOOP_ALIGN
+    struct instrDescAlign : instrDesc
+    {
+        instrDescAlign* idaNext; // next align in the group/method
+        insGroup*       idaIG;   // containing group
+    };
+#endif
+
 #if !defined(TARGET_ARM64) // This shouldn't be needed for ARM32, either, but I don't want to touch the ARM32 JIT.
     struct instrDescLbl : instrDescJmp
     {
@@ -1370,7 +1391,7 @@ protected:
 
     struct instrDescCns : instrDesc // large const
     {
-        target_ssize_t idcCnsVal;
+        cnsval_ssize_t idcCnsVal;
     };
 
     struct instrDescDsp : instrDesc // large displacement
@@ -1466,7 +1487,7 @@ protected:
 
 #endif // TARGET_XARCH
 
-    target_ssize_t emitGetInsSC(instrDesc* id);
+    cnsval_ssize_t emitGetInsSC(instrDesc* id);
     unsigned emitInsCount;
 
 /************************************************************************/
@@ -1489,12 +1510,27 @@ protected:
     const char* emitFldName(CORINFO_FIELD_HANDLE fieldVal);
     const char* emitFncName(CORINFO_METHOD_HANDLE callVal);
 
+    // GC Info changes are not readily available at each instruction.
+    // We use debug-only sets to track the per-instruction state, and to remember
+    // what the state was at the last time it was output (instruction or label).
+    VARSET_TP  debugPrevGCrefVars;
+    VARSET_TP  debugThisGCrefVars;
+    regPtrDsc* debugPrevRegPtrDsc;
+    regMaskTP  debugPrevGCrefRegs;
+    regMaskTP  debugPrevByrefRegs;
+    void emitDispGCDeltaTitle(const char* title);
+    void emitDispGCRegDelta(const char* title, regMaskTP prevRegs, regMaskTP curRegs);
+    void emitDispGCVarDelta();
+    void emitDispRegPtrListDelta();
+    void emitDispGCInfoDelta();
+
     void emitDispIGflags(unsigned flags);
     void emitDispIG(insGroup* ig, insGroup* igPrev = nullptr, bool verbose = false);
     void emitDispIGlist(bool verbose = false);
     void emitDispGCinfo();
     void emitDispClsVar(CORINFO_FIELD_HANDLE fldHnd, ssize_t offs, bool reloc = false);
     void emitDispFrameRef(int varx, int disp, int offs, bool asmfm);
+    void emitDispInsAddr(BYTE* code);
     void emitDispInsOffs(unsigned offs, bool doffs);
     void emitDispInsHex(instrDesc* id, BYTE* code, size_t sz);
 
@@ -1581,9 +1617,10 @@ public:
     bool emitIssuing;
 #endif
 
-    BYTE* emitCodeBlock;     // Hot code block
-    BYTE* emitColdCodeBlock; // Cold code block
-    BYTE* emitConsBlock;     // Read-only (constant) data block
+    BYTE*  emitCodeBlock;     // Hot code block
+    BYTE*  emitColdCodeBlock; // Cold code block
+    BYTE*  emitConsBlock;     // Read-only (constant) data block
+    size_t writeableOffset;   // Offset applied to a code address to get memory location that can be written
 
     UNATIVE_OFFSET emitTotalHotCodeSize;
     UNATIVE_OFFSET emitTotalColdCodeSize;
@@ -1645,6 +1682,7 @@ public:
     unsigned char emitOutputLong(BYTE* dst, ssize_t val);
     unsigned char emitOutputSizeT(BYTE* dst, ssize_t val);
 
+#if !defined(HOST_64BIT)
 #if defined(TARGET_X86)
     unsigned char emitOutputByte(BYTE* dst, size_t val);
     unsigned char emitOutputWord(BYTE* dst, size_t val);
@@ -1656,6 +1694,7 @@ public:
     unsigned char emitOutputLong(BYTE* dst, unsigned __int64 val);
     unsigned char emitOutputSizeT(BYTE* dst, unsigned __int64 val);
 #endif // defined(TARGET_X86)
+#endif // !defined(HOST_64BIT)
 
     size_t emitIssue1Instr(insGroup* ig, instrDesc* id, BYTE** dp);
     size_t emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp);
@@ -1678,7 +1717,7 @@ public:
     void emitSetMediumJump(instrDescJmp* id);
 
 public:
-    CORINFO_FIELD_HANDLE emitAnyConst(const void* cnsAddr, UNATIVE_OFFSET cnsSize, UNATIVE_OFFSET cnsAlign);
+    CORINFO_FIELD_HANDLE emitBlkConst(const void* cnsAddr, unsigned cnsSize, unsigned cnsAlign, var_types elemType);
 
 private:
     CORINFO_FIELD_HANDLE emitFltOrDblConst(double constValue, emitAttr attr);
@@ -1720,6 +1759,22 @@ private:
     instrDescJmp* emitJumpList;       // list of local jumps in method
     instrDescJmp* emitJumpLast;       // last of local jumps in method
     void          emitJumpDistBind(); // Bind all the local jumps in method
+
+#if FEATURE_LOOP_ALIGN
+    instrDescAlign* emitCurIGAlignList;   // list of align instructions in current IG
+    unsigned        emitLastLoopStart;    // Start IG of last inner loop
+    unsigned        emitLastLoopEnd;      // End IG of last inner loop
+    unsigned        emitLastAlignedIgNum; // last IG that has align instruction
+    instrDescAlign* emitAlignList;        // list of local align instructions in method
+    instrDescAlign* emitAlignLast;        // last align instruction in method
+    unsigned getLoopSize(insGroup* igLoopHeader,
+                         unsigned maxLoopSize DEBUG_ARG(bool isAlignAdjusted)); // Get the smallest loop size
+    void emitLoopAlignment();
+    bool emitEndsWithAlignInstr(); // Validate if newLabel is appropriate
+    void emitSetLoopBackEdge(BasicBlock* loopTopBlock);
+    void     emitLoopAlignAdjustments(); // Predict if loop alignment is needed and make appropriate adjustments
+    unsigned emitCalculatePaddingForLoopAlignment(insGroup* ig, size_t offset DEBUG_ARG(bool isAlignAdjusted));
+#endif
 
     void emitCheckFuncletBranch(instrDesc* jmp, insGroup* jmpIG); // Check for illegal branches between funclets
 
@@ -1794,10 +1849,13 @@ private:
 
     unsigned emitNxtIGnum;
 
+#ifdef PSEUDORANDOM_NOP_INSERTION
+
     // random nop insertion to break up nop sleds
     unsigned emitNextNop;
     bool     emitRandomNops;
-    void     emitEnableRandomNops()
+
+    void emitEnableRandomNops()
     {
         emitRandomNops = true;
     }
@@ -1805,6 +1863,8 @@ private:
     {
         emitRandomNops = false;
     }
+
+#endif // PSEUDORANDOM_NOP_INSERTION
 
     insGroup* emitAllocAndLinkIG();
     insGroup* emitAllocIG();
@@ -1838,11 +1898,20 @@ private:
     // Sets the emitter's record of the currently live GC variables
     // and registers.  The "isFinallyTarget" parameter indicates that the current location is
     // the start of a basic block that is returned to after a finally clause in non-exceptional execution.
-    void* emitAddLabel(VARSET_VALARG_TP GCvars, regMaskTP gcrefRegs, regMaskTP byrefRegs, BOOL isFinallyTarget = FALSE);
+    void* emitAddLabel(VARSET_VALARG_TP GCvars,
+                       regMaskTP        gcrefRegs,
+                       regMaskTP        byrefRegs,
+                       bool             isFinallyTarget = false DEBUG_ARG(BasicBlock* block = nullptr));
+
     // Same as above, except the label is added and is conceptually "inline" in
     // the current block. Thus it extends the previous block and the emitter
     // continues to track GC info as if there was no label.
     void* emitAddInlineLabel();
+
+#ifdef DEBUG
+    void emitPrintLabel(insGroup* ig);
+    const char* emitLabelString(insGroup* ig);
+#endif
 
 #ifdef TARGET_ARMARCH
 
@@ -1909,7 +1978,7 @@ private:
         return (instrDescCns*)emitAllocAnyInstr(sizeof(instrDescCns), attr);
     }
 
-    instrDescCns* emitAllocInstrCns(emitAttr attr, target_size_t cns)
+    instrDescCns* emitAllocInstrCns(emitAttr attr, cnsval_size_t cns)
     {
         instrDescCns* result = emitAllocInstrCns(attr);
         result->idSetIsLargeCns();
@@ -1961,10 +2030,21 @@ private:
         return (instrDescCGCA*)emitAllocAnyInstr(sizeof(instrDescCGCA), attr);
     }
 
+#if FEATURE_LOOP_ALIGN
+    instrDescAlign* emitAllocInstrAlign()
+    {
+#if EMITTER_STATS
+        emitTotalDescAlignCnt++;
+#endif // EMITTER_STATS
+        return (instrDescAlign*)emitAllocAnyInstr(sizeof(instrDescAlign), EA_1BYTE);
+    }
+    instrDescAlign* emitNewInstrAlign();
+#endif
+
     instrDesc* emitNewInstrSmall(emitAttr attr);
     instrDesc* emitNewInstr(emitAttr attr = EA_4BYTE);
-    instrDesc* emitNewInstrSC(emitAttr attr, target_ssize_t cns);
-    instrDesc* emitNewInstrCns(emitAttr attr, target_ssize_t cns);
+    instrDesc* emitNewInstrSC(emitAttr attr, cnsval_ssize_t cns);
+    instrDesc* emitNewInstrCns(emitAttr attr, cnsval_ssize_t cns);
     instrDesc* emitNewInstrDsp(emitAttr attr, target_ssize_t dsp);
     instrDesc* emitNewInstrCnsDsp(emitAttr attr, target_ssize_t cns, int dsp);
 #ifdef TARGET_ARM
@@ -2127,9 +2207,9 @@ public:
     void emitGCregDeadUpd(regNumber reg, BYTE* addr);
     void emitGCregDeadSet(GCtype gcType, regMaskTP mask, BYTE* addr);
 
-    void emitGCvarLiveUpd(int offs, int varNum, GCtype gcType, BYTE* addr);
+    void emitGCvarLiveUpd(int offs, int varNum, GCtype gcType, BYTE* addr DEBUG_ARG(unsigned actualVarNum));
     void emitGCvarLiveSet(int offs, GCtype gcType, BYTE* addr, ssize_t disp = -1);
-    void emitGCvarDeadUpd(int offs, BYTE* addr);
+    void emitGCvarDeadUpd(int offs, BYTE* addr DEBUG_ARG(unsigned varNum));
     void emitGCvarDeadSet(int offs, BYTE* addr, ssize_t disp = -1);
 
     GCtype emitRegGCtype(regNumber reg);
@@ -2151,6 +2231,12 @@ public:
 
     struct dataSection
     {
+        // Note to use alignments greater than 32 requires modification in the VM
+        // to support larger alignments (see ICorJitInfo::allocMem)
+        //
+        const static unsigned MIN_DATA_ALIGN = 4;
+        const static unsigned MAX_DATA_ALIGN = 32;
+
         enum sectionType
         {
             data,
@@ -2161,6 +2247,8 @@ public:
         dataSection*   dsNext;
         UNATIVE_OFFSET dsSize;
         sectionType    dsType;
+        var_types      dsDataType;
+
         // variable-sized array used to store the constant data
         // or BasicBlock* array in the block cases.
         BYTE dsCont[0];
@@ -2274,6 +2362,7 @@ public:
 #define SMALL_CNS_TSZ 256
     static unsigned emitSmallCns[SMALL_CNS_TSZ];
     static unsigned emitLargeCnsCnt;
+    static unsigned emitTotalDescAlignCnt;
 
     static unsigned emitIFcounts[IF_COUNT];
 
@@ -2293,6 +2382,13 @@ public:
         VarSetOps::AssignNoCopy(emitComp, emitPrevGCrefVars, VarSetOps::MakeEmpty(emitComp));
         VarSetOps::AssignNoCopy(emitComp, emitInitGCrefVars, VarSetOps::MakeEmpty(emitComp));
         VarSetOps::AssignNoCopy(emitComp, emitThisGCrefVars, VarSetOps::MakeEmpty(emitComp));
+#if defined(DEBUG)
+        VarSetOps::AssignNoCopy(emitComp, debugPrevGCrefVars, VarSetOps::MakeEmpty(emitComp));
+        VarSetOps::AssignNoCopy(emitComp, debugThisGCrefVars, VarSetOps::MakeEmpty(emitComp));
+        debugPrevRegPtrDsc = nullptr;
+        debugPrevGCrefRegs = RBM_NONE;
+        debugPrevByrefRegs = RBM_NONE;
+#endif
     }
 };
 
@@ -2469,6 +2565,15 @@ inline emitter::instrDescJmp* emitter::emitNewInstrJmp()
     return emitAllocInstrJmp();
 }
 
+#if FEATURE_LOOP_ALIGN
+inline emitter::instrDescAlign* emitter::emitNewInstrAlign()
+{
+    instrDescAlign* newInstr = emitAllocInstrAlign();
+    newInstr->idIns(INS_align);
+    return newInstr;
+}
+#endif
+
 #if !defined(TARGET_ARM64)
 inline emitter::instrDescLbl* emitter::emitNewInstrLbl()
 {
@@ -2511,7 +2616,7 @@ inline emitter::instrDesc* emitter::emitNewInstrDsp(emitAttr attr, target_ssize_
  *  Note that this very similar to emitter::emitNewInstrSC(), except it never
  *  allocates a small descriptor.
  */
-inline emitter::instrDesc* emitter::emitNewInstrCns(emitAttr attr, target_ssize_t cns)
+inline emitter::instrDesc* emitter::emitNewInstrCns(emitAttr attr, cnsval_ssize_t cns)
 {
     if (instrDesc::fitsInSmallCns(cns))
     {
@@ -2570,7 +2675,7 @@ inline size_t emitter::emitGetInstrDescSize(const instrDesc* id)
  *  emitNewInstrCns() always allocates at least sizeof(instrDesc)).
  */
 
-inline emitter::instrDesc* emitter::emitNewInstrSC(emitAttr attr, target_ssize_t cns)
+inline emitter::instrDesc* emitter::emitNewInstrSC(emitAttr attr, cnsval_ssize_t cns)
 {
     if (instrDesc::fitsInSmallCns(cns))
     {

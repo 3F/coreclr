@@ -11,16 +11,26 @@
 #endif
 
 extern void trace_printf(const char* format, ...);
+extern void trace_verbose_printf(const char* format, ...);
 extern bool g_diagnostics;
+extern bool g_diagnosticsVerbose;
 
 #ifdef HOST_UNIX
 #define TRACE(args...) trace_printf(args)
-#define TRACE_VERBOSE(args...)
+#define TRACE_VERBOSE(args...) trace_verbose_printf(args)
 #else
 #define TRACE(args, ...)
 #define TRACE_VERBOSE(args, ...)
 #endif
 
+// Keep in sync with the definitions in dbgutil.cpp and daccess.h
+#define DACCESS_TABLE_SYMBOL "g_dacTable"
+
+#ifdef HOST_64BIT
+#define PRIA "016"
+#else
+#define PRIA "08"
+#endif
 
 #ifdef HOST_UNIX
 #include "config.h"
@@ -64,6 +74,8 @@ typedef int T_CONTEXT;
 #endif
 #include <dirent.h>
 #include <fcntl.h>
+#include <dlfcn.h>
+#include <cxxabi.h>
 #ifdef __APPLE__
 #include <ELF.h>
 #else
@@ -80,14 +92,36 @@ typedef int T_CONTEXT;
 #include <vector>
 #include <array>
 #include <string>
+
+typedef struct
+{
+    const char* DumpPathTemplate;
+    const char* DumpType;
+    MINIDUMP_TYPE MinidumpType;
+    bool CreateDump;
+    bool CrashReport;
+    int Pid;
+    int CrashThread;
+    int Signal;
+#if defined(HOST_UNIX)
+    int SignalCode;
+    int SignalErrno;
+    void* SignalAddress;
+#endif
+} CreateDumpOptions;
+
 #ifdef HOST_UNIX
 #ifdef __APPLE__
-#include "mac.h"
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #endif
+#include "moduleinfo.h"
 #include "datatarget.h"
+#include "stackframe.h"
 #include "threadinfo.h"
 #include "memoryregion.h"
 #include "crashinfo.h"
+#include "crashreportwriter.h"
 #include "dumpwriter.h"
 #endif
 
@@ -95,6 +129,13 @@ typedef int T_CONTEXT;
 #define MAX_LONGPATH   1024
 #endif
 
-bool FormatDumpName(std::string& name, const char* pattern, const char* exename, int pid);
-bool CreateDump(const char* dumpPathTemplate, int pid, const char* dumpType, MINIDUMP_TYPE minidumpType);
+extern bool CreateDump(const CreateDumpOptions& options);
+extern bool FormatDumpName(std::string& name, const char* pattern, const char* exename, int pid);
 
+#ifdef HOST_WINDOWS
+extern DWORD GetTempPathWrapper(IN DWORD nBufferLength, OUT LPSTR lpBuffer);
+#else
+#define GetTempPathWrapper GetTempPathA
+#endif
+extern void printf_status(const char* format, ...);
+extern void printf_error(const char* format, ...);

@@ -28,7 +28,9 @@ CompPhaseNameMacro(PHASE_IMPORTATION,            "Importation",                 
 CompPhaseNameMacro(PHASE_INDXCALL,               "Indirect call transform",        "INDXCALL", false, -1, true)
 CompPhaseNameMacro(PHASE_PATCHPOINTS,            "Expand patchpoints",             "PPOINT",   false, -1, true)
 CompPhaseNameMacro(PHASE_POST_IMPORT,            "Post-import",                    "POST-IMP", false, -1, false)
-CompPhaseNameMacro(PHASE_IBCINSTR,               "IBC instrumentation",            "IBCINSTR", false, -1, false)
+CompPhaseNameMacro(PHASE_IBCPREP,                "Profile instrumentation prep",   "IBCPREP",  false, -1, false)
+CompPhaseNameMacro(PHASE_IBCINSTR,               "Profile instrumentation",        "IBCINSTR", false, -1, false)
+CompPhaseNameMacro(PHASE_INCPROFILE,             "Profile incorporation",          "INCPROF",  false, -1, false)
 CompPhaseNameMacro(PHASE_MORPH_INIT,             "Morph - Init",                   "MOR-INIT" ,false, -1, false)
 CompPhaseNameMacro(PHASE_MORPH_INLINE,           "Morph - Inlining",               "MOR-INL",  false, -1, true)
 CompPhaseNameMacro(PHASE_MORPH_ADD_INTERNAL,     "Morph - Add internal blocks",    "MOR-ADD",  false, -1, true)
@@ -46,16 +48,16 @@ CompPhaseNameMacro(PHASE_PROMOTE_STRUCTS,        "Morph - Promote Structs",     
 CompPhaseNameMacro(PHASE_MORPH_GLOBAL,           "Morph - Global",                 "MOR-GLOB", false, -1, false)
 CompPhaseNameMacro(PHASE_MORPH_END,              "Morph - Finish",                 "MOR-END",  false, -1, true)
 CompPhaseNameMacro(PHASE_GS_COOKIE,              "GS Cookie",                      "GS-COOK",  false, -1, false)
-CompPhaseNameMacro(PHASE_MARK_GC_POLL_BLOCKS,    "Mark GC poll blocks",            "GC-POLL",  false, -1, false)
 CompPhaseNameMacro(PHASE_COMPUTE_EDGE_WEIGHTS,   "Compute edge weights (1, false)",       "EDG-WGT",  false, -1, false)
 #if defined(FEATURE_EH_FUNCLETS)
 CompPhaseNameMacro(PHASE_CREATE_FUNCLETS,        "Create EH funclets",             "EH-FUNC",  false, -1, false)
 #endif // FEATURE_EH_FUNCLETS
 CompPhaseNameMacro(PHASE_MERGE_THROWS,           "Merge throw blocks",             "MRGTHROW", false, -1, false)
+CompPhaseNameMacro(PHASE_INVERT_LOOPS,           "Invert loops",                   "LOOP-INV", false, -1, false)
 CompPhaseNameMacro(PHASE_OPTIMIZE_LAYOUT,        "Optimize layout",                "LAYOUT",   false, -1, false)
 CompPhaseNameMacro(PHASE_COMPUTE_REACHABILITY,   "Compute blocks reachability",    "BL_REACH", false, -1, false)
 CompPhaseNameMacro(PHASE_ZERO_INITS,             "Redundant zero Inits",           "ZERO-INIT", false, -1, false)
-CompPhaseNameMacro(PHASE_OPTIMIZE_LOOPS,         "Optimize loops",                 "LOOP-OPT", false, -1, false)
+CompPhaseNameMacro(PHASE_FIND_LOOPS,             "Find loops",                     "LOOP-FND", false, -1, false)
 CompPhaseNameMacro(PHASE_CLONE_LOOPS,            "Clone loops",                    "LP-CLONE", false, -1, false)
 CompPhaseNameMacro(PHASE_UNROLL_LOOPS,           "Unroll loops",                   "UNROLL",   false, -1, false)
 CompPhaseNameMacro(PHASE_HOIST_LOOP_CODE,        "Hoist loop code",                "LP-HOIST", false, -1, false)
@@ -70,17 +72,12 @@ CompPhaseNameMacro(PHASE_BUILD_SSA_LIVENESS,     "SSA: liveness",               
 CompPhaseNameMacro(PHASE_BUILD_SSA_DF,           "SSA: DF",                        "SSA-DF",   false, PHASE_BUILD_SSA, false)
 CompPhaseNameMacro(PHASE_BUILD_SSA_INSERT_PHIS,  "SSA: insert phis",               "SSA-PHI",  false, PHASE_BUILD_SSA, false)
 CompPhaseNameMacro(PHASE_BUILD_SSA_RENAME,       "SSA: rename",                    "SSA-REN",  false, PHASE_BUILD_SSA, false)
-
 CompPhaseNameMacro(PHASE_EARLY_PROP,             "Early Value Propagation",        "ERL-PROP", false, -1, false)
 CompPhaseNameMacro(PHASE_VALUE_NUMBER,           "Do value numbering",             "VAL-NUM",  false, -1, false)
-
 CompPhaseNameMacro(PHASE_OPTIMIZE_INDEX_CHECKS,  "Optimize index checks",          "OPT-CHK",  false, -1, false)
-
-#if FEATURE_VALNUM_CSE
 CompPhaseNameMacro(PHASE_OPTIMIZE_VALNUM_CSES,   "Optimize Valnum CSEs",           "OPT-CSE",  false, -1, false)
-#endif
-
 CompPhaseNameMacro(PHASE_VN_COPY_PROP,           "VN based copy prop",             "CP-PROP",  false, -1, false)
+CompPhaseNameMacro(PHASE_OPTIMIZE_BRANCHES,      "Redundant branch opts",          "OPT-BR",   false, -1, false)
 #if ASSERTION_PROP
 CompPhaseNameMacro(PHASE_ASSERTION_PROP_MAIN,    "Assertion prop",                 "AST-PROP", false, -1, false)
 #endif

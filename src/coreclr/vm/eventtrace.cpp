@@ -321,7 +321,7 @@ ETW::SamplingLog::EtwStackWalkStatus ETW::SamplingLog::SaveCurrentStack(int skip
         return ETW::SamplingLog::UnInitialized;
     }
 #endif // TARGET_AMD64
-    Thread *pThread = GetThread();
+    Thread *pThread = GetThreadNULLOk();
     if (pThread == NULL)
     {
         return ETW::SamplingLog::UnInitialized;
@@ -682,13 +682,13 @@ void ETW::GCLog::MovedReference(
     // ProfAPI
     if (fAllowProfApiNotification)
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackGC() || CORProfilerTrackGCMovedObjects());
-        g_profControlBlock.pProfInterface->MovedReference(pbMemBlockStart,
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackGC() || CORProfilerTrackGCMovedObjects());
+        (&g_profControlBlock)->MovedReference(pbMemBlockStart,
                                                           pbMemBlockEnd,
                                                           cbRelocDistance,
                                                           &(pCtxForEtwAndProfapi->pctxProfAPI),
                                                           fCompacting);
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 #endif // PROFILING_SUPPORTED
 
@@ -808,9 +808,9 @@ VOID ETW::GCLog::EndMovedReferences(size_t profilingContext, BOOL fAllowProfApiN
     // ProfAPI
     if (fAllowProfApiNotification)
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackGC() || CORProfilerTrackGCMovedObjects());
-        g_profControlBlock.pProfInterface->EndMovedReferences(&(pCtxForEtwAndProfapi->pctxProfAPI));
-        END_PIN_PROFILER();
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackGC() || CORProfilerTrackGCMovedObjects());
+        (&g_profControlBlock)->EndMovedReferences(&(pCtxForEtwAndProfapi->pctxProfAPI));
+        END_PROFILER_CALLBACK();
     }
 #endif //PROFILING_SUPPORTED
 
@@ -2616,8 +2616,6 @@ VOID ETW::ThreadLog::FireThreadDC(Thread * pThread)
         GetClrInstanceId());
 }
 
-
-
 #ifndef FEATURE_REDHAWK
 
 // TypeSystemLog implementation
@@ -3340,7 +3338,7 @@ BOOL ETW::TypeSystemLog::ShouldLogType(TypeHandle th)
 
     // When we have a thread context, default to calling the API that requires one which
     // reduces the cost of locking.
-    if (GetThread() != NULL)
+    if (GetThreadNULLOk() != NULL)
     {
         LookupOrCreateTypeLoggingInfo(th, &fCreatedNew);
     }
@@ -4169,6 +4167,12 @@ VOID ETW::EnumerationLog::EndRundown()
             MICROSOFT_WINDOWS_DOTNETRUNTIME_RUNDOWN_PROVIDER_DOTNET_Context,
             TRACE_LEVEL_INFORMATION,
             CLR_RUNDOWNTHREADING_KEYWORD);
+
+        BOOL bIsGCRundownEnabled = ETW_TRACING_CATEGORY_ENABLED(
+            MICROSOFT_WINDOWS_DOTNETRUNTIME_RUNDOWN_PROVIDER_DOTNET_Context,
+            TRACE_LEVEL_INFORMATION,
+            CLR_RUNDOWNGC_KEYWORD);
+
         if(ETW_TRACING_CATEGORY_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_RUNDOWN_PROVIDER_DOTNET_Context,
                                         TRACE_LEVEL_INFORMATION,
                                         CLR_RUNDOWNJIT_KEYWORD)
@@ -4186,6 +4190,8 @@ VOID ETW::EnumerationLog::EndRundown()
            bIsPerfTrackRundownEnabled
            ||
            bIsThreadingRundownEnabled
+           ||
+           bIsGCRundownEnabled
         )
         {
             // begin marker event will go to the rundown provider
@@ -4225,6 +4231,11 @@ VOID ETW::EnumerationLog::EndRundown()
             if (bIsThreadingRundownEnabled)
             {
                 SendThreadRundownEvent();
+            }
+
+            if (bIsGCRundownEnabled)
+            {
+                SendGCRundownEvent();
             }
 
             // end marker event will go to the rundown provider
@@ -4416,6 +4427,12 @@ VOID EtwCallbackCommon(
     if (g_fEEStarted && !g_fEEShutDown && bIsPublicTraceHandle)
     {
         ETW::TypeSystemLog::OnKeywordsChanged();
+    }
+
+    if (g_fEEStarted && !g_fEEShutDown)
+    {
+        // Emit the YieldProcessor measured values at the beginning of the trace
+        YieldProcessorNormalization::FireMeasurementEvents();
     }
 }
 
@@ -4701,7 +4718,7 @@ VOID ETW::ExceptionLog::ExceptionThrown(CrawlFrame  *pCf, BOOL bIsReThrownExcept
     CONTRACTL {
         NOTHROW;
         GC_TRIGGERS;
-        PRECONDITION(GetThread() != NULL);
+        PRECONDITION(GetThreadNULLOk() != NULL);
         PRECONDITION(GetThread()->GetThrowable() != NULL);
     } CONTRACTL_END;
 
@@ -5045,7 +5062,7 @@ VOID ETW::InfoLog::RuntimeInformation(INT32 type)
         {
             PCWSTR szDtraceOutput1=W(""),szDtraceOutput2=W("");
             UINT8 startupMode = 0;
-            UINT startupFlags = 0;
+            UINT startupFlags = CorHost2::GetStartupFlags();
             PathString dllPath;
             UINT8 Sku = ETW::InfoLog::InfoStructs::CoreCLR;
 
@@ -5066,11 +5083,10 @@ VOID ETW::InfoLog::RuntimeInformation(INT32 type)
             PCWSTR lpwszCommandLine = W("");
 
 
-            // if WszGetModuleFileName fails, we return an empty string
-            if (!WszGetModuleFileName(GetCLRModule(), dllPath)) {
+            // if GetClrModulePathName fails, we return an empty string
+            if (!GetClrModulePathName(dllPath)) {
                 dllPath.Set(W("\0"));
             }
-
 
             if(type == ETW::InfoLog::InfoStructs::Callback)
             {
@@ -5396,6 +5412,83 @@ VOID ETW::MethodLog::GetR2RGetEntryPointStart(MethodDesc *pMethodDesc)
     }
 }
 
+VOID ETW::MethodLog::LogMethodInstrumentationData(MethodDesc* method, uint32_t cbData, BYTE *data, TypeHandle* pTypeHandles, uint32_t typeHandles)
+{
+    CONTRACTL{
+        NOTHROW;
+        GC_TRIGGERS;
+    } CONTRACTL_END;
+    const uint32_t chunkSize = 40000;
+    const uint32_t maxDataSize = chunkSize * 0x1000;
+    const uint32_t FinalChunkFlag = 0x80000000;
+
+    if (ETW_EVENT_ENABLED(MICROSOFT_WINDOWS_DOTNETRUNTIME_PROVIDER_DOTNET_Context, JitInstrumentationDataVerbose))
+    {
+        EX_TRY
+        {
+            SendMethodDetailsEvent(method);
+
+            // If there are any type handles, fire the BulkType events to describe them
+            if (typeHandles != 0)
+            {
+                BulkTypeEventLogger typeLogger;
+
+                for (uint32_t iTypeHandle = 0; iTypeHandle < typeHandles; iTypeHandle++)
+                {
+                    ETW::TypeSystemLog::LogTypeAndParametersIfNecessary(&typeLogger, (ULONGLONG)pTypeHandles[iTypeHandle].AsPtr(), ETW::TypeSystemLog::kTypeLogBehaviorAlwaysLog);
+                }
+                typeLogger.FireBulkTypeEvent();
+            }
+
+            ULONG ulMethodToken=0;
+            auto pModule = method->GetModule_NoLogging();
+            bool bIsDynamicMethod = method->IsDynamicMethod();
+            BOOL bIsGenericMethod = FALSE;
+            if(method->GetMethodTable_NoLogging())
+                bIsGenericMethod = method->HasClassOrMethodInstantiation_NoLogging();
+
+            // Use MethodDesc if Dynamic or Generic methods
+            if( bIsDynamicMethod || bIsGenericMethod)
+            {
+                if(bIsGenericMethod)
+                    ulMethodToken = (ULONG)method->GetMemberDef_NoLogging();
+                if(bIsDynamicMethod) // if its a generic and a dynamic method, we would set the methodtoken to 0
+                    ulMethodToken = (ULONG)0;
+            }
+            else
+                ulMethodToken = (ULONG)method->GetMemberDef_NoLogging();
+
+            SString tNamespace, tMethodName, tMethodSignature;
+            method->GetMethodInfo(tNamespace, tMethodName, tMethodSignature);
+
+            PCWSTR pNamespace = (PCWSTR)tNamespace.GetUnicode();
+            PCWSTR pMethodName = (PCWSTR)tMethodName.GetUnicode();
+            PCWSTR pMethodSignature = (PCWSTR)tMethodSignature.GetUnicode();
+
+            // Send data in 40,000 byte chunks
+            uint32_t chunkIndex = 0;
+            for (; cbData > 0; chunkIndex++)
+            {
+                bool finalChunk = cbData <= chunkSize;
+                uint32_t chunkSizeToEmit = finalChunk ? cbData : chunkSize;
+
+                FireEtwJitInstrumentationDataVerbose(
+                    GetClrInstanceId(),
+                    chunkIndex | (finalChunk ? FinalChunkFlag : 0),
+                    chunkSizeToEmit,
+                    (ULONGLONG)(TADDR) method,
+                    (ULONGLONG)(TADDR) pModule,
+                    ulMethodToken,
+                    pNamespace,
+                    pMethodName,
+                    pMethodSignature,
+                    (BYTE*)data);
+                data += chunkSizeToEmit;
+                cbData -= chunkSizeToEmit;
+            }
+        } EX_CATCH{ } EX_END_CATCH(SwallowAllExceptions);
+    }
+}
 
 /*******************************************************/
 /* This is called by the runtime when a method is jitted completely */
@@ -5892,6 +5985,49 @@ VOID ETW::EnumerationLog::SendThreadRundownEvent()
         ThreadLog::FireThreadCreated(pThread);
     }
 #endif // !DACCESS_COMPILE
+}
+
+/********************************************************/
+/* This routine is used to send GC rundown events */
+/********************************************************/
+VOID ETW::EnumerationLog::SendGCRundownEvent()
+{
+    CONTRACTL {
+        THROWS;
+        GC_TRIGGERS;
+    } CONTRACTL_END;
+
+    if (GCHeapUtilities::IsGCHeapInitialized())
+    {
+        EtwGCSettingsInfo gcSettingsInfo;
+        GCHeapUtilities::GetGCHeap()->DiagGetGCSettings(&gcSettingsInfo);
+
+        DWORD dwEtwGCSettingFlags = 0;
+        if (gcSettingsInfo.concurrent_gc_p)
+            dwEtwGCSettingFlags |= kEtwGCFlagConcurrent;
+
+        if (gcSettingsInfo.use_large_pages_p)
+            dwEtwGCSettingFlags |= kEtwGCFlagLargePages;
+
+        if (gcSettingsInfo.use_frozen_segments_p)
+            dwEtwGCSettingFlags |= kEtwGCFlagFrozenSegs;
+
+        if (gcSettingsInfo.hard_limit_config_p)
+            dwEtwGCSettingFlags |= kEtwGCFlagHardLimitConfig;
+
+        if (gcSettingsInfo.no_affinitize_p)
+            dwEtwGCSettingFlags |= kEtwGCFlagNoAffinitize;
+
+        FireEtwGCSettingsRundown (
+            gcSettingsInfo.heap_hard_limit,
+            gcSettingsInfo.loh_threshold,
+            gcSettingsInfo.physical_memory_from_config,
+            gcSettingsInfo.gen0_min_budget_from_config,
+            gcSettingsInfo.gen0_max_budget_from_config,
+            gcSettingsInfo.high_mem_percent_from_config,
+            dwEtwGCSettingFlags,
+            GetClrInstanceId());
+    }
 }
 
 /****************************************************************************/
@@ -7715,11 +7851,11 @@ void ETW::CompilationLog::TieredCompilation::Runtime::SendBackgroundJitStop(UINT
 #endif // !FEATURE_REDHAWK
 
 #ifdef FEATURE_PERFTRACING
-#include "eventpipe.h"
+#include "eventpipeadapter.h"
 bool EventPipeHelper::Enabled()
 {
     LIMITED_METHOD_CONTRACT;
-    return EventPipe::Enabled();
+    return EventPipeAdapter::Enabled();
 }
 
 bool EventPipeHelper::IsEnabled(DOTNET_TRACE_CONTEXT Context, UCHAR Level, ULONGLONG Keyword)

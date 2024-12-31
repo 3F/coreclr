@@ -384,20 +384,20 @@ void InterpreterMethodInfo::InitArgInfo(CEEInfo* comp, CORINFO_METHOD_INFO* meth
         }
         break;
 
-    case CORINFO_CALLCONV_C:
-        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- CORINFO_CALLCONV_C");
+    case IMAGE_CEE_CS_CALLCONV_C:
+        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- IMAGE_CEE_CS_CALLCONV_C");
         break;
 
-    case CORINFO_CALLCONV_STDCALL:
-        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- CORINFO_CALLCONV_STDCALL");
+    case IMAGE_CEE_CS_CALLCONV_STDCALL:
+        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- IMAGE_CEE_CS_CALLCONV_STDCALL");
         break;
 
-    case CORINFO_CALLCONV_THISCALL:
-        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- CORINFO_CALLCONV_THISCALL");
+    case IMAGE_CEE_CS_CALLCONV_THISCALL:
+        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- IMAGE_CEE_CS_CALLCONV_THISCALL");
         break;
 
-    case CORINFO_CALLCONV_FASTCALL:
-        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- CORINFO_CALLCONV_FASTCALL");
+    case IMAGE_CEE_CS_CALLCONV_FASTCALL:
+        NYI_INTERP("InterpreterMethodInfo::InitArgInfo -- IMAGE_CEE_CS_CALLCONV_FASTCALL");
         break;
 
     case CORINFO_CALLCONV_FIELD:
@@ -1261,20 +1261,20 @@ CorJitResult Interpreter::GenerateInterpreterStub(CEEInfo* comp,
         }
         break;
 
-    case CORINFO_CALLCONV_C:
-        NYI_INTERP("GenerateInterpreterStub -- CORINFO_CALLCONV_C");
+    case IMAGE_CEE_CS_CALLCONV_C:
+        NYI_INTERP("GenerateInterpreterStub -- IMAGE_CEE_CS_CALLCONV_C");
         break;
 
-    case CORINFO_CALLCONV_STDCALL:
-        NYI_INTERP("GenerateInterpreterStub -- CORINFO_CALLCONV_STDCALL");
+    case IMAGE_CEE_CS_CALLCONV_STDCALL:
+        NYI_INTERP("GenerateInterpreterStub -- IMAGE_CEE_CS_CALLCONV_STDCALL");
         break;
 
-    case CORINFO_CALLCONV_THISCALL:
-        NYI_INTERP("GenerateInterpreterStub -- CORINFO_CALLCONV_THISCALL");
+    case IMAGE_CEE_CS_CALLCONV_THISCALL:
+        NYI_INTERP("GenerateInterpreterStub -- IMAGE_CEE_CS_CALLCONV_THISCALL");
         break;
 
-    case CORINFO_CALLCONV_FASTCALL:
-        NYI_INTERP("GenerateInterpreterStub -- CORINFO_CALLCONV_FASTCALL");
+    case IMAGE_CEE_CS_CALLCONV_FASTCALL:
+        NYI_INTERP("GenerateInterpreterStub -- IMAGE_CEE_CS_CALLCONV_FASTCALL");
         break;
 
     case CORINFO_CALLCONV_FIELD:
@@ -3313,8 +3313,6 @@ bool Interpreter::MethodHandlesException(OBJECTREF orThrowable)
 
     if (orThrowable != NULL)
     {
-        PTR_Thread pCurThread = GetThread();
-
         // Don't catch ThreadAbort and other uncatchable exceptions
         if (!IsUncatchable(&orThrowable))
         {
@@ -3537,6 +3535,7 @@ bool Interpreter::MethodMayHaveLoop(BYTE* ilCode, unsigned codeSize)
             op = *(ilCode + 1) + 0x100;
             _ASSERTE(op < CEE_COUNT);  // Bounds check for below.
             // deliberate fall-through here.
+            __fallthrough;
         default:
             // For the rest of the 1-byte instructions, we'll use a table-driven approach.
             ilCode += opSizes1Byte[op];
@@ -4919,7 +4918,7 @@ void Interpreter::BinaryIntOpWork(T val1, T val2)
         {
             ThrowDivideByZero();
         }
-        else if (val2 == -1 && val1 == static_cast<T>(((UINT64)1) << (sizeof(T)*8 - 1))) // min int / -1 is not representable.
+        else if (val2 == static_cast<T>(-1) && val1 == static_cast<T>(((UINT64)1) << (sizeof(T)*8 - 1))) // min int / -1 is not representable.
         {
             ThrowSysArithException();
         }
@@ -9037,18 +9036,6 @@ void Interpreter::DoCallWork(bool virtualCall, void* thisArg, CORINFO_RESOLVED_T
     {
         switch (intrinsicId)
         {
-        case CORINFO_INTRINSIC_StringLength:
-            DoStringLength(); didIntrinsic = true;
-            break;
-        case CORINFO_INTRINSIC_StringGetChar:
-            DoStringGetChar(); didIntrinsic = true;
-            break;
-        case CORINFO_INTRINSIC_GetTypeFromHandle:
-            // This is an identity transformation.  (At least until I change LdToken to
-            // return a RuntimeTypeHandle struct...which is a TODO.)
-            DoGetTypeFromHandle();
-            didIntrinsic = true;
-            break;
         case CORINFO_INTRINSIC_ByReference_Ctor:
             DoByReferenceCtor();
             didIntrinsic = true;

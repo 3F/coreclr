@@ -10,6 +10,8 @@ if(CORECLR_SET_RPATH)
   endif(CLR_CMAKE_HOST_OSX)
 endif(CORECLR_SET_RPATH)
 
+set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
 set(MSCORDBI_SOURCES
     mscordbi.cpp
 )
@@ -50,7 +52,7 @@ else(CLR_CMAKE_HOST_WIN32)
 endif(CLR_CMAKE_HOST_WIN32)
 
 add_library_clr(mscordbi SHARED ${MSCORDBI_SOURCES})
-target_precompile_header(TARGET mscordbi HEADER stdafx.h)
+target_precompile_headers(mscordbi PRIVATE $<$<COMPILE_LANGUAGE:CXX>:stdafx.h>)
 
 if(CLR_CMAKE_HOST_UNIX)
     add_custom_target(mscordbi_exports DEPENDS ${EXPORTS_FILE})
@@ -64,7 +66,6 @@ set(COREDBI_LIBRARIES
     debug-pal
     cordbdi
     utilcodestaticnohost
-    ildbsymlib
     mdcompiler-dbi
     mdruntime-dbi
     mdruntimerw-dbi
@@ -98,6 +99,17 @@ elseif(CLR_CMAKE_HOST_UNIX)
         mscordaccore
     )
 
+    # Before llvm 16, lld was setting `--undefined-version` by default. The default was
+    # flipped to `--no-undefined-version` in lld 16, so we will explicitly set it to
+    # `--undefined-version` for our use-case.
+    include(CheckLinkerFlag OPTIONAL)
+    if(COMMAND check_linker_flag)
+        check_linker_flag(CXX -Wl,--undefined-version LINKER_SUPPORTS_UNDEFINED_VERSION)
+        if (LINKER_SUPPORTS_UNDEFINED_VERSION)
+            add_linker_flag(-Wl,--undefined-version)
+        endif(LINKER_SUPPORTS_UNDEFINED_VERSION)
+    endif(COMMAND check_linker_flag)
+
     # COREDBI_LIBRARIES is mentioned twice because ld is one pass linker and will not find symbols
     # if they are defined after they are used. Having all libs twice makes sure that ld will actually
     # find all symbols.
@@ -111,11 +123,5 @@ elseif(CLR_CMAKE_HOST_UNIX)
 
 endif(CLR_CMAKE_HOST_WIN32)
 
-# Create the DBI module index header file containing the DBI build id
-# for xplat and the timestamp/size on Windows.
-if(FEATURE_SINGLE_FILE_DIAGNOSTICS)
-    generate_module_index(mscordbi ${GENERATED_INCLUDE_DIR}/dbimoduleindex.h)
-endif(FEATURE_SINGLE_FILE_DIAGNOSTICS)
-
 # add the install targets
-install_clr(TARGETS mscordbi ADDITIONAL_DESTINATION sharedFramework)
+install_clr(TARGETS mscordbi DESTINATIONS . sharedFramework COMPONENT runtime)

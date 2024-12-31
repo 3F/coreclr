@@ -59,6 +59,7 @@ static int Internal_Convertfwrite(CPalThread *pthrCurrent, const void *buffer, s
     clearerr (stream);
 #endif
 
+
     if(convert)
     {
         int nsize;
@@ -66,6 +67,8 @@ static int Internal_Convertfwrite(CPalThread *pthrCurrent, const void *buffer, s
         nsize = WideCharToMultiByte(CP_ACP, 0,(LPCWSTR)buffer, count, 0, 0, 0, 0);
         if (!nsize)
         {
+            if (count == 0)
+                return 0;
             ASSERT("WideCharToMultiByte failed.  Error is %d\n", GetLastError());
             return -1;
         }
@@ -217,7 +220,7 @@ BOOL Internal_ExtractFormatA(CPalThread *pthrCurrent, LPCSTR *Fmt, LPSTR Out, LP
         {
             ERROR("atoi returned a negative value indicative of an overflow.\n");
             pthrCurrent->SetLastError(ERROR_INTERNAL_ERROR);
-            return Result;
+            goto EXIT;
         }
     }
     else if (**Fmt == '*')
@@ -255,7 +258,7 @@ BOOL Internal_ExtractFormatA(CPalThread *pthrCurrent, LPCSTR *Fmt, LPSTR Out, LP
             {
                 ERROR("atoi returned a negative value indicative of an overflow.\n");
                 pthrCurrent->SetLastError(ERROR_INTERNAL_ERROR);
-                return Result;
+                goto EXIT;
             }
         }
         else if (**Fmt == '*')
@@ -441,6 +444,8 @@ BOOL Internal_ExtractFormatA(CPalThread *pthrCurrent, LPCSTR *Fmt, LPSTR Out, LP
     }
 
     *Out = 0;  /* end the string */
+
+EXIT:
     free(TempStr);
     return Result;
 }
@@ -522,7 +527,7 @@ BOOL Internal_ExtractFormatW(CPalThread *pthrCurrent, LPCWSTR *Fmt, LPSTR Out, L
         {
             ERROR("atoi returned a negative value indicative of an overflow.\n");
             pthrCurrent->SetLastError(ERROR_INTERNAL_ERROR);
-            return Result;
+            goto EXIT;
         }
     }
     else if (**Fmt == '*')
@@ -559,7 +564,7 @@ BOOL Internal_ExtractFormatW(CPalThread *pthrCurrent, LPCWSTR *Fmt, LPSTR Out, L
             {
                 ERROR("atoi returned a negative value indicative of an overflow.\n");
                 pthrCurrent->SetLastError(ERROR_INTERNAL_ERROR);
-                return Result;
+                goto EXIT;
             }
         }
         else if (**Fmt == '*')
@@ -769,6 +774,8 @@ BOOL Internal_ExtractFormatW(CPalThread *pthrCurrent, LPCWSTR *Fmt, LPSTR Out, L
     }
 
     *Out = 0;  /* end the string */
+
+EXIT:
     free(TempStr);
     return Result;
 }
@@ -896,7 +903,7 @@ static INT Internal_AddPaddingVfwprintf(CPalThread *pthrCurrent, PAL_FILE *strea
     LPWSTR OutOriginal;
     INT LengthInStr;
     INT Length;
-    INT Written = 0;
+    INT Written = -1;
 
     LengthInStr = PAL_wcslen(In);
     Length = LengthInStr;
@@ -921,9 +928,8 @@ static INT Internal_AddPaddingVfwprintf(CPalThread *pthrCurrent, PAL_FILE *strea
         if (wcscpy_s(Out, iLen, In) != SAFECRT_SUCCESS)
         {
             ERROR("wcscpy_s failed!\n");
-            free(OutOriginal);
             pthrCurrent->SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            return -1;
+            goto EXIT;
         }
         Out += LengthInStr;
         iLen -= LengthInStr;
@@ -951,9 +957,8 @@ static INT Internal_AddPaddingVfwprintf(CPalThread *pthrCurrent, PAL_FILE *strea
         if (wcscpy_s(Out, iLen, In) != SAFECRT_SUCCESS)
         {
             ERROR("wcscpy_s failed!\n");
-            free(OutOriginal);
             pthrCurrent->SetLastError(ERROR_INSUFFICIENT_BUFFER);
-            return -1;
+            goto EXIT;
         }
 
         Out += LengthInStr;
@@ -968,9 +973,14 @@ static INT Internal_AddPaddingVfwprintf(CPalThread *pthrCurrent, PAL_FILE *strea
         {
             ERROR("fwrite() failed with errno == %d\n", errno);
         }
-        free(OutOriginal);
+    }
+    else
+    {
+        Written = 0;
     }
 
+EXIT:
+    free(OutOriginal);
     return Written;
 }
 

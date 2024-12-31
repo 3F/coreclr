@@ -42,7 +42,7 @@ endif(CLR_CMAKE_HOST_UNIX)
 if (CLR_CMAKE_TARGET_ARCH_AMD64 AND CLR_CMAKE_TARGET_WIN32)
   set ( GC_SOURCES
     ${GC_SOURCES}
-    vxsort/isa_detection_dummy.cpp
+    vxsort/isa_detection.cpp
     vxsort/do_vxsort_avx2.cpp
     vxsort/do_vxsort_avx512.cpp
     vxsort/machine_traits.avx2.cpp
@@ -110,7 +110,7 @@ convert_to_absolute_path(GC_SOURCES ${GC_SOURCES})
 add_library_clr(clrgc SHARED ${GC_SOURCES})
 add_dependencies(clrgc eventing_headers)
 target_link_libraries(clrgc ${GC_LINK_LIBRARIES})
-install_clr(TARGETS clrgc)
+install_clr(TARGETS clrgc DESTINATIONS . COMPONENT runtime)
 
 if(CLR_CMAKE_HOST_UNIX)
   # dprintf causes many warnings (https://github.com/dotnet/runtime/issues/8737)
@@ -118,6 +118,7 @@ if(CLR_CMAKE_HOST_UNIX)
 endif(CLR_CMAKE_HOST_UNIX)
 
 add_definitions(-DBUILD_AS_STANDALONE)
+add_definitions(-DVERIFY_HEAP)
 if(CLR_CMAKE_HOST_OSX)
   # The implementation of GCToOSInterface on MacOS makes use of non-POSIX
   # pthreads APIs, which by default are not included in the pthreads header

@@ -8,6 +8,7 @@ using System.Diagnostics;
 using Internal.JitInterface;
 using Internal.Text;
 using Internal.TypeSystem;
+using Internal.TypeSystem.Ecma;
 
 namespace ILCompiler.DependencyAnalysis.ReadyToRun
 {
@@ -26,6 +27,7 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
         private DebugEHClauseInfo[] _debugEHClauseInfos;
         private List<ISymbolNode> _fixups;
         private MethodDesc[] _inlinedMethods;
+        private bool _lateTriggeredCompilation;
 
         public MethodWithGCInfo(MethodDesc methodDesc)
         {
@@ -33,6 +35,48 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             _fixups = new List<ISymbolNode>();
             _method = methodDesc;
         }
+
+        protected override void OnMarked(NodeFactory context)
+        {
+            // Once past phase 1, no new methods which are interesting for compilation may be marked except for methods
+            // specially enabled for higher phases
+            if (context.CompilationCurrentPhase > 1)
+            {
+                SetCode(new ObjectNode.ObjectData(Array.Empty<byte>(), null, 1, Array.Empty<ISymbolDefinitionNode>()));
+                InitializeFrameInfos(Array.Empty<FrameInfo>());
+            }
+            _lateTriggeredCompilation = context.CompilationCurrentPhase != 0;
+            RegisterInlineeModuleIndices(context);
+        }
+
+        private void RegisterInlineeModuleIndices(NodeFactory factory)
+        {
+            if (_inlinedMethods != null)
+            {
+                foreach (var inlinee in _inlinedMethods)
+                {
+                    MethodDesc inlineeDefinition = inlinee.GetTypicalMethodDefinition();
+                    if (!(inlineeDefinition is EcmaMethod ecmaInlineeDefinition))
+                    {
+                        // We don't record non-ECMA methods because they don't have tokens that
+                        // diagnostic tools could reason about anyway.
+                        continue;
+                    }
+
+                    if (!factory.CompilationModuleGroup.VersionsWithMethodBody(inlinee))
+                    {
+                        // We cannot record inlining info across version bubble as cross-bubble assemblies
+                        // are not guaranteed to preserve token values. Only non-versionable methods may be
+                        // inlined across the version bubble.
+                        Debug.Assert(inlinee.IsNonVersionable());
+                        continue;
+                    }
+                    factory.ManifestMetadataTable.EnsureModuleIndexable(ecmaInlineeDefinition.Module);
+                }
+            }
+        }
+
+        public override int DependencyPhaseForDeferredStaticComputation => _lateTriggeredCompilation ? 2 : 0;
 
         public void SetCode(ObjectData data)
         {
@@ -281,12 +325,12 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             _debugLocInfos = DebugInfoTableNode.CreateBoundsBlobForMethod(debugLocInfos);
         }
 
-        public void InitializeDebugVarInfos(NativeVarInfo[] debugVarInfos)
+        public void InitializeDebugVarInfos(NativeVarInfo[] debugVarInfos, TargetDetails target)
         {
             Debug.Assert(_debugVarInfos == null);
             // Process the debug info from JIT format to R2R format immediately as it is large
             // and not used in the rest of the process except to emit.
-            _debugVarInfos = DebugInfoTableNode.CreateVarBlobForMethod(debugVarInfos);
+            _debugVarInfos = DebugInfoTableNode.CreateVarBlobForMethod(debugVarInfos, target);
         }
 
         public void InitializeDebugEHClauseInfos(DebugEHClauseInfo[] debugEHClauseInfos)
@@ -301,14 +345,18 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             return comparer.Compare(_method, otherNode._method);
         }
 
-        public void InitializeInliningInfo(MethodDesc[] inlinedMethods)
+        public void InitializeInliningInfo(MethodDesc[] inlinedMethods, NodeFactory factory)
         {
             Debug.Assert(_inlinedMethods == null);
             _inlinedMethods = inlinedMethods;
+            if (this.Marked)
+                RegisterInlineeModuleIndices(factory);
         }
 
         public int Offset => 0;
         public override bool IsShareable => throw new NotImplementedException();
         public override bool ShouldSkipEmittingObjectNode(NodeFactory factory) => IsEmpty;
+
+        public override string ToString() => _method.ToString();
     }
 }

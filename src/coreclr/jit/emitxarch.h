@@ -38,7 +38,7 @@ struct CnsVal
     bool    cnsReloc;
 };
 
-UNATIVE_OFFSET emitInsSize(code_t code);
+UNATIVE_OFFSET emitInsSize(code_t code, bool includeRexPrefixSize);
 UNATIVE_OFFSET emitInsSizeSV(code_t code, int var, int dsp);
 UNATIVE_OFFSET emitInsSizeSV(instrDesc* id, code_t code, int var, int dsp);
 UNATIVE_OFFSET emitInsSizeSV(instrDesc* id, code_t code, int var, int dsp, int val);
@@ -50,6 +50,7 @@ UNATIVE_OFFSET emitInsSizeAM(instrDesc* id, code_t code, int val);
 UNATIVE_OFFSET emitInsSizeCV(instrDesc* id, code_t code);
 UNATIVE_OFFSET emitInsSizeCV(instrDesc* id, code_t code, int val);
 
+BYTE* emitOutputAlign(insGroup* ig, instrDesc* id, BYTE* dst);
 BYTE* emitOutputAM(BYTE* dst, instrDesc* id, code_t code, CnsVal* addc = nullptr);
 BYTE* emitOutputSV(BYTE* dst, instrDesc* id, code_t code, CnsVal* addc = nullptr);
 BYTE* emitOutputCV(BYTE* dst, instrDesc* id, code_t code, CnsVal* addc = nullptr);
@@ -66,7 +67,7 @@ BYTE* emitOutputLJ(insGroup* ig, BYTE* dst, instrDesc* id);
 unsigned emitOutputRexOrVexPrefixIfNeeded(instruction ins, BYTE* dst, code_t& code);
 unsigned emitGetRexPrefixSize(instruction ins);
 unsigned emitGetVexPrefixSize(instruction ins, emitAttr attr);
-unsigned emitGetPrefixSize(code_t code);
+unsigned emitGetPrefixSize(code_t code, bool includeRexPrefixSize);
 unsigned emitGetAdjustedSize(instruction ins, emitAttr attr, code_t code);
 
 unsigned insEncodeReg012(instruction ins, regNumber reg, emitAttr size, code_t* code);
@@ -82,7 +83,15 @@ code_t insEncodeOpreg(instruction ins, regNumber reg, emitAttr size);
 
 unsigned insSSval(unsigned scale);
 
-bool IsAVXInstruction(instruction ins);
+static bool IsSSEInstruction(instruction ins);
+static bool IsSSEOrAVXInstruction(instruction ins);
+static bool IsAVXOnlyInstruction(instruction ins);
+static bool IsFMAInstruction(instruction ins);
+static bool IsAVXVNNIInstruction(instruction ins);
+static bool IsBMIInstruction(instruction ins);
+static regNumber getBmiRegNumber(instruction ins);
+static regNumber getSseShiftRegNumber(instruction ins);
+bool IsAVXInstruction(instruction ins) const;
 code_t insEncodeMIreg(instruction ins, regNumber reg, emitAttr size, code_t code);
 
 code_t AddRexWPrefix(instruction ins, code_t code);
@@ -93,10 +102,16 @@ code_t AddRexPrefix(instruction ins, code_t code);
 
 bool EncodedBySSE38orSSE3A(instruction ins);
 bool Is4ByteSSEInstruction(instruction ins);
+static bool IsMovInstruction(instruction ins);
+bool IsRedundantMov(
+    instruction ins, insFormat fmt, emitAttr size, regNumber dst, regNumber src, bool canIgnoreSideEffects);
+
+static bool IsJccInstruction(instruction ins);
+static bool IsJmpInstruction(instruction ins);
 
 bool AreUpper32BitsZero(regNumber reg);
 
-bool AreFlagsSetToZeroCmp(regNumber reg, emitAttr opSize, bool needsOCFlags);
+bool AreFlagsSetToZeroCmp(regNumber reg, emitAttr opSize, genTreeOps treeOps);
 
 bool hasRexPrefix(code_t code)
 {
@@ -112,7 +127,8 @@ bool hasRexPrefix(code_t code)
 #define VEX_PREFIX_MASK_3BYTE 0xFF000000000000ULL
 #define VEX_PREFIX_CODE_3BYTE 0xC4000000000000ULL
 
-bool TakesVexPrefix(instruction ins);
+bool TakesVexPrefix(instruction ins) const;
+static bool TakesRexWPrefix(instruction ins, emitAttr attr);
 
 // Returns true if the instruction encoding already contains VEX prefix
 bool hasVexPrefix(code_t code)
@@ -138,7 +154,7 @@ code_t AddVexPrefixIfNeededAndNotPresent(instruction ins, code_t code, emitAttr 
 }
 
 bool useVEXEncodings;
-bool UseVEXEncoding()
+bool UseVEXEncoding() const
 {
     return useVEXEncodings;
 }
@@ -169,6 +185,10 @@ void SetContains256bitAVX(bool value)
 
 bool IsDstDstSrcAVXInstruction(instruction ins);
 bool IsDstSrcSrcAVXInstruction(instruction ins);
+bool DoesWriteZeroFlag(instruction ins);
+bool DoesResetOverflowAndCarryFlags(instruction ins);
+bool IsFlagsAlwaysModified(instrDesc* id);
+
 bool IsThreeOperandAVXInstruction(instruction ins)
 {
     return (IsDstDstSrcAVXInstruction(ins) || IsDstSrcSrcAVXInstruction(ins));
@@ -287,7 +307,9 @@ inline emitAttr emitDecodeScale(unsigned ensz)
 /************************************************************************/
 
 public:
-void emitLoopAlign();
+void emitLoopAlign(unsigned short paddingBytes);
+
+void emitLongLoopAlign(unsigned short alignmentBoundary);
 
 void emitIns(instruction ins);
 
@@ -299,13 +321,15 @@ void emitInsRMW(instruction inst, emitAttr attr, GenTreeStoreInd* storeInd);
 
 void emitIns_Nop(unsigned size);
 
-void emitIns_I(instruction ins, emitAttr attr, int val);
+void emitIns_I(instruction ins, emitAttr attr, cnsval_ssize_t val);
 
 void emitIns_R(instruction ins, emitAttr attr, regNumber reg);
 
 void emitIns_C(instruction ins, emitAttr attr, CORINFO_FIELD_HANDLE fdlHnd, int offs);
 
-void emitIns_R_I(instruction ins, emitAttr attr, regNumber reg, ssize_t val);
+void emitIns_R_I(instruction ins, emitAttr attr, regNumber reg, ssize_t val DEBUGARG(GenTreeFlags gtFlags = GTF_EMPTY));
+
+void emitIns_Mov(instruction ins, emitAttr attr, regNumber dstReg, regNumber srgReg, bool canSkip);
 
 void emitIns_R_R(instruction ins, emitAttr attr, regNumber reg1, regNumber reg2);
 
@@ -409,7 +433,7 @@ void emitIns_R_AR(instruction ins, emitAttr attr, regNumber reg, regNumber base,
 
 void emitIns_R_AI(instruction ins, emitAttr attr, regNumber ireg, ssize_t disp);
 
-void emitIns_AR_R(instruction ins, emitAttr attr, regNumber reg, regNumber base, int disp);
+void emitIns_AR_R(instruction ins, emitAttr attr, regNumber reg, regNumber base, cnsval_ssize_t disp);
 
 void emitIns_AI_R(instruction ins, emitAttr attr, regNumber ireg, ssize_t disp);
 
@@ -424,8 +448,13 @@ void emitIns_I_ARX(instruction ins, emitAttr attr, int val, regNumber reg, regNu
 void emitIns_R_ARX(
     instruction ins, emitAttr attr, regNumber reg, regNumber base, regNumber index, unsigned scale, int disp);
 
-void emitIns_ARX_R(
-    instruction ins, emitAttr attr, regNumber reg, regNumber base, regNumber index, unsigned scale, int disp);
+void emitIns_ARX_R(instruction    ins,
+                   emitAttr       attr,
+                   regNumber      reg,
+                   regNumber      base,
+                   regNumber      index,
+                   unsigned       scale,
+                   cnsval_ssize_t disp);
 
 void emitIns_I_AX(instruction ins, emitAttr attr, int val, regNumber reg, unsigned mul, int disp);
 

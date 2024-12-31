@@ -80,7 +80,7 @@ namespace Internal.TypeSystem
 
         public override Void AppendName(StringBuilder sb, SignatureTypeVariable type, FormatOptions options)
         {
-            sb.Append("!");
+            sb.Append('!');
             sb.Append(type.Index.ToStringInvariant());
 
             return Void.Value;
@@ -174,7 +174,6 @@ namespace Internal.TypeSystem
             {
                 sb.Length = initialLen;
 
-                // 
                 AssemblyQualify(sb, type, options);
                 NamespaceQualify(sb, type, options);
                 sb.Append(type.DiagnosticName);
@@ -203,9 +202,15 @@ namespace Internal.TypeSystem
                 }
 
                 if (assemblyName.StartsWith("System.Private", StringComparison.Ordinal))
-                    assemblyName = "S.P" + assemblyName.Substring(14);
+                {
+                    sb.Append("S.P");
+                    sb.Append(assemblyName, 14, assemblyName.Length - 14);
+                }
+                else
+                {
+                    sb.Append(assemblyName);
+                }
 
-                sb.Append(assemblyName);
                 sb.Append(']');
             }
         }

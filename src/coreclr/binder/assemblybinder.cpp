@@ -20,26 +20,21 @@
 #include "bindresult.inl"
 #include "failurecache.hpp"
 #include "utils.hpp"
-#include "variables.hpp"
 #include "stringarraylist.h"
 #include "configuration.h"
-
-#define APP_DOMAIN_LOCKED_UNLOCKED        0x02
-#define APP_DOMAIN_LOCKED_CONTEXT         0x04
 
 #ifndef IMAGE_FILE_MACHINE_ARM64
 #define IMAGE_FILE_MACHINE_ARM64             0xAA64  // ARM64 Little-Endian
 #endif
 
-BOOL IsCompilationProcess();
-
 #if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 #include "clrprivbindercoreclr.h"
-#include "clrprivbinderassemblyloadcontext.h"
 // Helper function in the VM, invoked by the Binder, to invoke the host assembly resolver
 extern HRESULT RuntimeInvokeHostAssemblyResolver(INT_PTR pManagedAssemblyLoadContextToBindWithin,
-                                                IAssemblyName *pIAssemblyName, CLRPrivBinderCoreCLR *pTPABinder,
-                                                BINDER_SPACE::AssemblyName *pAssemblyName, ICLRPrivAssembly **ppLoadedAssembly);
+                                                 BINDER_SPACE::AssemblyName *pAssemblyName,
+                                                 CLRPrivBinderCoreCLR *pTPABinder,
+                                                 AssemblyLoadContext *pBinder,
+                                                 ICLRPrivAssembly **ppLoadedAssembly);
 
 #endif // !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 
@@ -112,12 +107,13 @@ namespace BINDER_SPACE
             return true;
         }
 
+        const WCHAR* s_httpURLPrefix = W("http://");
         HRESULT URLToFullPath(PathString &assemblyPath)
         {
             HRESULT hr = S_OK;
 
             SString::Iterator pos = assemblyPath.Begin();
-            if (assemblyPath.MatchCaseInsensitive(pos, g_BinderVariables->httpURLPrefix))
+            if (assemblyPath.MatchCaseInsensitive(pos, s_httpURLPrefix))
             {
                 // HTTP downloads are unsupported
                 hr = FUSION_E_CODE_DOWNLOAD_DISABLED;
@@ -185,23 +181,6 @@ namespace BINDER_SPACE
         }
 #endif // !CROSSGEN_COMPILE
     };
-
-    /* static */
-    HRESULT AssemblyBinder::Startup()
-    {
-        STATIC_CONTRACT_NOTHROW;
-
-        HRESULT hr = S_OK;
-
-        // This should only be called once
-        _ASSERTE(g_BinderVariables == NULL);
-        g_BinderVariables = new Variables();
-        IF_FAIL_GO(g_BinderVariables->Init());
-
-    Exit:
-        return hr;
-    }
-
 
     HRESULT AssemblyBinder::TranslatePEToArchitectureType(DWORD  *pdwPAFlags, PEKIND *PeKind)
     {
@@ -296,6 +275,7 @@ namespace BINDER_SPACE
 
             if (szCodeBase == NULL)
             {
+                _ASSERTE(pAssemblyName != NULL);
                 IF_FAIL_GO(BindByName(pApplicationContext,
                                       pAssemblyName,
                                       false, // skipFailureCaching
@@ -372,9 +352,6 @@ namespace BINDER_SPACE
                                          Assembly **ppSystemAssembly,
                                          bool       fBindToNativeImage)
     {
-        // Indirect check that binder was initialized.
-        _ASSERTE(g_BinderVariables != NULL);
-
         HRESULT hr = S_OK;
 
         _ASSERTE(ppSystemAssembly != NULL);
@@ -468,9 +445,6 @@ namespace BINDER_SPACE
         SString& cultureName,
         Assembly** ppSystemAssembly)
     {
-        // Indirect check that binder was initialized.
-        _ASSERTE(g_BinderVariables != NULL);
-
         HRESULT hr = S_OK;
 
         _ASSERTE(ppSystemAssembly != NULL);
@@ -781,8 +755,7 @@ namespace BINDER_SPACE
 
         if (!tpaListAssembly)
         {
-            SString &culture = pRequestedAssemblyName->GetCulture();
-            if (culture.IsEmpty() || culture.EqualsCaseInsensitive(g_BinderVariables->cultureNeutral))
+            if (pRequestedAssemblyName->IsNeutralCulture())
             {
                 dwIncludeFlags |= AssemblyName::EXCLUDE_CULTURE;
             }
@@ -912,10 +885,10 @@ namespace BINDER_SPACE
             // names as platform ones.
 
             HRESULT hr = S_OK;
-            SString& simpleNameRef = pRequestedAssemblyName->GetSimpleName();
+            const SString& simpleNameRef = pRequestedAssemblyName->GetSimpleName();
             SString& cultureRef = pRequestedAssemblyName->GetCulture();
 
-            _ASSERTE(!cultureRef.IsEmpty() && !cultureRef.EqualsCaseInsensitive(g_BinderVariables->cultureNeutral));
+            _ASSERTE(!pRequestedAssemblyName->IsNeutralCulture());
 
             ReleaseHolder<Assembly> pAssembly;
             SString fileName;
@@ -956,7 +929,7 @@ namespace BINDER_SPACE
             bool                    useNativeImages,
             Assembly                **ppAssembly)
         {
-            SString &simpleName = pRequestedAssemblyName->GetSimpleName();
+            const SString &simpleName = pRequestedAssemblyName->GetSimpleName();
             BinderTracing::PathSource pathSource = useNativeImages ? BinderTracing::PathSource::AppNativeImagePaths : BinderTracing::PathSource::AppPaths;
             // Loop through the binding paths looking for a matching assembly
             for (DWORD i = 0; i < pBindingPaths->GetCount(); i++)
@@ -1045,17 +1018,16 @@ namespace BINDER_SPACE
     {
         HRESULT hr = S_OK;
 
-        SString &culture = pRequestedAssemblyName->GetCulture();
         bool fPartialMatchOnTpa = false;
 
-        if (!culture.IsEmpty() && !culture.EqualsCaseInsensitive(g_BinderVariables->cultureNeutral))
+        if (!pRequestedAssemblyName->IsNeutralCulture())
         {
             IF_FAIL_GO(BindSatelliteResource(pApplicationContext, pRequestedAssemblyName, pBindResult));
         }
         else
         {
             ReleaseHolder<Assembly> pTPAAssembly;
-            SString& simpleName = pRequestedAssemblyName->GetSimpleName();
+            const SString& simpleName = pRequestedAssemblyName->GetSimpleName();
 
             // Is assembly in the bundle?
             // Single-file bundle contents take precedence over TPA.
@@ -1436,8 +1408,8 @@ namespace BINDER_SPACE
 #if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
 HRESULT AssemblyBinder::BindUsingHostAssemblyResolver(/* in */ INT_PTR pManagedAssemblyLoadContextToBindWithin,
                                                       /* in */ AssemblyName       *pAssemblyName,
-                                                      /* in */ IAssemblyName      *pIAssemblyName,
                                                       /* in */ CLRPrivBinderCoreCLR *pTPABinder,
+                                                      /* in */ AssemblyLoadContext *pBinder,
                                                       /* out */ Assembly           **ppAssembly)
 {
     HRESULT hr = E_FAIL;
@@ -1446,8 +1418,8 @@ HRESULT AssemblyBinder::BindUsingHostAssemblyResolver(/* in */ INT_PTR pManagedA
 
     // RuntimeInvokeHostAssemblyResolver will perform steps 2-4 of CLRPrivBinderAssemblyLoadContext::BindAssemblyByName.
     ICLRPrivAssembly *pLoadedAssembly = NULL;
-    hr = RuntimeInvokeHostAssemblyResolver(pManagedAssemblyLoadContextToBindWithin, pIAssemblyName,
-                                           pTPABinder, pAssemblyName, &pLoadedAssembly);
+    hr = RuntimeInvokeHostAssemblyResolver(pManagedAssemblyLoadContextToBindWithin,
+                                           pAssemblyName, pTPABinder, pBinder, &pLoadedAssembly);
     if (SUCCEEDED(hr))
     {
         _ASSERTE(pLoadedAssembly != NULL);
@@ -1466,9 +1438,6 @@ HRESULT AssemblyBinder::BindUsingPEImage(/* in */  ApplicationContext *pApplicat
                                          /* [retval] [out] */  Assembly **ppAssembly)
 {
     HRESULT hr = E_FAIL;
-
-    // Indirect check that binder was initialized.
-    _ASSERTE(g_BinderVariables != NULL);
 
     LONG kContextVersion = 0;
     BindResult bindResult;

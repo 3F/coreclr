@@ -485,7 +485,7 @@ namespace System
                     throw new InvalidOperationException("The NoGCRegion mode was already in progress");
                 case StartNoGCRegionStatus.AmountTooLarge:
                     throw new ArgumentOutOfRangeException(nameof(totalSize),
-                        "totalSize is too large. For more information about setting the maximum size, see \"Latency Modes\" in http://go.microsoft.com/fwlink/?LinkId=522706");
+                        "totalSize is too large. For more information about setting the maximum size, see \"Latency Modes\" in https://go.microsoft.com/fwlink/?LinkId=522706");
             }
 
             Debug.Assert(status == StartNoGCRegionStatus.Succeeded);
@@ -718,6 +718,14 @@ namespace System
             }
 
             return Unsafe.As<T[]>(AllocateNewArray(typeof(T[]).TypeHandle.Value, length, flags));
+        }
+
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        private static extern long _GetTotalPauseDuration();
+
+        public static TimeSpan GetTotalPauseDuration()
+        {
+            return new TimeSpan(_GetTotalPauseDuration());
         }
     }
 }

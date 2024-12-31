@@ -35,12 +35,17 @@ else(CLR_CMAKE_HOST_WIN32)
         generate_exports_file(${DEF_SOURCES} ${EXPORTS_FILE})
     endif(CLR_CMAKE_HOST_OSX OR CLR_CMAKE_HOST_FREEBSD OR CLR_CMAKE_HOST_NETBSD OR CLR_CMAKE_HOST_SUNOS)
 
+    if(CORECLR_SET_RPATH AND CLR_CMAKE_HOST_OSX AND CLR_CMAKE_HOST_ARCH_ARM64)
+      set(CMAKE_BUILD_WITH_INSTALL_NAME_DIR ON)
+      set(CMAKE_INSTALL_NAME_DIR "@rpath")
+    endif(CORECLR_SET_RPATH AND CLR_CMAKE_HOST_OSX AND CLR_CMAKE_HOST_ARCH_ARM64)
+
     if(CLR_CMAKE_HOST_LINUX)
 
         # Generate DAC export file with the DAC_ prefix
         generate_exports_file_prefix(${DEF_SOURCES} ${EXPORTS_FILE} DAC_)
 
-        set(REDEFINES_FILE_AWK_SCRIPT ${CMAKE_SOURCE_DIR}/generateredefinesfile.awk)
+        set(REDEFINES_FILE_SCRIPT ${CMAKE_SOURCE_DIR}/generateredefinesfile.sh)
 
         if (CLR_CMAKE_HOST_ARCH_ARM OR CLR_CMAKE_HOST_ARCH_ARM64)
             set(JUMP_INSTRUCTION b)
@@ -52,9 +57,10 @@ else(CLR_CMAKE_HOST_WIN32)
         set(PAL_REDEFINES_INC ${GENERATED_INCLUDE_DIR}/palredefines.inc)
         add_custom_command(
             OUTPUT ${PAL_REDEFINES_INC}
-            COMMAND ${AWK} -f ${REDEFINES_FILE_AWK_SCRIPT} -v jump=${JUMP_INSTRUCTION} -v prefix2=DAC_ ${DEF_SOURCES} > ${PAL_REDEFINES_INC}
-            DEPENDS ${DEF_SOURCES} ${REDEFINES_FILE_AWK_SCRIPT}
+            COMMAND ${REDEFINES_FILE_SCRIPT} ${DEF_SOURCES} ${JUMP_INSTRUCTION} "" DAC_ > ${PAL_REDEFINES_INC}
+            DEPENDS ${DEF_SOURCES} ${REDEFINES_FILE_SCRIPT}
             COMMENT "Generating PAL redefines file -> ${PAL_REDEFINES_INC}"
+            VERBATIM
         )
         add_custom_target(pal_redefines_file DEPENDS ${PAL_REDEFINES_INC})
 
@@ -62,8 +68,8 @@ else(CLR_CMAKE_HOST_WIN32)
         set(LIB_REDEFINES_INC ${GENERATED_INCLUDE_DIR}/libredefines.inc)
         add_custom_command(
             OUTPUT ${LIB_REDEFINES_INC}
-            COMMAND ${AWK} -f ${REDEFINES_FILE_AWK_SCRIPT} -v jump=${JUMP_INSTRUCTION} -v prefix1=DAC_ ${DEF_SOURCES} > ${LIB_REDEFINES_INC}
-            DEPENDS ${DEF_SOURCES} ${REDEFINES_FILE_AWK_SCRIPT}
+            COMMAND ${REDEFINES_FILE_SCRIPT} ${DEF_SOURCES} ${JUMP_INSTRUCTION} DAC_ > ${LIB_REDEFINES_INC}
+            DEPENDS ${DEF_SOURCES} ${REDEFINES_FILE_SCRIPT}
             COMMENT "Generating DAC export redefines file -> ${LIB_REDEFINES_INC}"
         )
         add_custom_target(lib_redefines_inc DEPENDS ${LIB_REDEFINES_INC})
@@ -92,7 +98,7 @@ endif(CLR_CMAKE_HOST_WIN32)
 
 # Create object library to enable creation of proper dependency of mscordaccore.exp on mscordac.obj and
 # mscordaccore on both the mscordaccore.exp and mscordac.obj.
-_add_library(mscordacobj OBJECT mscordac.cpp)
+add_library_clr(mscordacobj OBJECT mscordac.cpp)
 
 add_library_clr(mscordaccore SHARED ${CLR_DAC_SOURCES} $<TARGET_OBJECTS:mscordacobj>)
 
@@ -133,13 +139,11 @@ if(CLR_CMAKE_HOST_WIN32)
     # mscordac.def should be generated before mscordaccore.dll is built
     add_dependencies(mscordaccore mscordaccore_def)
 
-    set(MSCORDAC_OBJ_PATH "${CMAKE_CURRENT_BINARY_DIR}/mscordacobj.dir/${CMAKE_CFG_INTDIR}/mscordac.obj")
-
     # Generate export file
     add_custom_command(
         DEPENDS mscordaccore_def "${CURRENT_BINARY_DIR_FOR_CONFIG}/mscordac.def" mscordacobj daccess
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mscordaccore.exp
-        COMMAND lib.exe /OUT:"${CMAKE_CURRENT_BINARY_DIR}/mscordaccore.lib" /DEF:"${CURRENT_BINARY_DIR_FOR_CONFIG}/mscordac.def" "$<TARGET_FILE:daccess>" $<$<OR:$<CONFIG:Release>,$<CONFIG:Relwithdebinfo>>:/LTCG> ${STATIC_LIBRARY_FLAGS} ${MSCORDAC_OBJ_PATH}
+        COMMAND lib.exe /OUT:"${CMAKE_CURRENT_BINARY_DIR}/mscordaccore.lib" /DEF:"${CURRENT_BINARY_DIR_FOR_CONFIG}/mscordac.def" "$<TARGET_FILE:daccess>" $<$<OR:$<CONFIG:Release>,$<CONFIG:Relwithdebinfo>>:/LTCG> ${STATIC_LIBRARY_FLAGS} $<TARGET_OBJECTS:mscordacobj>
         COMMENT "Generating mscordaccore.exp export file"
     )
 
@@ -149,7 +153,8 @@ if(CLR_CMAKE_HOST_WIN32)
     )
 
     add_custom_target(mscordaccore_exp DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mscordaccore.exp)
-    add_dependencies(mscordaccore mscordaccore_exp)
+    add_dependencies(mscordaccore_exp mscordacobj)
+    add_dependencies(mscordaccore mscordaccore_exp mscordacobj)
 
     set(COREDAC_LIBRARIES
         ${CMAKE_CURRENT_BINARY_DIR}/mscordaccore.exp # export file
@@ -179,22 +184,16 @@ if(CLR_CMAKE_HOST_WIN32 AND CLR_CMAKE_TARGET_UNIX)
     )
 endif(CLR_CMAKE_HOST_WIN32 AND CLR_CMAKE_TARGET_UNIX)
 
-if(CLR_CMAKE_HOST_OSX)
+if(CLR_CMAKE_HOST_UNIX)
     list(APPEND COREDAC_LIBRARIES
         coreclrpal_dac
     )
-endif(CLR_CMAKE_HOST_OSX)
+endif(CLR_CMAKE_HOST_UNIX)
 
 target_link_libraries(mscordaccore PRIVATE ${COREDAC_LIBRARIES})
 
-# Create the DAC module index header file containing the DAC build id
-# for xplat and the timestamp/size on Windows.
-if(FEATURE_SINGLE_FILE_DIAGNOSTICS)
-    generate_module_index(mscordaccore ${GENERATED_INCLUDE_DIR}/dacmoduleindex.h)
-endif(FEATURE_SINGLE_FILE_DIAGNOSTICS)
-
 # add the install targets
-install_clr(TARGETS mscordaccore ADDITIONAL_DESTINATION sharedFramework)
+install_clr(TARGETS mscordaccore DESTINATIONS . sharedFramework COMPONENT runtime)
 
 if(CLR_CMAKE_HOST_WIN32)
     set(LONG_NAME_HOST_ARCH ${CLR_CMAKE_HOST_ARCH})
@@ -211,5 +210,8 @@ if(CLR_CMAKE_HOST_WIN32)
     string(REGEX MATCH "#define VER_FILEVERSION[ \t]+[0-9]+(,[0-9]+)+" FILE_VERSION_LINE "${NATIVE_VERSION_HEADER}")
     string(REGEX MATCHALL "[0-9]+" FILE_VERSION_COMPONENTS "${FILE_VERSION_LINE}")
     list(JOIN FILE_VERSION_COMPONENTS "." FILE_VERSION)
-    install(FILES $<TARGET_FILE:mscordaccore> RENAME mscordaccore_${LONG_NAME_HOST_ARCH}_${LONG_NAME_TARGET_ARCH}_${FILE_VERSION}.dll DESTINATION sharedFramework)
+    install(PROGRAMS $<TARGET_FILE:mscordaccore> RENAME mscordaccore_${LONG_NAME_HOST_ARCH}_${LONG_NAME_TARGET_ARCH}_${FILE_VERSION}.dll DESTINATION sharedFramework COMPONENT runtime)
+    if (NOT FEATURE_CROSSBITNESS)
+        install(PROGRAMS $<TARGET_FILE:mscordaccore> RENAME mscordaccore_${LONG_NAME_HOST_ARCH}_${LONG_NAME_TARGET_ARCH}_${FILE_VERSION}.dll DESTINATION sharedFramework COMPONENT crosscomponents)
+    endif()
 endif()

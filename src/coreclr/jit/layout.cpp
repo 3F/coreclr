@@ -1,3 +1,6 @@
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+
 #include "jitpch.h"
 #include "layout.h"
 #include "compiler.h"
@@ -379,38 +382,6 @@ void ClassLayout::InitializeGCPtrs(Compiler* compiler)
     INDEBUG(m_gcPtrsInitialized = true;)
 }
 
-#ifdef TARGET_AMD64
-ClassLayout* ClassLayout::GetPPPQuirkLayout(CompAllocator alloc)
-{
-    assert(m_gcPtrsInitialized);
-    assert(m_classHandle != NO_CLASS_HANDLE);
-    assert(m_isValueClass);
-    assert(m_size == 32);
-
-    if (m_pppQuirkLayout == nullptr)
-    {
-        m_pppQuirkLayout = new (alloc) ClassLayout(m_classHandle, m_isValueClass, 64 DEBUGARG(m_className));
-        m_pppQuirkLayout->m_gcPtrCount = m_gcPtrCount;
-
-        static_assert_no_msg(_countof(m_gcPtrsArray) == 8);
-
-        for (int i = 0; i < 4; i++)
-        {
-            m_pppQuirkLayout->m_gcPtrsArray[i] = m_gcPtrsArray[i];
-        }
-
-        for (int i = 4; i < 8; i++)
-        {
-            m_pppQuirkLayout->m_gcPtrsArray[i] = TYPE_GC_NONE;
-        }
-
-        INDEBUG(m_pppQuirkLayout->m_gcPtrsInitialized = true;)
-    }
-
-    return m_pppQuirkLayout;
-}
-#endif // TARGET_AMD64
-
 //------------------------------------------------------------------------
 // AreCompatible: check if 2 layouts are the same for copying.
 //
@@ -428,12 +399,11 @@ ClassLayout* ClassLayout::GetPPPQuirkLayout(CompAllocator alloc)
 // static
 bool ClassLayout::AreCompatible(const ClassLayout* layout1, const ClassLayout* layout2)
 {
+    assert((layout1 != nullptr) && (layout2 != nullptr));
     CORINFO_CLASS_HANDLE clsHnd1 = layout1->GetClassHandle();
     CORINFO_CLASS_HANDLE clsHnd2 = layout2->GetClassHandle();
-    assert(clsHnd1 != NO_CLASS_HANDLE);
-    assert(clsHnd2 != NO_CLASS_HANDLE);
 
-    if (clsHnd1 == clsHnd2)
+    if ((clsHnd1 != NO_CLASS_HANDLE) && (clsHnd1 == clsHnd2))
     {
         return true;
     }
@@ -453,7 +423,10 @@ bool ClassLayout::AreCompatible(const ClassLayout* layout1, const ClassLayout* l
         return true;
     }
 
+    assert(clsHnd1 != NO_CLASS_HANDLE);
+    assert(clsHnd2 != NO_CLASS_HANDLE);
     assert(layout1->HasGCPtr() && layout2->HasGCPtr());
+
     if (layout1->GetGCPtrCount() != layout2->GetGCPtrCount())
     {
         return false;

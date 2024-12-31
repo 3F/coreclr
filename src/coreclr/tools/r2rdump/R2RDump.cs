@@ -12,12 +12,15 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
+
+using ILCompiler.Diagnostics;
 using ILCompiler.Reflection.ReadyToRun;
-using ILCompiler.PdbWriter;
 
 using Internal.Runtime;
+using Internal.TypeSystem;
 
 namespace R2RDump
 {
@@ -38,6 +41,7 @@ namespace R2RDump
 
         public bool Unwind { get; set; }
         public bool GC { get; set; }
+        public bool Pgo { get; set; }
         public bool SectionContents { get; set; }
         public bool EntryPoints { get; set; }
         public bool Normalize { get; set; }
@@ -50,11 +54,23 @@ namespace R2RDump
         public bool CreatePDB { get; set; }
         public string PdbPath { get; set; }
 
+        public bool CreatePerfmap { get; set; }
+        public string PerfmapPath { get; set; }
+        public int PerfmapFormatVersion { get; set; }
+
+
         public FileInfo[] Reference { get; set; }
         public DirectoryInfo[] ReferencePath { get; set; }
 
         public bool SignatureBinary { get; set; }
         public bool InlineSignatureBinary { get; set; }
+
+        private SignatureFormattingOptions signatureFormattingOptions;
+
+        public DumpOptions()
+        {
+            PerfmapFormatVersion = PerfMapWriter.CurrentFormatVersion;
+        }
 
         /// <summary>
         /// Probing extensions to use when looking up assemblies under reference paths.
@@ -70,7 +86,7 @@ namespace R2RDump
         /// <param name="parentFile">Name of assembly from which we're performing the lookup</param>
         /// <returns></returns>
 
-        public MetadataReader FindAssembly(MetadataReader metadataReader, AssemblyReferenceHandle assemblyReferenceHandle, string parentFile)
+        public IAssemblyMetadata FindAssembly(MetadataReader metadataReader, AssemblyReferenceHandle assemblyReferenceHandle, string parentFile)
         {
             string simpleName = metadataReader.GetString(metadataReader.GetAssemblyReference(assemblyReferenceHandle).Name);
             return FindAssembly(simpleName, parentFile);
@@ -83,7 +99,7 @@ namespace R2RDump
         /// <param name="simpleName">Simple name of the assembly to look up</param>
         /// <param name="parentFile">Name of assembly from which we're performing the lookup</param>
         /// <returns></returns>
-        public MetadataReader FindAssembly(string simpleName, string parentFile)
+        public IAssemblyMetadata FindAssembly(string simpleName, string parentFile)
         {
             foreach (FileInfo refAsm in Reference ?? Enumerable.Empty<FileInfo>())
             {
@@ -117,7 +133,7 @@ namespace R2RDump
             return null;
         }
 
-        private static unsafe MetadataReader Open(string filename)
+        private static unsafe IAssemblyMetadata Open(string filename)
         {
             byte[] image = File.ReadAllBytes(filename);
 
@@ -128,7 +144,21 @@ namespace R2RDump
                 throw new BadImageFormatException($"ECMA metadata not found in file '{filename}'");
             }
 
-            return peReader.GetMetadataReader();
+            return new StandaloneAssemblyMetadata(peReader);
+        }
+
+        public SignatureFormattingOptions GetSignatureFormattingOptions()
+        {
+            if (signatureFormattingOptions == null)
+            {
+                signatureFormattingOptions = new SignatureFormattingOptions
+                {
+                    Naked = this.Naked,
+                    SignatureBinary = this.SignatureBinary,
+                    InlineSignatureBinary = this.InlineSignatureBinary,
+                };
+            }
+            return signatureFormattingOptions;
         }
     }
 
@@ -159,7 +189,7 @@ namespace R2RDump
 
         public IEnumerable<ReadyToRunMethod> NormalizedMethods()
         {
-            IEnumerable<ReadyToRunMethod> methods = _r2r.Methods.Values.SelectMany(sectionMethods => sectionMethods);
+            IEnumerable<ReadyToRunMethod> methods = _r2r.Methods;
             if (_options.Normalize)
             {
                 methods = methods.OrderBy((m) => m.SignatureString);
@@ -189,6 +219,7 @@ namespace R2RDump
         abstract internal void DumpBytes(int rva, uint size, string name = "Raw", bool convertToOffset = true);
         abstract internal void DumpSectionContents(ReadyToRunSection section);
         abstract internal void DumpQueryCount(string q, string title, int count);
+        abstract internal void DumpFixupStats();
 
         public TextWriter Writer => _writer;
 
@@ -217,6 +248,7 @@ namespace R2RDump
                 _options.Disasm = true;
                 _options.Unwind = true;
                 _options.GC = true;
+                _options.Pgo = true;
                 _options.SectionContents = true;
             }
 
@@ -343,7 +375,7 @@ namespace R2RDump
         public void Dump(ReadyToRunReader r2r)
         {
             _dumper.Begin();
-            bool standardDump = !(_options.EntryPoints || _options.CreatePDB);
+            bool standardDump = !(_options.EntryPoints || _options.CreatePDB || _options.CreatePerfmap);
 
             if (_options.Header && standardDump)
             {
@@ -392,30 +424,60 @@ namespace R2RDump
                         pdbPath = Path.GetDirectoryName(r2r.Filename);
                     }
                     var pdbWriter = new PdbWriter(pdbPath, PDBExtraData.None);
-                    pdbWriter.WritePDBData(r2r.Filename, ProducePdbWriterMethods(r2r));
+                    pdbWriter.WritePDBData(r2r.Filename, ProduceDebugInfoMethods(r2r));
                 }
 
-                if (!_options.Header && standardDump)
+                if (_options.CreatePerfmap)
+                {
+                    string perfmapPath = _options.PerfmapPath;
+                    if (string.IsNullOrEmpty(perfmapPath))
+                    {
+                        perfmapPath = Path.ChangeExtension(r2r.Filename, ".r2rmap");
+                    }
+                    // TODO: can't seem to find any place that surfaces the ABI. This is for debugging purposes, so may not be as relevant to be correct.
+                    TargetDetails details = new TargetDetails(r2r.TargetArchitecture, r2r.TargetOperatingSystem, TargetAbi.CoreRT);
+                    PerfMapWriter.Write(perfmapPath, _options.PerfmapFormatVersion, ProduceDebugInfoMethods(r2r), ProduceDebugInfoAssemblies(r2r), details);
+                }
+
+                if (standardDump)
                 {
                     _dumper.DumpAllMethods();
+                    _dumper.DumpFixupStats();
                 }
             }
 
             _dumper.End();
         }
 
-        IEnumerable<MethodInfo> ProducePdbWriterMethods(ReadyToRunReader r2r)
+        IEnumerable<MethodInfo> ProduceDebugInfoMethods(ReadyToRunReader r2r)
         {
             foreach (var method in _dumper.NormalizedMethods())
             {
                 MethodInfo mi = new MethodInfo();
                 mi.Name = method.SignatureString;
                 mi.HotRVA = (uint)method.RuntimeFunctions[0].StartAddress;
-                mi.MethodToken = (uint)MetadataTokens.GetToken(method.MetadataReader, method.MethodHandle);
-                mi.AssemblyName = method.MetadataReader.GetString(method.MetadataReader.GetAssemblyDefinition().Name);
+                mi.HotLength = (uint)method.RuntimeFunctions[0].Size;
+                mi.MethodToken = (uint)MetadataTokens.GetToken(method.ComponentReader.MetadataReader, method.MethodHandle);
+                mi.AssemblyName = method.ComponentReader.MetadataReader.GetString(method.ComponentReader.MetadataReader.GetAssemblyDefinition().Name);
                 mi.ColdRVA = 0;
-                
+                mi.ColdLength = 0;
+
                 yield return mi;
+            }
+        }
+
+        IEnumerable<AssemblyInfo> ProduceDebugInfoAssemblies(ReadyToRunReader r2r)
+        {
+            if (r2r.Composite)
+            {
+                foreach (KeyValuePair<string, int> kvpRefAssembly in r2r.ManifestReferenceAssemblies.OrderBy(kvp => kvp.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    yield return new AssemblyInfo(kvpRefAssembly.Key, r2r.GetAssemblyMvid(kvpRefAssembly.Value));
+                }
+            }
+            else
+            {
+                yield return new AssemblyInfo(r2r.GetGlobalAssemblyName(), r2r.GetAssemblyMvid(0));
             }
         }
 
@@ -428,7 +490,7 @@ namespace R2RDump
         {
             int id;
             bool isNum = ArgStringToInt(query, out id);
-            bool idMatch = isNum && (method.Rid == id || MetadataTokens.GetRowNumber(method.MetadataReader, method.MethodHandle) == id);
+            bool idMatch = isNum && (method.Rid == id || MetadataTokens.GetRowNumber(method.ComponentReader.MetadataReader, method.MethodHandle) == id);
 
             bool sigMatch = false;
             if (exact)
@@ -475,7 +537,7 @@ namespace R2RDump
         public IList<ReadyToRunMethod> FindMethod(ReadyToRunReader r2r, string query, bool exact)
         {
             List<ReadyToRunMethod> res = new List<ReadyToRunMethod>();
-            foreach (ReadyToRunMethod method in r2r.Methods.Values.SelectMany(sectionMethods => sectionMethods))
+            foreach (ReadyToRunMethod method in r2r.Methods)
             {
                 if (Match(method, query, exact))
                 {
@@ -512,7 +574,7 @@ namespace R2RDump
         /// <param name="rtfQuery">The name or value to search for</param>
         public RuntimeFunction FindRuntimeFunction(ReadyToRunReader r2r, int rtfQuery)
         {
-            foreach (ReadyToRunMethod m in r2r.Methods.Values.SelectMany(sectionMethods => sectionMethods))
+            foreach (ReadyToRunMethod m in r2r.Methods)
             {
                 foreach (RuntimeFunction rtf in m.RuntimeFunctions)
                 {
@@ -551,16 +613,8 @@ namespace R2RDump
 
                     if (_options.Disasm)
                     {
-                        if (r2r.InputArchitectureSupported() && r2r.DisassemblerArchitectureSupported())
-                        {
-                            disassembler = new Disassembler(r2r, _options);
-                        }
-                        else
-                        {
-                            throw new ArgumentException($"The architecture of input file {filename} ({r2r.Machine.ToString()}) or the architecture of the disassembler tools ({System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString()}) is not supported.");
-                        }
+                        disassembler = new Disassembler(r2r, _options);
                     }
-
 
                     if (!_options.Diff)
                     {

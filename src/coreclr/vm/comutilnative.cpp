@@ -522,8 +522,6 @@ FCIMPL0(EXCEPTION_POINTERS*, ExceptionNative::GetExceptionPointers)
     EXCEPTION_POINTERS* retVal = NULL;
 
     Thread *pThread = GetThread();
-    _ASSERTE(pThread);
-
     if (pThread->IsExceptionInProgress())
     {
         retVal = pThread->GetExceptionState()->GetExceptionPointers();
@@ -540,8 +538,6 @@ FCIMPL0(INT32, ExceptionNative::GetExceptionCode)
     INT32 retVal = 0;
 
     Thread *pThread = GetThread();
-    _ASSERTE(pThread);
-
     if (pThread->IsExceptionInProgress())
     {
         retVal = pThread->GetExceptionState()->GetExceptionCode();
@@ -677,6 +673,16 @@ UINT64   GCInterface::m_remPressure[MEM_PRESSURE_COUNT] = {0, 0, 0, 0};   // his
 // incremented after a gen2 GC has been detected,
 // (m_iteration % MEM_PRESSURE_COUNT) is used as an index into m_addPressure and m_remPressure
 UINT     GCInterface::m_iteration = 0;
+
+FCIMPL0(INT64, GCInterface::GetTotalPauseDuration)
+{
+    FCALL_CONTRACT;
+
+    FC_GC_POLL_NOT_NEEDED();
+
+    return GCHeapUtilities::GetGCHeap()->GetTotalPauseDuration();
+}
+FCIMPLEND
 
 FCIMPL2(void, GCInterface::GetMemoryInfo, Object* objUNSAFE, int kind)
 {
@@ -1537,19 +1543,6 @@ FCIMPL2_IV(INT64,COMInterlocked::Exchange64, INT64 *location, INT64 value)
 }
 FCIMPLEND
 
-FCIMPL2(LPVOID,COMInterlocked::ExchangePointer, LPVOID *location, LPVOID value)
-{
-    FCALL_CONTRACT;
-
-    if( NULL == location) {
-        FCThrow(kNullReferenceException);
-    }
-
-    FCUnique(0x15);
-    return FastInterlockExchangePointer(location, value);
-}
-FCIMPLEND
-
 FCIMPL3(INT32, COMInterlocked::CompareExchange, INT32* location, INT32 value, INT32 comparand)
 {
     FCALL_CONTRACT;
@@ -1571,19 +1564,6 @@ FCIMPL3_IVV(INT64, COMInterlocked::CompareExchange64, INT64* location, INT64 val
     }
 
     return FastInterlockCompareExchangeLong((INT64*)location, value, comparand);
-}
-FCIMPLEND
-
-FCIMPL3(LPVOID,COMInterlocked::CompareExchangePointer, LPVOID *location, LPVOID value, LPVOID comparand)
-{
-    FCALL_CONTRACT;
-
-    if( NULL == location) {
-        FCThrow(kNullReferenceException);
-    }
-
-    FCUnique(0x59);
-    return FastInterlockCompareExchangePointer(location, value, comparand);
 }
 FCIMPLEND
 

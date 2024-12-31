@@ -203,7 +203,9 @@ BOOL ZapSig::GetSignatureForTypeHandle(TypeHandle      handle,
         // During IBC profiling this calls
         //     code:Module.EncodeModuleHelper
         // During ngen this calls
-        //     code:ZapImportTable.EncodeModuleHelper)
+        //     code:ZapImportTable.EncodeModuleHelper
+        // During multicorejit this calls
+        //     code:MulticoreJitManager.EncodeModuleHelper
         //
         index = (*this->pfnEncodeModule)(this->context.pModuleContext, pTypeHandleModule);
 
@@ -212,6 +214,7 @@ BOOL ZapSig::GetSignatureForTypeHandle(TypeHandle      handle,
 
         // emit the ET_MODULE_ZAPSIG escape
         pSigBuilder->AppendElementType((CorElementType) ELEMENT_TYPE_MODULE_ZAPSIG);
+
         // emit the module index
         pSigBuilder->AppendData(index);
     }
@@ -244,7 +247,7 @@ BOOL ZapSig::GetSignatureForTypeHandle(TypeHandle      handle,
         (*this->pfnTokenDefinition)(this->context.pModuleContext, pTypeHandleModule, index, &token);
 
         // ibcExternalType tokens are actually encoded as mdtTypeDef tokens in the signature
-        _ASSERT(TypeFromToken(token) == ibcExternalType);
+        _ASSERTE(TypeFromToken(token) == ibcExternalType);
         token = TokenFromRid(RidFromToken(token), mdtTypeDef);
     }
 
@@ -416,6 +419,7 @@ BOOL ZapSig::GetSignatureForTypeHandle(TypeHandle      handle,
             _ASSERTE(sigType == ELEMENT_TYPE_VALUETYPE);
 
             if (!handle.IsNativeValueType()) RETURN(FALSE);
+            FALLTHROUGH;
         } // fall-through
 
         case ELEMENT_TYPE_VALUETYPE:
@@ -533,7 +537,7 @@ BOOL ZapSig::GetSignatureForTypeHandle(TypeHandle      handle,
             if (FAILED(sp.SkipExactlyOne()))
                 RETURN(FALSE);
 
-            DWORD rank;
+            uint32_t rank;
             if (FAILED(sp.GetData(&rank)))
                 RETURN(FALSE);
 
@@ -647,17 +651,17 @@ Module *ZapSig::DecodeModuleFromIndex(Module *fromModule,
 
         if(pAssembly == NULL)
         {
+            DomainAssembly *pParentAssembly = fromModule->GetDomainAssembly();
             if (nativeImage != NULL)
             {
-                pAssembly = nativeImage->LoadManifestAssembly(index);
+                pAssembly = nativeImage->LoadManifestAssembly(index, pParentAssembly);
             }
             else
             {
                 AssemblySpec spec;
                 spec.InitializeSpec(TokenFromRid(index, mdtAssemblyRef),
                                 fromModule->GetNativeAssemblyImport(),
-                                NULL);
-                spec.SetParentAssembly(fromModule->GetDomainAssembly());
+                                pParentAssembly);
                 pAssembly = spec.LoadAssembly(FILE_LOADED);
             }
             fromModule->SetNativeMetadataAssemblyRefInCache(index, pAssembly);
@@ -737,7 +741,8 @@ Module *ZapSig::DecodeModuleFromIndexIfLoaded(Module *fromModule,
 TypeHandle ZapSig::DecodeType(Module *pEncodeModuleContext,
                               Module *pInfoModule,
                               PCCOR_SIGNATURE pBuffer,
-                              ClassLoadLevel level)
+                              ClassLoadLevel level,
+                              PCCOR_SIGNATURE *ppAfterSig /*=NULL*/)
 {
     CONTRACTL
     {
@@ -762,6 +767,12 @@ TypeHandle ZapSig::DecodeType(Module *pEncodeModuleContext,
                                             NULL,
                                             pZapSigContext);
 
+    if (ppAfterSig != NULL)
+    {
+        IfFailThrow(p.SkipExactlyOne());
+        *ppAfterSig = p.GetPtr();
+    }
+
     return th;
 }
 
@@ -773,17 +784,19 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
     STANDARD_VM_CONTRACT;
 
     SigTypeContext typeContext;    // empty context is OK: encoding should not contain type variables.
-
-    return DecodeMethod(pReferencingModule, pInfoModule, pBuffer, &typeContext, ppTH);
+    ZapSig::Context zapSigContext(pInfoModule, (void *)pReferencingModule, ZapSig::NormalTokens);
+    return DecodeMethod(pInfoModule, pBuffer, &typeContext, &zapSigContext, ppTH, NULL, NULL);
 }
 
-MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
-                                 Module *pInfoModule,
+MethodDesc *ZapSig::DecodeMethod(Module *pInfoModule,
                                  PCCOR_SIGNATURE pBuffer,
                                  SigTypeContext *pContext,
+                                 ZapSig::Context *pZapSigContext,
                                  TypeHandle *ppTH, /*=NULL*/
                                  PCCOR_SIGNATURE *ppOwnerTypeSpecWithVars, /*=NULL*/
-                                 PCCOR_SIGNATURE *ppMethodSpecWithVars /*=NULL*/)
+                                 PCCOR_SIGNATURE *ppMethodSpecWithVars, /*=NULL*/
+                                 PCCOR_SIGNATURE *ppAfterSig /*=NULL*/,
+                                 BOOL actualOwnerRequired /*=FALSE*/)
 {
     STANDARD_VM_CONTRACT;
 
@@ -791,14 +804,27 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
 
     SigPointer sig(pBuffer);
 
-    ZapSig::Context    zapSigContext(pInfoModule, (void *)pReferencingModule, ZapSig::NormalTokens);
-    ZapSig::Context *  pZapSigContext = &zapSigContext;
-
     // decode flags
-    DWORD methodFlags;
+    uint32_t methodFlags;
     IfFailThrow(sig.GetData(&methodFlags));
 
     TypeHandle thOwner = NULL;
+
+    if ( methodFlags & ENCODE_METHOD_SIG_UpdateContext)
+    {
+        uint32_t updatedModuleIndex;
+        IfFailThrow(sig.GetData(&updatedModuleIndex));
+#ifdef FEATURE_MULTICOREJIT
+        if (pZapSigContext->externalTokens == ZapSig::MulticoreJitTokens)
+        {
+            pInfoModule = MulticoreJitManager::DecodeModuleFromIndex(pZapSigContext->pModuleContext, updatedModuleIndex);
+        }
+        else
+#endif
+        {
+            pInfoModule = pZapSigContext->GetZapSigModule()->GetModuleFromIndex(updatedModuleIndex);
+        }
+    }
 
     if ( methodFlags & ENCODE_METHOD_SIG_OwnerType )
     {
@@ -819,7 +845,7 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
     if ( methodFlags & ENCODE_METHOD_SIG_SlotInsteadOfToken )
     {
         // get the method desc using slot number
-        DWORD slot;
+        uint32_t slot;
         IfFailThrow(sig.GetData(&slot));
 
         _ASSERTE(!thOwner.IsNull());
@@ -842,7 +868,7 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
                 MethodDesc * pMD = NULL;
                 FieldDesc * pFD = NULL;
 
-                MemberLoader::GetDescFromMemberRef(pInfoModule, TokenFromRid(rid, mdtMemberRef), &pMD, &pFD, NULL, FALSE, &th);
+                MemberLoader::GetDescFromMemberRef(pInfoModule, TokenFromRid(rid, mdtMemberRef), &pMD, &pFD, NULL, actualOwnerRequired, &th);
                 _ASSERTE(pMD != NULL);
 
                 thOwner = th;
@@ -860,7 +886,17 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
     }
 
     if (thOwner.IsNull())
+    {
+        if (pZapSigContext->externalTokens == ZapSig::MulticoreJitTokens)
+        {
+            if (ppAfterSig != NULL)
+                *ppAfterSig = sig.GetPtr();
+
+            return NULL;
+        }
+
         thOwner = pMethod->GetMethodTable();
+    }
 
     if (ppTH != NULL)
         *ppTH = thOwner;
@@ -880,7 +916,7 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
         if (ppMethodSpecWithVars != NULL)
             *ppMethodSpecWithVars = sig.GetPtr();
 
-        DWORD nargs;
+        uint32_t nargs;
         IfFailThrow(sig.GetData(&nargs));
         _ASSERTE(nargs > 0);
 
@@ -891,7 +927,7 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
 
         TypeHandle * pInst = (TypeHandle*) _alloca(cbMem);
 
-        for (DWORD i = 0; i < nargs; i++)
+        for (uint32_t i = 0; i < nargs; i++)
         {
             pInst[i] = sig.GetTypeHandleThrowing(pInfoModule,
                                                 pContext,
@@ -920,7 +956,8 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
     pMethod = MethodDesc::FindOrCreateAssociatedMethodDesc(pMethod, thOwner.GetMethodTable(),
                                                             isUnboxingStub,
                                                             inst,
-                                                            !(isInstantiatingStub || isUnboxingStub));
+                                                            !(isInstantiatingStub || isUnboxingStub) && !actualOwnerRequired,
+                                                            actualOwnerRequired);
 
     g_IBCLogger.LogMethodDescAccess(pMethod);
 
@@ -933,6 +970,9 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
                                                 FALSE,
                                                 NULL,
                                                 pZapSigContext);
+
+        if (ppAfterSig != NULL)
+            IfFailThrow(sig.SkipExactlyOne());
 
         MethodDesc * directMethod = constrainedType.GetMethodTable()->TryResolveConstraintMethodApprox(thOwner.GetMethodTable(), pMethod);
         if (directMethod == NULL)
@@ -953,6 +993,9 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
             pMethod = directMethod;
         }
     }
+
+    if (ppAfterSig != NULL)
+        *ppAfterSig = sig.GetPtr();
 
     return pMethod;
 }
@@ -993,7 +1036,7 @@ FieldDesc * ZapSig::DecodeField(Module *pReferencingModule,
 
     SigPointer sig(pBuffer);
 
-    DWORD fieldFlags;
+    uint32_t fieldFlags;
     IfFailThrow(sig.GetData(&fieldFlags));
 
     MethodTable *pOwnerMT = NULL;
@@ -1017,7 +1060,7 @@ FieldDesc * ZapSig::DecodeField(Module *pReferencingModule,
     if (fieldFlags & ENCODE_FIELD_SIG_IndexInsteadOfToken)
     {
         // get the field desc using index
-        DWORD fieldIndex;
+        uint32_t fieldIndex;
         IfFailThrow(sig.GetData(&fieldIndex));
 
         _ASSERTE(pOwnerMT != NULL);
@@ -1088,33 +1131,33 @@ void ZapSig::CopyTypeSignature(SigParser* pSigParser, SigBuilder* pSigBuilder, D
             if (type == ELEMENT_TYPE_ARRAY)
             {
                 // Copy rank
-                ULONG rank;
+                uint32_t rank;
                 IfFailThrow(pSigParser->GetData(&rank));
                 pSigBuilder->AppendData(rank);
 
                 if (rank)
                 {
                     // Copy # of sizes
-                    ULONG nsizes;
+                    uint32_t nsizes;
                     IfFailThrow(pSigParser->GetData(&nsizes));
                     pSigBuilder->AppendData(nsizes);
 
                     while (nsizes--)
                     {
                         // Copy size
-                        ULONG size;
+                        uint32_t size;
                         IfFailThrow(pSigParser->GetData(&size));
                         pSigBuilder->AppendData(size);
                     }
 
                     // Copy # of lower bounds
-                    ULONG nlbounds;
+                    uint32_t nlbounds;
                     IfFailThrow(pSigParser->GetData(&nlbounds));
                     pSigBuilder->AppendData(nlbounds);
                     while (nlbounds--)
                     {
                         // Copy lower bound
-                        ULONG lbound;
+                        uint32_t lbound;
                         IfFailThrow(pSigParser->GetData(&lbound));
                         pSigBuilder->AppendData(lbound);
                     }
@@ -1154,7 +1197,7 @@ void ZapSig::CopyTypeSignature(SigParser* pSigParser, SigBuilder* pSigBuilder, D
             IfFailThrow(pSigParser->GetToken(&token));
             pSigBuilder->AppendToken(token);
 
-            ULONG argCnt; // Get number of generic parameters
+            uint32_t argCnt; // Get number of generic parameters
             IfFailThrow(pSigParser->GetData(&argCnt));
             pSigBuilder->AppendData(argCnt);
 
@@ -1227,7 +1270,12 @@ BOOL ZapSig::EncodeMethod(
     }
 
     ZapSig::ExternalTokens externalTokens = ZapSig::NormalTokens;
-    if (pfnDefineToken != NULL)
+    if (pInfoModule == NULL)
+    {
+        externalTokens = ZapSig::MulticoreJitTokens;
+        pInfoModule = pMethod->GetModule_NoLogging();
+    }
+    else if (pfnDefineToken != NULL)
     {
         externalTokens = ZapSig::IbcTokens;
     }
@@ -1432,7 +1480,7 @@ BOOL ZapSig::EncodeMethod(
             _ASSERTE(pInfoModule == pMethod->GetModule());
         }
 
-        if (!ownerType.HasInstantiation())
+        if (!ownerType.HasInstantiation() && externalTokens != ZapSig::MulticoreJitTokens)
             methodFlags &= ~ENCODE_METHOD_SIG_OwnerType;
     }
 
@@ -1494,7 +1542,7 @@ BOOL ZapSig::EncodeMethod(
                 ThrowHR(COR_E_BADIMAGEFORMAT);
             }
 
-            ULONG numGenArgs;
+            uint32_t numGenArgs;
             IfFailThrow(sigParser.GetData(&numGenArgs));
             pSigBuilder->AppendData(numGenArgs);
 

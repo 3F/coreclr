@@ -162,9 +162,6 @@ typedef DPTR(class ReJitManager)        PTR_ReJitManager;
 typedef DPTR(struct ReJitInfo)          PTR_ReJitInfo;
 typedef DPTR(struct SharedReJitInfo)    PTR_SharedReJitInfo;
 typedef DPTR(class StringObject)        PTR_StringObject;
-#ifdef FEATURE_UTF8STRING
-typedef DPTR(class Utf8StringObject)    PTR_Utf8StringObject;
-#endif // FEATURE_UTF8STRING
 typedef DPTR(class TypeHandle)          PTR_TypeHandle;
 typedef VPTR(class VirtualCallStubManager) PTR_VirtualCallStubManager;
 typedef VPTR(class VirtualCallStubManagerManager) PTR_VirtualCallStubManagerManager;
@@ -184,7 +181,11 @@ typedef PTR_Object OBJECTREF;
 typedef DPTR(OBJECTREF) PTR_OBJECTREF;
 typedef DPTR(PTR_OBJECTREF) PTR_PTR_OBJECTREF;
 
-EXTERN_C Thread* STDCALL GetThread();
+Thread* GetThread();
+Thread* GetThreadNULLOk();
+
+EXTERN_C Thread* STDCALL GetThreadHelper();
+
 void SetThread(Thread*);
 
 // This is a mechanism by which macros can make the Thread pointer available to inner scopes
@@ -280,6 +281,18 @@ namespace Loader
     } LoadFlag;
 }
 
+#if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
+#if defined(TARGET_WINDOWS) && defined(TARGET_AMD64)
+EXTERN_C void STDCALL ClrRestoreNonvolatileContext(PCONTEXT ContextRecord);
+#elif !(defined(TARGET_WINDOWS) && defined(TARGET_X86)) // !(TARGET_WINDOWS && TARGET_AMD64) && !(TARGET_WINDOWS && TARGET_X86)
+inline void ClrRestoreNonvolatileContext(PCONTEXT ContextRecord)
+{
+    // Falling back to RtlRestoreContext() for now, though it should be possible to have simpler variants for these cases
+    RtlRestoreContext(ContextRecord, NULL);
+}
+#endif // TARGET_WINDOWS && TARGET_AMD64
+#endif // !DACCESS_COMPILE && !CROSSGEN_COMPILE
+
 // src/inc
 #include "utilcode.h"
 #include "log.h"
@@ -354,6 +367,7 @@ namespace Loader
 #include "pefile.inl"
 #include "excep.h"
 #include "method.hpp"
+#include "field.h"
 #include "callingconvention.h"
 #include "frames.h"
 #include "qcall.h"
@@ -368,7 +382,9 @@ namespace Loader
 #include "gcstress.h"
 
 HRESULT EnsureRtlFunctions();
-HINSTANCE GetModuleInst();
+
+// Helper function returns the base of clr module.
+void* GetClrModuleBase();
 
 #if defined(TARGET_X86) || defined(TARGET_AMD64)
 //

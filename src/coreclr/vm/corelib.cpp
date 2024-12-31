@@ -65,8 +65,9 @@
 #include "variant.h"
 #include "oavariant.h"
 #include "mngstdinterfaces.h"
-#include "interoplibinterface.h"
 #endif // FEATURE_COMINTEROP
+
+#include "interoplibinterface.h"
 
 #include "stubhelpers.h"
 #include "ilmarshalers.h"
@@ -76,14 +77,15 @@
 #endif
 
 #if defined(FEATURE_EVENTSOURCE_XPLAT)
-#include "nativeeventsource.h"
-#include "eventpipe.h"
+#include "eventpipeadapter.h"
 #include "eventpipeinternal.h"
+#include "nativeeventsource.h"
 #endif //defined(FEATURE_EVENTSOURCE_XPLAT)
 
 #ifdef FEATURE_PERFTRACING
-#include "eventpipe.h"
+#include "eventpipeadapter.h"
 #include "eventpipeinternal.h"
+#include "nativeeventsource.h"
 #endif //FEATURE_PERFTRACING
 
 #include "tailcallhelp.h"
@@ -370,9 +372,6 @@ const USHORT c_nCoreLibFieldDescriptions = NumItems(c_rgCoreLibFieldDescriptions
 //
 // ECalls
 //
-
-// ECalls defined by libraries-native shims
-EXTERN_C const LPVOID gPalGlobalizationNative[];
 
 // When compiling crossgen, we only need the target version of the ecall tables
 #if !defined(CROSSGEN_COMPILE) || defined(CROSSGEN_CORELIB)

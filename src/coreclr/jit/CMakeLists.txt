@@ -8,11 +8,59 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   add_compile_options(-Wno-error)
 endif()
 
-add_compile_options($<$<CXX_COMPILER_ID:MSVC>:-W4>)
+function(create_standalone_jit)
+
+  set(oneValueArgs TARGET OS ARCH)
+  set(multiValueArgs DESTINATIONS)
+  cmake_parse_arguments(TARGETDETAILS "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(TARGETDETAILS_OS STREQUAL "unix_osx")
+    if (NOT (TARGETDETAILS_ARCH STREQUAL "arm64"))
+      message(FATAL_ERROR "Only arm64 Apple has a special ABI, use just unix for x64 Mac OS." )
+    endif()
+    set(JIT_ARCH_LINK_LIBRARIES gcinfo_unix_arm64)
+  else()
+    set(JIT_ARCH_LINK_LIBRARIES gcinfo_${TARGETDETAILS_OS}_${TARGETDETAILS_ARCH})
+  endif()
+
+  if(TARGETDETAILS_ARCH STREQUAL "x64")
+    set(JIT_ARCH_SOURCES ${JIT_AMD64_SOURCES})
+  elseif((TARGETDETAILS_ARCH STREQUAL "arm") OR (TARGETDETAILS_ARCH STREQUAL "armel"))
+    set(JIT_ARCH_SOURCES ${JIT_ARM_SOURCES})
+  elseif(TARGETDETAILS_ARCH STREQUAL "x86")
+    set(JIT_ARCH_SOURCES ${JIT_I386_SOURCES})
+  elseif(TARGETDETAILS_ARCH STREQUAL "arm64")
+    set(JIT_ARCH_SOURCES ${JIT_ARM64_SOURCES})
+  elseif(TARGETDETAILS_ARCH STREQUAL "s390x")
+    set(JIT_ARCH_SOURCES ${JIT_S390X_SOURCES})
+  else()
+    clr_unknown_arch()
+  endif()
+
+  if (TARGETDETAILS_DESTINATIONS STREQUAL "")
+    add_jit(${TARGETDETAILS_TARGET})
+  else()
+    add_jit(${TARGETDETAILS_TARGET} DESTINATIONS "${TARGETDETAILS_DESTINATIONS}")
+  endif()
+
+  set_target_definitions_to_custom_os_and_arch(${ARGN})
+  set_target_properties(${TARGETDETAILS_TARGET} PROPERTIES IGNORE_FEATURE_MERGE_JIT_AND_ENGINE TRUE)
+
+  target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE FEATURE_NO_HOST)
+  target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE SELF_NO_HOST)
+  if(FEATURE_READYTORUN)
+    target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE FEATURE_READYTORUN_COMPILER)
+  endif(FEATURE_READYTORUN)
+
+  if ((TARGETDETAILS_ARCH STREQUAL "x64") OR (TARGETDETAILS_ARCH STREQUAL "arm64") OR ((TARGETDETAILS_ARCH STREQUAL "x86") AND NOT (TARGETDETAILS_OS STREQUAL "unix")))
+    target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE FEATURE_SIMD)
+    target_compile_definitions(${TARGETDETAILS_TARGET} PRIVATE FEATURE_HW_INTRINSICS)
+  endif ()
+endfunction()
 
 if (CLR_CMAKE_TARGET_ARCH_AMD64 OR CLR_CMAKE_TARGET_ARCH_ARM64 OR (CLR_CMAKE_TARGET_ARCH_I386 AND NOT CLR_CMAKE_HOST_UNIX))
-  add_definitions(-DFEATURE_SIMD)
-  add_definitions(-DFEATURE_HW_INTRINSICS)
+  add_compile_definitions($<$<NOT:$<BOOL:$<TARGET_PROPERTY:IGNORE_DEFAULT_TARGET_ARCH>>>:FEATURE_SIMD>)
+  add_compile_definitions($<$<NOT:$<BOOL:$<TARGET_PROPERTY:IGNORE_DEFAULT_TARGET_ARCH>>>:FEATURE_HW_INTRINSICS>)
 endif ()
 
 # JIT_BUILD disables certain PAL_TRY debugging features
@@ -38,6 +86,14 @@ set( JIT_SOURCES
   eeinterface.cpp
   emit.cpp
   error.cpp
+  fgbasic.cpp
+  fgdiagnostic.cpp
+  fgehopt.cpp
+  fgflow.cpp
+  fginline.cpp
+  fgopt.cpp
+  fgprofile.cpp
+  fgstmt.cpp
   flowgraph.cpp
   gcdecode.cpp
   gcencode.cpp
@@ -58,6 +114,7 @@ set( JIT_SOURCES
   jittelemetry.cpp
   lclmorph.cpp
   lclvars.cpp
+  likelyclass.cpp
   lir.cpp
   liveness.cpp
   loopcloning.cpp
@@ -65,6 +122,7 @@ set( JIT_SOURCES
   lsra.cpp
   lsrabuild.cpp
   morph.cpp
+  morphblock.cpp
   objectalloc.cpp
   optcse.cpp
   optimizer.cpp
@@ -72,6 +130,7 @@ set( JIT_SOURCES
   phase.cpp
   rangecheck.cpp
   rationalize.cpp
+  redundantbranchopts.cpp
   regalloc.cpp
   register_arg_convention.cpp
   regset.cpp
@@ -157,6 +216,8 @@ if (CLR_CMAKE_TARGET_WIN32)
     loopcloningopts.h
     lower.h
     lsra_reftypes.h
+    lsra_stats.h
+    lsra_score.h
     lsra.h
     namedintrinsiclist.h
     objectalloc.h
@@ -182,6 +243,10 @@ if (CLR_CMAKE_TARGET_WIN32)
     ssarenamestate.h
     stacklevelsetter.h
     target.h
+    targetx86.h
+    targetamd64.h
+    targetarm.h
+    targetarm64.h
     tinyarray.h
     titypes.h
     treelifeupdater.h
@@ -193,7 +258,12 @@ if (CLR_CMAKE_TARGET_WIN32)
     valuenumtype.h
     varset.h
     vartype.h
+    vartypesdef.h
   )
+
+  # Append clrjit.natvis file
+  list (APPEND JIT_SOURCES
+    clrjit.natvis)
 
   if (CLR_CMAKE_TARGET_ARCH_ARM64 OR CLR_CMAKE_TARGET_ARCH_ARM)
     list (APPEND JIT_HEADERS
@@ -278,6 +348,10 @@ set( JIT_ARM64_SOURCES
   hwintrinsiccodegenarm64.cpp
 )
 
+set( JIT_S390X_SOURCES
+  # Not supported as JIT target
+)
+
 if(CLR_CMAKE_TARGET_ARCH_AMD64)
   set(JIT_ARCH_SOURCES ${JIT_AMD64_SOURCES})
 elseif(CLR_CMAKE_TARGET_ARCH_ARM)
@@ -286,18 +360,20 @@ elseif(CLR_CMAKE_TARGET_ARCH_I386)
   set(JIT_ARCH_SOURCES ${JIT_I386_SOURCES})
 elseif(CLR_CMAKE_TARGET_ARCH_ARM64)
   set(JIT_ARCH_SOURCES ${JIT_ARM64_SOURCES})
+elseif(CLR_CMAKE_TARGET_ARCH_S390X)
+  set(JIT_ARCH_SOURCES ${JIT_S390X_SOURCES})
 else()
   clr_unknown_arch()
 endif()
 
-set(SOURCES
+set(JIT_CORE_SOURCES
   ${JIT_SOURCES}
   ${JIT_HEADERS}
-  ${JIT_RESOURCES}
 )
 
-convert_to_absolute_path(SOURCES ${SOURCES})
+convert_to_absolute_path(JIT_CORE_SOURCES ${JIT_CORE_SOURCES})
 convert_to_absolute_path(JIT_ARCH_SOURCES ${JIT_ARCH_SOURCES})
+convert_to_absolute_path(JIT_RESOURCES ${JIT_RESOURCES})
 
 # Also convert the per-architecture sources to absolute paths, if the subdirs want to use them.
 
@@ -313,7 +389,6 @@ if(CLR_CMAKE_TARGET_WIN32)
   set(JIT_EXPORTS_FILE ${CMAKE_CURRENT_BINARY_DIR}/ClrJit.exports.def)
   preprocess_file (${CLRJIT_EXPORTS} ${JIT_EXPORTS_FILE})
 
-  set(JIT_CORE_SOURCES ${SOURCES})
   set(JIT_DEF_FILE ${JIT_EXPORTS_FILE})
 else()
   set(CLRJIT_EXPORTS ${CMAKE_CURRENT_LIST_DIR}/ClrJit.PAL.exports)
@@ -328,7 +403,6 @@ else()
 
   set_exports_linker_option(${JIT_EXPORTS_FILE})
   set(JIT_EXPORTS_LINKER_OPTION ${EXPORTS_LINKER_OPTION})
-  set(JIT_CORE_SOURCES ${SOURCES})
 endif()
 
 add_custom_target(jit_exports DEPENDS ${JIT_EXPORTS_FILE})
@@ -366,36 +440,44 @@ else()
 endif(CLR_CMAKE_HOST_UNIX)
 
 # Shared function for generating JIT
-# optional arguments: ADDITIONAL_DESTINATION path
+# optional arguments: DESTINATIONS path
 function(add_jit jitName)
-    if(CLR_CMAKE_TARGET_WIN32)
-        add_definitions(-DFX_VER_INTERNALNAME_STR=${jitName}.dll)
-    endif(CLR_CMAKE_TARGET_WIN32)
 
     set_source_files_properties(${JIT_EXPORTS_FILE} PROPERTIES GENERATED TRUE)
 
     add_library_clr(${jitName}
         SHARED
         ${JIT_CORE_SOURCES}
+        ${JIT_RESOURCES}
         ${JIT_ARCH_SOURCES}
         ${JIT_DEF_FILE}
         ${JIT_DLL_MAIN_FILE}
     )
 
-    target_precompile_header(TARGET ${jitName} HEADER jitpch.h ADDITIONAL_INCLUDE_DIRECTORIES ${JIT_SOURCE_DIR})
+    if(CLR_CMAKE_TARGET_WIN32)
+        target_compile_definitions(${jitName} PRIVATE FX_VER_INTERNALNAME_STR=${jitName}.dll)
+    endif(CLR_CMAKE_TARGET_WIN32)
+
+    target_include_directories(${jitName} PRIVATE ${JIT_SOURCE_DIR})
+    target_precompile_headers(${jitName} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:jitpch.h>")
 
     add_dependencies(${jitName} jit_exports)
 
     set_property(TARGET ${jitName} APPEND_STRING PROPERTY LINK_FLAGS ${JIT_EXPORTS_LINKER_OPTION})
     set_property(TARGET ${jitName} APPEND_STRING PROPERTY LINK_DEPENDS ${JIT_EXPORTS_FILE})
+    set_target_properties(${jitName} PROPERTIES MSVC_WARNING_LEVEL 4)
 
     target_link_libraries(${jitName}
         ${JIT_LINK_LIBRARIES}
         ${JIT_ARCH_LINK_LIBRARIES}
     )
 
+    if (CLR_CMAKE_HOST_WIN32)
+        link_natvis_sources_for_target(${jitName} PRIVATE clrjit.natvis)
+    endif()
+
     # add the install targets
-    install_clr(TARGETS ${jitName} ${ARGN})
+    install_clr(TARGETS ${jitName} ${ARGN} COMPONENT alljits)
 endfunction()
 
 set(JIT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
@@ -407,22 +489,51 @@ endif (FEATURE_MERGE_JIT_AND_ENGINE)
 # Creates a static library "clrjit_static" to link into the VM.
 add_subdirectory(static)
 
-add_subdirectory(standalone)
+if (CLR_CMAKE_TARGET_OSX AND CLR_CMAKE_TARGET_ARCH_ARM64)
+  set(TARGET_OS_NAME unix_osx) # Apple Arm64 has a special ABI, distinguish it.
+elseif (CLR_CMAKE_TARGET_UNIX)
+  set(TARGET_OS_NAME unix)
+else()
+  set(TARGET_OS_NAME win)
+endif()
 
-if (CLR_CMAKE_HOST_ARCH_I386 OR CLR_CMAKE_HOST_ARCH_AMD64)
-    # On x86, build RyuJIT/ARM32 cross-compiling altjit.
-    # On amd64, build RyuJIT/ARM64 cross-compiling altjit.
-    add_subdirectory(protononjit)
-endif ()
+create_standalone_jit(TARGET clrjit OS ${TARGET_OS_NAME} ARCH ${ARCH_TARGET_NAME} DESTINATIONS . sharedFramework)
+install_clr(TARGETS clrjit DESTINATIONS . sharedFramework COMPONENT jit)
 
-if (CLR_CMAKE_HOST_ARCH_I386)
-     # On x86, build RyuJIT/ARM32 cross-compiling altjit for ARM_SOFTFP (armel).
-    add_subdirectory(armelnonjit)
-endif ()
+# Enable profile guided optimization
+add_pgo(clrjit)
 
-if ((CLR_CMAKE_HOST_ARCH_I386 OR CLR_CMAKE_HOST_ARCH_AMD64) AND CLR_CMAKE_TARGET_WIN32)
-    # On Windows, build altjit that targets the Linux ABI:
-    #   On x86, build Linux/x86 altjit. This enables UNIX_X86_ABI.
-    #   On amd64, build Linux/AMD64 altjit. This enables UNIX_AMD64_ABI.
-    add_subdirectory(linuxnonjit)
+if (CLR_CMAKE_TARGET_ARCH_ARM64 OR CLR_CMAKE_TARGET_ARCH_AMD64)
+  create_standalone_jit(TARGET clrjit_unix_arm64_${ARCH_HOST_NAME} OS unix ARCH arm64 DESTINATIONS .)
+  create_standalone_jit(TARGET clrjit_unix_osx_arm64_${ARCH_HOST_NAME} OS unix_osx ARCH arm64 DESTINATIONS .)
+  create_standalone_jit(TARGET clrjit_unix_x64_${ARCH_HOST_NAME} OS unix ARCH x64 DESTINATIONS .)
+  create_standalone_jit(TARGET clrjit_win_arm64_${ARCH_HOST_NAME} OS win ARCH arm64 DESTINATIONS .)
+  create_standalone_jit(TARGET clrjit_win_x64_${ARCH_HOST_NAME} OS win ARCH x64 DESTINATIONS .)
+endif (CLR_CMAKE_TARGET_ARCH_ARM64 OR CLR_CMAKE_TARGET_ARCH_AMD64)
+
+create_standalone_jit(TARGET clrjit_unix_armel_${ARCH_HOST_NAME} OS unix ARCH armel DESTINATIONS .)
+create_standalone_jit(TARGET clrjit_unix_arm_${ARCH_HOST_NAME} OS unix ARCH arm DESTINATIONS .)
+target_compile_definitions(clrjit_unix_arm_${ARCH_HOST_NAME} PRIVATE ARM_SOFTFP CONFIGURABLE_ARM_ABI)
+create_standalone_jit(TARGET clrjit_win_arm_${ARCH_HOST_NAME} OS win ARCH arm DESTINATIONS .)
+create_standalone_jit(TARGET clrjit_win_x86_${ARCH_HOST_NAME} OS win ARCH x86 DESTINATIONS .)
+
+if (CLR_CMAKE_TARGET_ARCH_I386 AND CLR_CMAKE_TARGET_UNIX)
+  create_standalone_jit(TARGET clrjit_unix_x86_${ARCH_HOST_NAME} OS unix ARCH x86 DESTINATIONS .)
+endif (CLR_CMAKE_TARGET_ARCH_I386 AND CLR_CMAKE_TARGET_UNIX)
+
+if (CLR_CMAKE_TARGET_UNIX)
+    if (NOT ARCH_TARGET_NAME STREQUAL s390x)
+      install_clr(TARGETS clrjit_unix_${ARCH_TARGET_NAME}_${ARCH_HOST_NAME} DESTINATIONS . COMPONENT jit)
+    endif(NOT ARCH_TARGET_NAME STREQUAL s390x)
+    if (ARCH_TARGET_NAME STREQUAL arm)
+      target_compile_definitions(clrjit_unix_arm_${ARCH_HOST_NAME} PRIVATE ARM_SOFTFP CONFIGURABLE_ARM_ABI)
+  endif (ARCH_TARGET_NAME STREQUAL arm)
+endif()
+
+if (CLR_CMAKE_TARGET_WIN32 AND CLR_CMAKE_PGO_INSTRUMENT)
+  # Copy PGO dependency to target dir
+  set(PGORT_DLL "pgort140.dll")
+  find_path(PGORT_DIR ${PGORT_DLL} REQUIRED)
+  install(FILES "${PGORT_DIR}/${PGORT_DLL}" DESTINATION ${CMAKE_INSTALL_PREFIX})
+  install(FILES "${PGORT_DIR}/${PGORT_DLL}" DESTINATION ${CMAKE_INSTALL_PREFIX}/sharedFramework)
 endif ()

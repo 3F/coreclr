@@ -28,7 +28,7 @@ inline BOOL ReJitManager::IsReJITEnabled()
     static bool profilerStartupRejit = CORProfilerEnableRejit() != FALSE;
     static ConfigDWORD rejitOnAttachEnabled;
 
-    return  profilerStartupRejit || (rejitOnAttachEnabled.val(CLRConfig::EXTERNAL_ProfAPI_RejitOnAttach) != 0);
+    return  profilerStartupRejit || ((rejitOnAttachEnabled.val(CLRConfig::EXTERNAL_ProfAPI_RejitOnAttach) != 0) && !g_pConfig->DefaultCodeVersioningDisabled());
 }
 
 inline BOOL ReJitManager::IsReJITInlineTrackingEnabled()
@@ -36,7 +36,7 @@ inline BOOL ReJitManager::IsReJITInlineTrackingEnabled()
     LIMITED_METHOD_CONTRACT;
 
     static ConfigDWORD rejitInliningEnabled;
-    return rejitInliningEnabled.val(CLRConfig::EXTERNAL_ProfAPI_RejitOnAttach) != 0;
+    return rejitInliningEnabled.val(CLRConfig::EXTERNAL_ProfAPI_RejitOnAttach) != 0 && !g_pConfig->DefaultCodeVersioningDisabled();
 }
 
 #ifndef DACCESS_COMPILE
@@ -68,17 +68,17 @@ inline void ReJitManager::ReportReJITError(Module* pModule, mdMethodDef methodDe
     CONTRACTL_END;
 
     {
-        BEGIN_PIN_PROFILER(CORProfilerPresent());
+        BEGIN_PROFILER_CALLBACK(CORProfilerEnableRejit());
         _ASSERTE(CORProfilerEnableRejit());
         {
             GCX_PREEMP();
-            g_profControlBlock.pProfInterface->ReJITError(
+            (&g_profControlBlock)->mainProfilerInfo.pProfInterface->ReJITError(
                 reinterpret_cast< ModuleID > (pModule),
                 methodDef,
                 reinterpret_cast< FunctionID > (pMD),
                 hrStatus);
         }
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 #endif // PROFILING_SUPPORTED
 }

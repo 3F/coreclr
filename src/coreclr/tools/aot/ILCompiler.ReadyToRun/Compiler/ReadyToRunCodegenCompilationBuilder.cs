@@ -12,24 +12,36 @@ using ILCompiler.Win32Resources;
 using Internal.IL;
 using Internal.JitInterface;
 using Internal.ReadyToRunConstants;
+using Internal.TypeSystem;
 using Internal.TypeSystem.Ecma;
 
 namespace ILCompiler
 {
     public sealed class ReadyToRunCodegenCompilationBuilder : CompilationBuilder
     {
+        private static bool _isJitInitialized = false;
+
         private readonly IEnumerable<string> _inputFiles;
         private readonly string _compositeRootPath;
         private bool _ibcTuning;
         private bool _resilient;
         private bool _generateMapFile;
+        private bool _generateMapCsvFile;
+        private bool _generatePdbFile;
+        private string _pdbPath;
+        private bool _generatePerfMapFile;
+        private string _perfMapPath;
+        private int _perfMapFormatVersion;
+        private bool _generateProfileFile;
         private int _parallelism;
+        Func<MethodDesc, string> _printReproInstructions;
         private InstructionSetSupport _instructionSetSupport;
         private ProfileDataManager _profileData;
         private ReadyToRunMethodLayoutAlgorithm _r2rMethodLayoutAlgorithm;
         private ReadyToRunFileLayoutAlgorithm _r2rFileLayoutAlgorithm;
-        private int? _customPESectionAlignment;
+        private int _customPESectionAlignment;
         private bool _verifyTypeAndFieldLayout;
+        private CompositeImageSettings _compositeImageSettings;
 
         private string _jitPath;
         private string _outputFile;
@@ -73,6 +85,11 @@ namespace ILCompiler
                 builder.Add(new KeyValuePair<string, string>(name, value));
             }
 
+            if (_context.Target.Abi == TargetAbi.CoreRTArmel)
+            {
+                builder.Add(new KeyValuePair<string, string>("JitSoftFP", "1"));
+            }
+
             _ryujitOptions = builder.ToArray();
 
             return this;
@@ -89,9 +106,9 @@ namespace ILCompiler
             return _ilProvider;
         }
 
-        public ReadyToRunCodegenCompilationBuilder UseJitPath(FileInfo jitPath)
+        public ReadyToRunCodegenCompilationBuilder UseJitPath(string jitPath)
         {
-            _jitPath = jitPath == null ? null : jitPath.FullName;
+            _jitPath = jitPath;
             return this;
         }
 
@@ -126,9 +143,42 @@ namespace ILCompiler
             return this;
         }
 
+        public ReadyToRunCodegenCompilationBuilder UseMapCsvFile(bool generateMapCsvFile)
+        {
+            _generateMapCsvFile = generateMapCsvFile;
+            return this;
+        }
+
+        public ReadyToRunCodegenCompilationBuilder UsePdbFile(bool generatePdbFile, string pdbPath)
+        {
+            _generatePdbFile = generatePdbFile;
+            _pdbPath = pdbPath;
+            return this;
+        }
+
+        public ReadyToRunCodegenCompilationBuilder UsePerfMapFile(bool generatePerfMapFile, string perfMapPath, int perfMapFormatVersion)
+        {
+            _generatePerfMapFile = generatePerfMapFile;
+            _perfMapPath = perfMapPath;
+            _perfMapFormatVersion = perfMapFormatVersion;
+            return this;
+        }
+
+        public ReadyToRunCodegenCompilationBuilder UseProfileFile(bool generateProfileFile)
+        {
+            _generateProfileFile = generateProfileFile;
+            return this;
+        }
+
         public ReadyToRunCodegenCompilationBuilder UseParallelism(int parallelism)
         {
             _parallelism = parallelism;
+            return this;
+        }
+
+        public ReadyToRunCodegenCompilationBuilder UsePrintReproInstructions(Func<MethodDesc, string> printReproInstructions)
+        {
+            _printReproInstructions = printReproInstructions;
             return this;
         }
 
@@ -144,7 +194,7 @@ namespace ILCompiler
             return this;
         }
 
-        public ReadyToRunCodegenCompilationBuilder UseCustomPESectionAlignment(int? customPESectionAlignment)
+        public ReadyToRunCodegenCompilationBuilder UseCustomPESectionAlignment(int customPESectionAlignment)
         {
             _customPESectionAlignment = customPESectionAlignment;
             return this;
@@ -156,6 +206,12 @@ namespace ILCompiler
             return this;
         }
 
+        public ReadyToRunCodegenCompilationBuilder UseCompositeImageSettings(CompositeImageSettings compositeImageSettings)
+        {
+            _compositeImageSettings = compositeImageSettings;
+            return this;
+        }
+
         public override ICompilation ToCompilation()
         {
             // TODO: only copy COR headers for single-assembly build and for composite build with embedded MSIL
@@ -163,7 +219,7 @@ namespace ILCompiler
             EcmaModule singleModule = _compilationGroup.IsCompositeBuildMode ? null : inputModules.First();
             CopiedCorHeaderNode corHeaderNode = new CopiedCorHeaderNode(singleModule);
             // TODO: proper support for multiple input files
-            DebugDirectoryNode debugDirectoryNode = new DebugDirectoryNode(singleModule, _outputFile);
+            DebugDirectoryNode debugDirectoryNode = new DebugDirectoryNode(singleModule, _outputFile, _generatePdbFile, _generatePerfMapFile);
 
             // Produce a ResourceData where the IBC PROFILE_DATA entry has been filtered out
             // TODO: proper support for multiple input files
@@ -192,12 +248,15 @@ namespace ILCompiler
 
             NodeFactory factory = new NodeFactory(
                 _context,
-                _compilationGroup,
+                (ReadyToRunCompilationModuleGroupBase)_compilationGroup,
+                _profileData,
                 _nameMangler,
                 corHeaderNode,
                 debugDirectoryNode,
                 win32Resources,
                 flags);
+
+            factory.CompositeImageSettings = _compositeImageSettings;
 
             IComparer<DependencyNodeCore<NodeFactory>> comparer = new SortableDependencyNode.ObjectNodeComparer(new CompilerComparer());
             DependencyAnalyzerBase<NodeFactory> graph = CreateDependencyGraph(factory, comparer);
@@ -212,21 +271,28 @@ namespace ILCompiler
 
                 case OptimizationMode.PreferSize:
                     corJitFlags.Add(CorJitFlag.CORJIT_FLAG_SIZE_OPT);
+                    corJitFlags.Add(CorJitFlag.CORJIT_FLAG_BBOPT);
                     break;
 
                 case OptimizationMode.PreferSpeed:
                     corJitFlags.Add(CorJitFlag.CORJIT_FLAG_SPEED_OPT);
+                    corJitFlags.Add(CorJitFlag.CORJIT_FLAG_BBOPT);
                     break;
 
                 default:
                     // Not setting a flag results in BLENDED_CODE.
+                    corJitFlags.Add(CorJitFlag.CORJIT_FLAG_BBOPT);
                     break;
             }
 
             if (_ibcTuning)
                 corJitFlags.Add(CorJitFlag.CORJIT_FLAG_BBINSTR);
 
-            JitConfigProvider.Initialize(_context.Target, corJitFlags, _ryujitOptions, _jitPath);
+            if (!_isJitInitialized)
+            {
+                JitConfigProvider.Initialize(_context.Target, corJitFlags, _ryujitOptions, _jitPath);
+                _isJitInitialized = true;
+            }
 
             return new ReadyToRunCodegenCompilation(
                 graph,
@@ -238,8 +304,16 @@ namespace ILCompiler
                 _inputFiles,
                 _compositeRootPath,
                 _instructionSetSupport,
-                _resilient,
-                _generateMapFile,
+                resilient: _resilient,
+                generateMapFile: _generateMapFile,
+                generateMapCsvFile: _generateMapCsvFile,
+                generatePdbFile: _generatePdbFile,
+                printReproInstructions: _printReproInstructions,
+                pdbPath: _pdbPath,
+                generatePerfMapFile: _generatePerfMapFile,
+                perfMapPath: _perfMapPath,
+                perfMapFormatVersion: _perfMapFormatVersion,
+                generateProfileFile: _generateProfileFile,
                 _parallelism,
                 _profileData,
                 _r2rMethodLayoutAlgorithm,

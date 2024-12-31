@@ -39,7 +39,7 @@ bool           g_jitInitialized = false;
 
 /*****************************************************************************/
 
-extern "C" DLLEXPORT void __stdcall jitStartup(ICorJitHost* jitHost)
+extern "C" DLLEXPORT void jitStartup(ICorJitHost* jitHost)
 {
     if (g_jitInitialized)
     {
@@ -164,7 +164,7 @@ void* __cdecl operator new(size_t, const CILJitSingletonAllocator&)
     return CILJitBuff;
 }
 
-DLLEXPORT ICorJitCompiler* __stdcall getJit()
+DLLEXPORT ICorJitCompiler* getJit()
 {
     if (!g_jitInitialized)
     {
@@ -251,8 +251,11 @@ void JitTls::SetCompiler(Compiler* compiler)
 // interface. Things really don't get going inside the JIT until the code:Compiler::compCompile#Phases
 // method.  Usually that is where you want to go.
 
-CorJitResult CILJit::compileMethod(
-    ICorJitInfo* compHnd, CORINFO_METHOD_INFO* methodInfo, unsigned flags, BYTE** entryAddress, ULONG* nativeSizeOfCode)
+CorJitResult CILJit::compileMethod(ICorJitInfo*         compHnd,
+                                   CORINFO_METHOD_INFO* methodInfo,
+                                   unsigned             flags,
+                                   uint8_t**            entryAddress,
+                                   uint32_t*            nativeSizeOfCode)
 {
     JitFlags jitFlags;
 
@@ -341,10 +344,23 @@ unsigned CILJit::getMaxIntrinsicSIMDVectorLength(CORJIT_FLAGS cpuCompileFlags)
 #endif // !FEATURE_SIMD
 }
 
-/*****************************************************************************
- * Returns the number of bytes required for the given type argument
- */
-
+//------------------------------------------------------------------------
+// eeGetArgSize: Returns the number of bytes required for the given type argument
+//   including padding after the actual value.
+//
+// Arguments:
+//   list - the arg list handle pointing to the argument
+//   sig  - the signature for the arg's method
+//
+// Return value:
+//   the number of stack slots in stack arguments for the call.
+//
+// Notes:
+//   - On most platforms arguments are passed with TARGET_POINTER_SIZE alignment,
+//   so all types take an integer number of TARGET_POINTER_SIZE slots.
+//   It is different for arm64 apple that packs some types without alignment and padding.
+//   If the argument is passed by reference then the method returns REF size.
+//
 unsigned Compiler::eeGetArgSize(CORINFO_ARG_LIST_HANDLE list, CORINFO_SIG_INFO* sig)
 {
 #if defined(TARGET_AMD64)
@@ -360,7 +376,7 @@ unsigned Compiler::eeGetArgSize(CORINFO_ARG_LIST_HANDLE list, CORINFO_SIG_INFO* 
     if (varTypeIsStruct(argType))
     {
         unsigned structSize = info.compCompHnd->getClassSize(argClass);
-        return structSize; // TODO: roundUp() needed here?
+        return roundUp(structSize, TARGET_POINTER_SIZE);
     }
 #endif // UNIX_AMD64_ABI
     return TARGET_POINTER_SIZE;
@@ -370,9 +386,15 @@ unsigned Compiler::eeGetArgSize(CORINFO_ARG_LIST_HANDLE list, CORINFO_SIG_INFO* 
     CORINFO_CLASS_HANDLE argClass;
     CorInfoType          argTypeJit = strip(info.compCompHnd->getArgType(sig, list, &argClass));
     var_types            argType    = JITtype2varType(argTypeJit);
+    unsigned             argSize;
+
+    var_types hfaType = TYP_UNDEF;
+    bool      isHfa   = false;
 
     if (varTypeIsStruct(argType))
     {
+        hfaType             = GetHfaType(argClass);
+        isHfa               = (hfaType != TYP_UNDEF);
         unsigned structSize = info.compCompHnd->getClassSize(argClass);
 
         // make certain the EE passes us back the right thing for refanys
@@ -395,8 +417,7 @@ unsigned Compiler::eeGetArgSize(CORINFO_ARG_LIST_HANDLE list, CORINFO_SIG_INFO* 
             // Is the struct larger than 16 bytes
             if (structSize > (2 * TARGET_POINTER_SIZE))
             {
-                var_types hfaType = GetHfaType(argClass); // set to float or double if it is an HFA, otherwise TYP_UNDEF
-                bool      isHfa   = (hfaType != TYP_UNDEF);
+
 #ifndef TARGET_UNIX
                 if (info.compIsVarArgs)
                 {
@@ -412,24 +433,59 @@ unsigned Compiler::eeGetArgSize(CORINFO_ARG_LIST_HANDLE list, CORINFO_SIG_INFO* 
                     return TARGET_POINTER_SIZE;
                 }
             }
-            // otherwise will we pass this struct by value in multiple registers
         }
-#elif defined(TARGET_ARM)
-//  otherwise will we pass this struct by value in multiple registers
-#else
+#elif !defined(TARGET_ARM)
         NYI("unknown target");
 #endif // defined(TARGET_XXX)
 #endif // FEATURE_MULTIREG_ARGS
 
-        // we pass this struct by value in multiple registers
-        return roundUp(structSize, TARGET_POINTER_SIZE);
+        // Otherwise we will pass this struct by value in multiple registers/stack bytes.
+        argSize = structSize;
     }
     else
     {
-        unsigned argSize = sizeof(int) * genTypeStSz(argType);
-        assert(0 < argSize && argSize <= sizeof(__int64));
-        return roundUp(argSize, TARGET_POINTER_SIZE);
+        argSize = genTypeSize(argType);
     }
+    const unsigned argAlignment       = eeGetArgAlignment(argType, (hfaType == TYP_FLOAT));
+    const unsigned argSizeWithPadding = roundUp(argSize, argAlignment);
+    return argSizeWithPadding;
+
+#endif
+}
+
+//------------------------------------------------------------------------
+// eeGetArgAlignment: Return arg passing alignment for the given type.
+//
+// Arguments:
+//   type - the argument type
+//   isFloatHfa - is it an HFA<float> type
+//
+// Return value:
+//   the required alignment in bytes.
+//
+// Notes:
+//   It currently doesn't return smaller than required alignment for arm32 (4 bytes for double and int64)
+//   but it does not lead to issues because its alignment requirements are satisfied in other code parts.
+//   TODO: fix this function and delete the other code that is handling this.
+//
+// static
+unsigned Compiler::eeGetArgAlignment(var_types type, bool isFloatHfa)
+{
+#if defined(OSX_ARM64_ABI)
+    if (isFloatHfa)
+    {
+        assert(varTypeIsStruct(type));
+        return sizeof(float);
+    }
+    if (varTypeIsStruct(type))
+    {
+        return TARGET_POINTER_SIZE;
+    }
+    const unsigned argSize = genTypeSize(type);
+    assert((0 < argSize) && (argSize <= TARGET_POINTER_SIZE));
+    return argSize;
+#else
+    return TARGET_POINTER_SIZE;
 #endif
 }
 
@@ -484,7 +540,7 @@ unsigned Compiler::eeGetMDArrayDataOffset(var_types type, unsigned rank)
 void Compiler::eeGetStmtOffsets()
 {
     ULONG32                      offsetsCount;
-    DWORD*                       offsets;
+    uint32_t*                    offsets;
     ICorDebugInfo::BoundaryTypes offsetsImplicit;
 
     info.compCompHnd->getBoundaries(info.compMethodHnd, &offsetsCount, &offsets, &offsetsImplicit);
@@ -754,11 +810,11 @@ void Compiler::eeDispVar(ICorDebugInfo::NativeVarInfo* var)
             }
             break;
 
-#ifndef TARGET_AMD64
         case CodeGenInterface::VLT_REG_REG:
             printf("%s-%s", getRegName(var->loc.vlRegReg.vlrrReg1), getRegName(var->loc.vlRegReg.vlrrReg2));
             break;
 
+#ifndef TARGET_AMD64
         case CodeGenInterface::VLT_REG_STK:
             if ((int)var->loc.vlRegStk.vlrsStk.vlrssBaseReg != (int)ICorDebugInfo::REGNUM_AMBIENT_SP)
             {
@@ -805,8 +861,21 @@ void Compiler::eeDispVar(ICorDebugInfo::NativeVarInfo* var)
 // Same parameters as ICorStaticInfo::setVars().
 void Compiler::eeDispVars(CORINFO_METHOD_HANDLE ftn, ULONG32 cVars, ICorDebugInfo::NativeVarInfo* vars)
 {
-    printf("*************** Variable debug info\n");
-    printf("%d live ranges\n", cVars);
+    // Estimate number of unique vars with debug info
+    //
+    ALLVARSET_TP uniqueVars(AllVarSetOps::MakeEmpty(this));
+    for (unsigned i = 0; i < cVars; i++)
+    {
+        // ignore "special vars" and out of bounds vars
+        if ((((int)vars[i].varNumber) >= 0) && (vars[i].varNumber < lclMAX_ALLSET_TRACKED))
+        {
+            AllVarSetOps::AddElemD(this, uniqueVars, vars[i].varNumber);
+        }
+    }
+
+    printf("; Variable debug info: %d live ranges, %d vars for method %s\n", cVars,
+           AllVarSetOps::Count(this, uniqueVars), info.compFullName);
+
     for (unsigned i = 0; i < cVars; i++)
     {
         eeDispVar(&vars[i]);
@@ -946,13 +1015,13 @@ void Compiler::eeDispLineInfos()
  * (e.g., host AMD64, target ARM64), then VM will get confused anyway.
  */
 
-void Compiler::eeReserveUnwindInfo(BOOL isFunclet, BOOL isColdCode, ULONG unwindSize)
+void Compiler::eeReserveUnwindInfo(bool isFunclet, bool isColdCode, ULONG unwindSize)
 {
 #ifdef DEBUG
     if (verbose)
     {
-        printf("reserveUnwindInfo(isFunclet=%s, isColdCode=%s, unwindSize=0x%x)\n", isFunclet ? "TRUE" : "FALSE",
-               isColdCode ? "TRUE" : "FALSE", unwindSize);
+        printf("reserveUnwindInfo(isFunclet=%s, isColdCode=%s, unwindSize=0x%x)\n", isFunclet ? "true" : "false",
+               isColdCode ? "true" : "false", unwindSize);
     }
 #endif // DEBUG
 
@@ -1058,10 +1127,10 @@ bool Compiler::eeIsJitDataOffs(CORINFO_FIELD_HANDLE field)
     unsigned value = static_cast<unsigned>(reinterpret_cast<uintptr_t>(field));
     if (((CORINFO_FIELD_HANDLE)(size_t)value) != field)
     {
-        return false; // upper bits were set, not a jit data offset
+        return false; // some bits in the upper 32 bits were set, not a jit data offset
     }
 
-    // Data offsets are marked by the fact that the low two bits are 0b01 0x1
+    // Data offsets are marked by the fact that the low two bits are 0b01
     return (value & iaut_MASK) == iaut_DATA_OFFSET;
 }
 
@@ -1073,6 +1142,8 @@ int Compiler::eeGetJitDataOffs(CORINFO_FIELD_HANDLE field)
         unsigned dataOffs = static_cast<unsigned>(reinterpret_cast<uintptr_t>(field));
         assert(((CORINFO_FIELD_HANDLE)(size_t)dataOffs) == field);
         assert(dataOffs < 0x40000000);
+
+        // Shift away the low two bits
         return (static_cast<int>(reinterpret_cast<intptr_t>(field))) >> iaut_SHIFT;
     }
     else
@@ -1164,6 +1235,11 @@ bool Compiler::eeRunWithErrorTrapImp(void (*function)(void*), void* param)
     return info.compCompHnd->runWithErrorTrap(function, param);
 }
 
+bool Compiler::eeRunWithSPMIErrorTrapImp(void (*function)(void*), void* param)
+{
+    return info.compCompHnd->runWithSPMIErrorTrap(function, param);
+}
+
 /*****************************************************************************
  *
  *                      Utility functions
@@ -1197,19 +1273,6 @@ struct FilterSuperPMIExceptionsParam_ee_il
     const char*           fieldOrMethodOrClassNamePtr;
     EXCEPTION_POINTERS    exceptionPointers;
 };
-
-static LONG FilterSuperPMIExceptions_ee_il(PEXCEPTION_POINTERS pExceptionPointers, LPVOID lpvParam)
-{
-    FilterSuperPMIExceptionsParam_ee_il* pSPMIEParam = (FilterSuperPMIExceptionsParam_ee_il*)lpvParam;
-    pSPMIEParam->exceptionPointers                   = *pExceptionPointers;
-
-    if (pSPMIEParam->pThis->IsSuperPMIException(pExceptionPointers->ExceptionRecord->ExceptionCode))
-    {
-        return EXCEPTION_EXECUTE_HANDLER;
-    }
-
-    return EXCEPTION_CONTINUE_SEARCH;
-}
 
 const char* Compiler::eeGetMethodName(CORINFO_METHOD_HANDLE method, const char** classNamePtr)
 {
@@ -1249,12 +1312,14 @@ const char* Compiler::eeGetMethodName(CORINFO_METHOD_HANDLE method, const char**
     param.method       = method;
     param.classNamePtr = classNamePtr;
 
-    PAL_TRY(FilterSuperPMIExceptionsParam_ee_il*, pParam, &param)
-    {
-        pParam->fieldOrMethodOrClassNamePtr =
-            pParam->pJitInfo->compCompHnd->getMethodName(pParam->method, pParam->classNamePtr);
-    }
-    PAL_EXCEPT_FILTER(FilterSuperPMIExceptions_ee_il)
+    bool success = eeRunWithSPMIErrorTrap<FilterSuperPMIExceptionsParam_ee_il>(
+        [](FilterSuperPMIExceptionsParam_ee_il* pParam) {
+            pParam->fieldOrMethodOrClassNamePtr =
+                pParam->pJitInfo->compCompHnd->getMethodName(pParam->method, pParam->classNamePtr);
+        },
+        &param);
+
+    if (!success)
     {
         if (param.classNamePtr != nullptr)
         {
@@ -1263,7 +1328,6 @@ const char* Compiler::eeGetMethodName(CORINFO_METHOD_HANDLE method, const char**
 
         param.fieldOrMethodOrClassNamePtr = "hackishMethodName";
     }
-    PAL_ENDTRY
 
     return param.fieldOrMethodOrClassNamePtr;
 }
@@ -1277,16 +1341,17 @@ const char* Compiler::eeGetFieldName(CORINFO_FIELD_HANDLE field, const char** cl
     param.field        = field;
     param.classNamePtr = classNamePtr;
 
-    PAL_TRY(FilterSuperPMIExceptionsParam_ee_il*, pParam, &param)
-    {
-        pParam->fieldOrMethodOrClassNamePtr =
-            pParam->pJitInfo->compCompHnd->getFieldName(pParam->field, pParam->classNamePtr);
-    }
-    PAL_EXCEPT_FILTER(FilterSuperPMIExceptions_ee_il)
+    bool success = eeRunWithSPMIErrorTrap<FilterSuperPMIExceptionsParam_ee_il>(
+        [](FilterSuperPMIExceptionsParam_ee_il* pParam) {
+            pParam->fieldOrMethodOrClassNamePtr =
+                pParam->pJitInfo->compCompHnd->getFieldName(pParam->field, pParam->classNamePtr);
+        },
+        &param);
+
+    if (!success)
     {
         param.fieldOrMethodOrClassNamePtr = "hackishFieldName";
     }
-    PAL_ENDTRY
 
     return param.fieldOrMethodOrClassNamePtr;
 }
@@ -1299,15 +1364,16 @@ const char* Compiler::eeGetClassName(CORINFO_CLASS_HANDLE clsHnd)
     param.pJitInfo = &info;
     param.clazz    = clsHnd;
 
-    PAL_TRY(FilterSuperPMIExceptionsParam_ee_il*, pParam, &param)
-    {
-        pParam->fieldOrMethodOrClassNamePtr = pParam->pJitInfo->compCompHnd->getClassName(pParam->clazz);
-    }
-    PAL_EXCEPT_FILTER(FilterSuperPMIExceptions_ee_il)
+    bool success = eeRunWithSPMIErrorTrap<FilterSuperPMIExceptionsParam_ee_il>(
+        [](FilterSuperPMIExceptionsParam_ee_il* pParam) {
+            pParam->fieldOrMethodOrClassNamePtr = pParam->pJitInfo->compCompHnd->getClassName(pParam->clazz);
+        },
+        &param);
+
+    if (!success)
     {
         param.fieldOrMethodOrClassNamePtr = "hackishClassName";
     }
-    PAL_ENDTRY
     return param.fieldOrMethodOrClassNamePtr;
 }
 
@@ -1317,7 +1383,7 @@ const char* Compiler::eeGetClassName(CORINFO_CLASS_HANDLE clsHnd)
 
 const WCHAR* Compiler::eeGetCPString(size_t strHandle)
 {
-#ifdef TARGET_UNIX
+#ifdef HOST_UNIX
     return nullptr;
 #else
     char buff[512 + sizeof(CORINFO_String)];
@@ -1340,8 +1406,8 @@ const WCHAR* Compiler::eeGetCPString(size_t strHandle)
         return nullptr;
     }
 
-    return (asString->chars);
-#endif // TARGET_UNIX
+    return (WCHAR*)(asString->chars);
+#endif // HOST_UNIX
 }
 
 #endif // DEBUG

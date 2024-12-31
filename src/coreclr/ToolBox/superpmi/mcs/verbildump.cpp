@@ -1,13 +1,12 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 #include "standardpch.h"
 #include "simpletimer.h"
 #include "methodcontext.h"
 #include "methodcontextiterator.h"
 #include "verbildump.h"
+#include "spmiutil.h"
 
 void DumpPrimToConsoleBare(MethodContext* mc, CorInfoType prim, DWORDLONG classHandle)
 {
@@ -94,7 +93,7 @@ void DumpSigToConsoleBare(MethodContext* mc, CORINFO_SIG_INFO* pSig)
         CorInfoTypeWithMod type = mc->repGetArgType(pSig, currentItem, (CORINFO_CLASS_HANDLE*)&dl, &exceptionCode);
         CorInfoType        cit  = strip(type);
         if (cit == CORINFO_TYPE_CLASS)
-            dl = (DWORDLONG)mc->repGetArgClass(pSig, currentItem, &exceptionCode);
+            dl = CastHandle(mc->repGetArgClass(pSig, currentItem, &exceptionCode));
         if ((type & CORINFO_TYPE_MOD_PINNED) == CORINFO_TYPE_MOD_PINNED)
             printf("pinned ");
         DumpPrimToConsoleBare(mc, cit, dl);
@@ -893,6 +892,7 @@ void DumpILToConsoleBare(unsigned char* ilCode, int len)
                         LogError("unknown ilCode 0xfe%2x at offset %d in MethodGen::PrettyPrint", ilCode[i], i);
                         break;
                 }
+                break;
             default:
                 LogError("unknown ilCode 0x%02x at offset %d in MethodGen::PrettyPrint", ilCode[i], i);
                 break;
@@ -941,7 +941,7 @@ void DumpIL(MethodContext* mc)
     printf("{\n");
     printf("   .method ");
     DumpAttributeToConsoleBare(mc->repGetMethodAttribs(cmi.ftn));
-    DumpPrimToConsoleBare(mc, cmi.args.retType, (DWORDLONG)cmi.args.retTypeClass);
+    DumpPrimToConsoleBare(mc, cmi.args.retType, CastHandle(cmi.args.retTypeClass));
     printf(" %s(", methodName);
     DumpSigToConsoleBare(mc, &cmi.args);
     printf(")\n");

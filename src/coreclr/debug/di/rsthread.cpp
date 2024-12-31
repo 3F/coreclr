@@ -186,6 +186,10 @@ HRESULT CordbThread::QueryInterface(REFIID id, void ** ppInterface)
     {
         *ppInterface = static_cast<ICorDebugThread4*>(this);
     }
+    else if (id == IID_ICorDebugThread5)
+    {
+        *ppInterface = static_cast<ICorDebugThread5*>(this);
+    }
     else if (id == IID_IUnknown)
     {
         *ppInterface = static_cast<IUnknown *>(static_cast<ICorDebugThread *>(this));
@@ -603,7 +607,7 @@ bool CordbThread::OwnsFrame(CordbFrame * pFrame)
 // This routine is a internal helper function for ICorDebugThread2::GetTaskId.
 //
 // Arguments:
-//    pHandle - return thread handle here after fetching from the left side. Can return SWITCHOUT_HANDLE_VALUE.
+//    pHandle - return thread handle here after fetching from the left side.
 //
 // Return Value:
 //    hr - It can fail with CORDBG_E_THREAD_NOT_SCHEDULED.
@@ -628,12 +632,6 @@ void CordbThread::RefreshHandle(HANDLE * phThread)
 
     IDacDbiInterface * pDAC = GetProcess()->GetDAC();
     HANDLE hThread = pDAC->GetThreadHandle(m_vmThreadToken);
-
-    if (hThread == SWITCHOUT_HANDLE_VALUE)
-    {
-        *phThread = SWITCHOUT_HANDLE_VALUE;
-        ThrowHR(CORDBG_E_THREAD_NOT_SCHEDULED);
-    }
 
     _ASSERTE(hThread != INVALID_HANDLE_VALUE);
     PREFAST_ASSUME(hThread != NULL);
@@ -2254,7 +2252,7 @@ HRESULT CordbThread::HasUnhandledException()
 //    ppStackWalk - out parameter; return the new stackwalker
 //
 // Return Value:
-//    Return S_OK on succcess.
+//    Return S_OK on success.
 //    Return E_FAIL on error.
 //
 // Notes:
@@ -2462,6 +2460,42 @@ HRESULT CordbThread::GetCurrentCustomDebuggerNotification(ICorDebugValue ** ppNo
     PUBLIC_API_END(hr);
     return hr;
 }
+
+// ICorDebugThread5
+
+/*
+ * GetBytesAllocated
+ *
+ * Returns S_OK if it was possible to obtain the allocation information for the thread
+ * and sets the corresponding SOH and UOH allocations.
+ */
+HRESULT CordbThread::GetBytesAllocated(ULONG64 *pSohAllocatedBytes,
+                                       ULONG64 *pUohAllocatedBytes)
+{
+    PUBLIC_API_ENTRY(this);
+    FAIL_IF_NEUTERED(this);
+    ATT_REQUIRE_STOPPED_MAY_FAIL(GetProcess());
+
+    HRESULT hr = S_OK;
+    EX_TRY
+    {
+        DacThreadAllocInfo threadAllocInfo = { 0 };
+
+        if (pSohAllocatedBytes == NULL || pUohAllocatedBytes == NULL)
+        {
+            ThrowHR(E_INVALIDARG);
+        }
+
+        IDacDbiInterface * pDAC = GetProcess()->GetDAC();
+        pDAC->GetThreadAllocInfo(m_vmThreadToken, &threadAllocInfo);
+
+        *pSohAllocatedBytes = threadAllocInfo.m_allocBytesSOH;
+        *pUohAllocatedBytes = threadAllocInfo.m_allocBytesUOH;
+    }
+    EX_CATCH_HRESULT(hr);
+
+    return hr;
+} // CordbThread::GetBytesAllocated
 
 /*
  *
@@ -8557,10 +8591,10 @@ HRESULT CordbJITILFrame::RemapFunction(ULONG32 nOffset)
     HRESULT hr = S_OK;
     PUBLIC_API_BEGIN(this)
     {
-#if !defined(EnC_SUPPORTED)
+#if !defined(FEATURE_ENC_SUPPORTED)
         ThrowHR(E_NOTIMPL);
 
-#else  // EnC_SUPPORTED
+#else  // FEATURE_ENC_SUPPORTED
         // Can only be called on leaf frame.
         if (!m_nativeFrame->IsLeafFrame())
         {
@@ -8577,7 +8611,7 @@ HRESULT CordbJITILFrame::RemapFunction(ULONG32 nOffset)
         // Tell the left-side to do the remap
         hr = m_nativeFrame->m_pThread->SetRemapIP(nOffset);
 
-#endif // EnC_SUPPORTED
+#endif // FEATURE_ENC_SUPPORTED
     }
     PUBLIC_API_END(hr);
 
@@ -8610,7 +8644,7 @@ HRESULT CordbJITILFrame::BuildInstantiationForCallsite(CordbModule * pModule, Ne
 
     // If the targetClass is a TypeSpec that means its first element is GENERICINST.
     // We only need to build types for the Instantiation if targetClass is a TypeSpec.
-    ULONG classGenerics = 0;
+    uint32_t classGenerics = 0;
     SigParser typeSig;
     if (TypeFromToken(targetClass) == mdtTypeSpec)
     {
@@ -8638,10 +8672,10 @@ HRESULT CordbJITILFrame::BuildInstantiationForCallsite(CordbModule * pModule, Ne
 
     // Similarly for method generics.  Simply fill "methodGenerics" with the number
     // of generics, and move "genericSig" to the start of the first generic param.
-    ULONG methodGenerics = 0;
+    uint32_t methodGenerics = 0;
     if (!genericSig.IsNull())
     {
-        ULONG callingConv = 0;
+        uint32_t callingConv = 0;
         IfFailRet(genericSig.GetCallingConvInfo(&callingConv));
         if (callingConv == IMAGE_CEE_CS_CALLCONV_GENERICINST)
             IfFailRet(genericSig.GetData(&methodGenerics));
@@ -9796,6 +9830,7 @@ HRESULT CordbEval::NewParameterizedObject(ICorDebugFunction * pConstructor,
 
             if (FAILED(hr))
             {
+                delete [] pArgData;
                 return hr;
             }
         }
@@ -10780,4 +10815,3 @@ HRESULT CordbCodeEnum::Next(ULONG celt, ICorDebugCode *values[], ULONG *pceltFet
 
     return hr;
 }
-

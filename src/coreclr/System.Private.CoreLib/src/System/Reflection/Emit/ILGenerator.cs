@@ -56,7 +56,6 @@ namespace System.Reflection.Emit
         private __ExceptionInfo[]? m_currExcStack;         // This is the stack of exceptions which we're currently in.
 
         internal ScopeTree m_ScopeTree;            // this variable tracks all debugging scope information
-        internal LineNumberInfo m_LineNumberInfo;       // this variable tracks all line number information
 
         internal MethodInfo m_methodBuilder;
         internal int m_localCount;
@@ -89,7 +88,6 @@ namespace System.Reflection.Emit
 
             // initialize the scope tree
             m_ScopeTree = new ScopeTree();
-            m_LineNumberInfo = new LineNumberInfo();
             m_methodBuilder = methodBuilder;
 
             // initialize local signature
@@ -162,16 +160,24 @@ namespace System.Reflection.Emit
             return ((ModuleBuilder)m_methodBuilder.Module).GetMethodTokenInternal(method, optionalParameterTypes, useMethodDef);
         }
 
-        internal virtual SignatureHelper GetMemberRefSignature(CallingConventions call, Type? returnType,
-            Type[]? parameterTypes, Type[]? optionalParameterTypes)
+        internal SignatureHelper GetMemberRefSignature(
+            CallingConventions call,
+            Type? returnType,
+            Type[]? parameterTypes,
+            Type[]? optionalParameterTypes)
         {
-            return GetMemberRefSignature(call, returnType, parameterTypes, optionalParameterTypes, 0);
+            return GetMemberRefSignature(call, returnType, parameterTypes, null, null, optionalParameterTypes);
+        }
+        internal virtual SignatureHelper GetMemberRefSignature(CallingConventions call, Type? returnType,
+            Type[]? parameterTypes, Type[][]? requiredCustomModifiers, Type[][]? optionalCustomModifiers, Type[]? optionalParameterTypes)
+        {
+            return GetMemberRefSignature(call, returnType, parameterTypes, requiredCustomModifiers, optionalCustomModifiers, optionalParameterTypes, 0);
         }
 
         private SignatureHelper GetMemberRefSignature(CallingConventions call, Type? returnType,
-            Type[]? parameterTypes, Type[]? optionalParameterTypes, int cGenericParameters)
+            Type[]? parameterTypes, Type[][]? requiredCustomModifiers, Type[][]? optionalCustomModifiers, Type[]? optionalParameterTypes, int cGenericParameters)
         {
-            return ((ModuleBuilder)m_methodBuilder.Module).GetMemberRefSignature(call, returnType, parameterTypes, optionalParameterTypes, cGenericParameters);
+            return ((ModuleBuilder)m_methodBuilder.Module).GetMemberRefSignature(call, returnType, parameterTypes, requiredCustomModifiers, optionalCustomModifiers, optionalParameterTypes, cGenericParameters);
         }
 
         internal byte[]? BakeByteArray()
@@ -534,7 +540,7 @@ namespace System.Reflection.Emit
             UpdateStackSize(OpCodes.Calli, stackchange);
 
             RecordTokenFixup();
-            PutInteger4(modBuilder.GetSignatureToken(sig).Token);
+            PutInteger4(modBuilder.GetSignatureToken(sig));
         }
 
         public virtual void EmitCalli(OpCode opcode, CallingConvention unmanagedCallConv, Type? returnType, Type[]? parameterTypes)
@@ -577,7 +583,7 @@ namespace System.Reflection.Emit
             EnsureCapacity(7);
             Emit(OpCodes.Calli);
             RecordTokenFixup();
-            PutInteger4(modBuilder.GetSignatureToken(sig).Token);
+            PutInteger4(modBuilder.GetSignatureToken(sig));
         }
 
         public virtual void EmitCall(OpCode opcode, MethodInfo methodInfo, Type[]? optionalParameterTypes)
@@ -622,9 +628,9 @@ namespace System.Reflection.Emit
 
             int stackchange = 0;
             ModuleBuilder modBuilder = (ModuleBuilder)m_methodBuilder.Module;
-            SignatureToken sig = modBuilder.GetSignatureToken(signature);
+            int sig = modBuilder.GetSignatureToken(signature);
 
-            int tempVal = sig.Token;
+            int tempVal = sig;
 
             EnsureCapacity(7);
             InternalEmit(opcode);
@@ -701,13 +707,13 @@ namespace System.Reflection.Emit
             if (opcode == OpCodes.Ldtoken && cls != null && cls.IsGenericTypeDefinition)
             {
                 // This gets the token for the generic type definition if cls is one.
-                tempVal = modBuilder.GetTypeToken(cls).Token;
+                tempVal = modBuilder.GetTypeToken(cls);
             }
             else
             {
                 // This gets the token for the generic type instantiated on the formal parameters
                 // if cls is a generic type definition.
-                tempVal = modBuilder.GetTypeTokenInternal(cls!).Token;
+                tempVal = modBuilder.GetTypeTokenInternal(cls!);
             }
 
             EnsureCapacity(7);
@@ -792,7 +798,7 @@ namespace System.Reflection.Emit
         public virtual void Emit(OpCode opcode, FieldInfo field)
         {
             ModuleBuilder modBuilder = (ModuleBuilder)m_methodBuilder.Module;
-            int tempVal = modBuilder.GetFieldToken(field).Token;
+            int tempVal = modBuilder.GetFieldToken(field);
             EnsureCapacity(7);
             InternalEmit(opcode);
             RecordTokenFixup();
@@ -806,7 +812,7 @@ namespace System.Reflection.Emit
             // fixups if the module is persisted to a PE.
 
             ModuleBuilder modBuilder = (ModuleBuilder)m_methodBuilder.Module;
-            int tempVal = modBuilder.GetStringConstant(str).Token;
+            int tempVal = modBuilder.GetStringConstant(str);
             EnsureCapacity(7);
             InternalEmit(opcode);
             PutInteger4(tempVal);
@@ -1288,20 +1294,6 @@ namespace System.Reflection.Emit
             }
         }
 
-        public virtual void MarkSequencePoint(
-            ISymbolDocumentWriter document,
-            int startLine,       // line number is 1 based
-            int startColumn,     // column is 0 based
-            int endLine,         // line number is 1 based
-            int endColumn)       // column is 0 based
-        {
-            if (startLine == 0 || startLine < 0 || endLine == 0 || endLine < 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(startLine));
-            }
-            m_LineNumberInfo.AddLineNumberInfo(document, m_length, startLine, startColumn, endLine, endColumn);
-        }
-
         public virtual void BeginScope()
         {
             m_ScopeTree.AddScopeInfo(ScopeAction.Open, m_length);
@@ -1614,14 +1606,14 @@ namespace System.Reflection.Emit
         {
             int i = GetCurrentActiveScopeIndex();
             m_localSymInfos[i] ??= new LocalSymInfo();
-            m_localSymInfos[i]!.AddLocalSymInfo(strName, signature, slot, startOffset, endOffset); // TODO-NULLABLE: Indexer nullability tracked (https://github.com/dotnet/roslyn/issues/34644)
+            m_localSymInfos[i]!.AddLocalSymInfo(strName, signature, slot, startOffset, endOffset);
         }
 
         internal void AddUsingNamespaceToCurrentScope(string strNamespace)
         {
             int i = GetCurrentActiveScopeIndex();
             m_localSymInfos[i] ??= new LocalSymInfo();
-            m_localSymInfos[i]!.AddUsingNamespace(strNamespace); // TODO-NULLABLE: Indexer nullability tracked (https://github.com/dotnet/roslyn/issues/34644)
+            m_localSymInfos[i]!.AddUsingNamespace(strNamespace);
         }
 
         internal void AddScopeInfo(ScopeAction sa, int iOffset)
@@ -1673,25 +1665,6 @@ namespace System.Reflection.Emit
             }
         }
 
-        internal void EmitScopeTree(ISymbolWriter symWriter)
-        {
-            for (int i = 0; i < m_iCount; i++)
-            {
-                if (m_ScopeActions[i] == ScopeAction.Open)
-                {
-                    symWriter.OpenScope(m_iOffsets[i]);
-                }
-                else
-                {
-                    symWriter.CloseScope(m_iOffsets[i]);
-                }
-                if (m_localSymInfos[i] != null)
-                {
-                    m_localSymInfos[i]!.EmitLocalSymInfo(symWriter); // TODO-NULLABLE: Indexer nullability tracked (https://github.com/dotnet/roslyn/issues/34644)
-                }
-            }
-        }
-
         internal int[] m_iOffsets = null!;                 // array of offsets
         internal ScopeAction[] m_ScopeActions = null!;             // array of scope actions
         internal int m_iCount;                   // how many entries in the arrays are occupied
@@ -1699,195 +1672,4 @@ namespace System.Reflection.Emit
         internal const int InitialSize = 16;
         internal LocalSymInfo?[] m_localSymInfos = null!;            // keep track debugging local information
     }
-
-    /// <summary>
-    /// This class tracks the line number info
-    /// </summary>
-    internal sealed class LineNumberInfo
-    {
-        internal LineNumberInfo()
-        {
-            // initialize data variables
-            m_DocumentCount = 0;
-            m_iLastFound = 0;
-        }
-
-        internal void AddLineNumberInfo(
-            ISymbolDocumentWriter document,
-            int iOffset,
-            int iStartLine,
-            int iStartColumn,
-            int iEndLine,
-            int iEndColumn)
-        {
-            // make sure that arrays are large enough to hold addition info
-            int i = FindDocument(document);
-
-            Debug.Assert(i < m_DocumentCount, "Bad document look up!");
-            m_Documents[i].AddLineNumberInfo(document, iOffset, iStartLine, iStartColumn, iEndLine, iEndColumn);
-        }
-
-        // Find a REDocument representing document. If we cannot find one, we will add a new entry into
-        // the REDocument array.
-        private int FindDocument(ISymbolDocumentWriter document)
-        {
-            // This is an optimization. The chance that the previous line is coming from the same
-            // document is very high.
-            if (m_iLastFound < m_DocumentCount && m_Documents[m_iLastFound].m_document == document)
-                return m_iLastFound;
-
-            for (int i = 0; i < m_DocumentCount; i++)
-            {
-                if (m_Documents[i].m_document == document)
-                {
-                    m_iLastFound = i;
-                    return m_iLastFound;
-                }
-            }
-
-            // cannot find an existing document so add one to the array
-            EnsureCapacity();
-            m_iLastFound = m_DocumentCount;
-            m_Documents[m_iLastFound] = new REDocument(document);
-            checked { m_DocumentCount++; }
-            return m_iLastFound;
-        }
-
-        /// <summary>
-        /// Helper to ensure arrays are large enough
-        /// </summary>
-        private void EnsureCapacity()
-        {
-            if (m_DocumentCount == 0)
-            {
-                // First time. Allocate the arrays.
-                m_Documents = new REDocument[InitialSize];
-            }
-            else if (m_DocumentCount == m_Documents.Length)
-            {
-                // the arrays are full. Enlarge the arrays
-                REDocument[] temp = new REDocument[m_DocumentCount * 2];
-                Array.Copy(m_Documents, temp, m_DocumentCount);
-                m_Documents = temp;
-            }
-        }
-
-        internal void EmitLineNumberInfo(ISymbolWriter symWriter)
-        {
-            for (int i = 0; i < m_DocumentCount; i++)
-                m_Documents[i].EmitLineNumberInfo(symWriter);
-        }
-
-        private int m_DocumentCount;         // how many documents that we have right now
-        private REDocument[] m_Documents = null!;             // array of documents
-        private const int InitialSize = 16;
-        private int m_iLastFound;
-    }
-
-    /// <summary>
-    /// This class tracks the line number info
-    /// </summary>
-    internal sealed class REDocument
-    {
-        internal REDocument(ISymbolDocumentWriter document)
-        {
-            // initialize data variables
-            m_iLineNumberCount = 0;
-            m_document = document;
-        }
-
-        internal void AddLineNumberInfo(
-            ISymbolDocumentWriter? document,
-            int iOffset,
-            int iStartLine,
-            int iStartColumn,
-            int iEndLine,
-            int iEndColumn)
-        {
-            Debug.Assert(document == m_document, "Bad document look up!");
-
-            // make sure that arrays are large enough to hold addition info
-            EnsureCapacity();
-
-            m_iOffsets[m_iLineNumberCount] = iOffset;
-            m_iLines[m_iLineNumberCount] = iStartLine;
-            m_iColumns[m_iLineNumberCount] = iStartColumn;
-            m_iEndLines[m_iLineNumberCount] = iEndLine;
-            m_iEndColumns[m_iLineNumberCount] = iEndColumn;
-            checked { m_iLineNumberCount++; }
-        }
-
-        /// <summary>
-        /// Helper to ensure arrays are large enough
-        /// </summary>
-        private void EnsureCapacity()
-        {
-            if (m_iLineNumberCount == 0)
-            {
-                // First time. Allocate the arrays.
-                m_iOffsets = new int[InitialSize];
-                m_iLines = new int[InitialSize];
-                m_iColumns = new int[InitialSize];
-                m_iEndLines = new int[InitialSize];
-                m_iEndColumns = new int[InitialSize];
-            }
-            else if (m_iLineNumberCount == m_iOffsets.Length)
-            {
-                // the arrays are full. Enlarge the arrays
-                // It would probably be simpler to just use Lists here
-                int newSize = checked(m_iLineNumberCount * 2);
-                int[] temp = new int[newSize];
-                Array.Copy(m_iOffsets, temp, m_iLineNumberCount);
-                m_iOffsets = temp;
-
-                temp = new int[newSize];
-                Array.Copy(m_iLines, temp, m_iLineNumberCount);
-                m_iLines = temp;
-
-                temp = new int[newSize];
-                Array.Copy(m_iColumns, temp, m_iLineNumberCount);
-                m_iColumns = temp;
-
-                temp = new int[newSize];
-                Array.Copy(m_iEndLines, temp, m_iLineNumberCount);
-                m_iEndLines = temp;
-
-                temp = new int[newSize];
-                Array.Copy(m_iEndColumns, temp, m_iLineNumberCount);
-                m_iEndColumns = temp;
-            }
-        }
-
-        internal void EmitLineNumberInfo(ISymbolWriter symWriter)
-        {
-            if (m_iLineNumberCount == 0)
-                return;
-            // reduce the array size to be exact
-            int[] iOffsetsTemp = new int[m_iLineNumberCount];
-            Array.Copy(m_iOffsets, iOffsetsTemp, m_iLineNumberCount);
-
-            int[] iLinesTemp = new int[m_iLineNumberCount];
-            Array.Copy(m_iLines, iLinesTemp, m_iLineNumberCount);
-
-            int[] iColumnsTemp = new int[m_iLineNumberCount];
-            Array.Copy(m_iColumns, iColumnsTemp, m_iLineNumberCount);
-
-            int[] iEndLinesTemp = new int[m_iLineNumberCount];
-            Array.Copy(m_iEndLines, iEndLinesTemp, m_iLineNumberCount);
-
-            int[] iEndColumnsTemp = new int[m_iLineNumberCount];
-            Array.Copy(m_iEndColumns, iEndColumnsTemp, m_iLineNumberCount);
-
-            symWriter.DefineSequencePoints(m_document, iOffsetsTemp, iLinesTemp, iColumnsTemp, iEndLinesTemp, iEndColumnsTemp);
-        }
-
-        private int[] m_iOffsets = null!;                 // array of offsets
-        private int[] m_iLines = null!;                   // array of offsets
-        private int[] m_iColumns = null!;                 // array of offsets
-        private int[] m_iEndLines = null!;                // array of offsets
-        private int[] m_iEndColumns = null!;              // array of offsets
-        internal ISymbolDocumentWriter m_document;       // The ISymbolDocumentWriter that this REDocument is tracking.
-        private int m_iLineNumberCount;         // how many entries in the arrays are occupied
-        private const int InitialSize = 16;
-    }       // end of REDocument
 }

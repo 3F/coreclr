@@ -483,7 +483,7 @@ public:
    EHWatsonBucketTracker();
    void Init();
    void CopyEHWatsonBucketTracker(const EHWatsonBucketTracker& srcTracker);
-   void CopyBucketsFromThrowable(OBJECTREF oThrowable);
+   void CopyBuckets(U1ARRAYREF oBuckets);
    void SaveIpForWatsonBucket(UINT_PTR ip);
    UINT_PTR RetrieveWatsonBucketIp();
    PTR_VOID RetrieveWatsonBuckets();
@@ -508,8 +508,8 @@ public:
 
 void SetStateForWatsonBucketing(BOOL fIsRethrownException, OBJECTHANDLE ohOriginalException);
 BOOL CopyWatsonBucketsToThrowable(PTR_VOID pUnmanagedBuckets, OBJECTREF oTargetThrowable = NULL);
-void CopyWatsonBucketsFromThrowableToCurrentThrowable(OBJECTREF oThrowableFrom);
-void CopyWatsonBucketsBetweenThrowables(OBJECTREF oThrowableFrom, OBJECTREF oThrowableTo = NULL);
+void CopyWatsonBucketsFromThrowableToCurrentThrowable(U1ARRAYREF oManagedWatsonBuckets);
+void CopyWatsonBucketsBetweenThrowables(U1ARRAYREF oManagedWatsonBuckets, OBJECTREF oThrowableTo = NULL);
 void SetupInitialThrowBucketDetails(UINT_PTR adjustedIp);
 BOOL SetupWatsonBucketsForFailFast(EXCEPTIONREF refException);
 void SetupWatsonBucketsForUEF(BOOL fUseLastThrownObject);

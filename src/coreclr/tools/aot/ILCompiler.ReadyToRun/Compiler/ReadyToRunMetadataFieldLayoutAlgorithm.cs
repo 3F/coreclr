@@ -16,6 +16,14 @@ using Internal.CorConstants;
 
 namespace ILCompiler
 {
+    public static class ReadyToRunTypeExtensions
+    {
+        public static LayoutInt FieldBaseOffset(this MetadataType type)
+        {
+            return ((ReadyToRunCompilerContext)type.Context).CalculateFieldBaseOffset(type);
+        }
+    }
+
     internal class ReadyToRunMetadataFieldLayoutAlgorithm : MetadataFieldLayoutAlgorithm
     {
         /// <summary>
@@ -795,7 +803,7 @@ namespace ILCompiler
                 return ComputeExplicitFieldLayout(type, numInstanceFields);
             }
             else
-            if (MarshalUtils.IsBlittableType(type) || IsManagedSequentialType(type))
+            if (type.IsEnum || MarshalUtils.IsBlittableType(type) || IsManagedSequentialType(type))
             {
                 return ComputeSequentialFieldLayout(type, numInstanceFields);
             }
@@ -809,31 +817,19 @@ namespace ILCompiler
         /// This method decides whether the type needs aligned base offset in order to have layout resilient to 
         /// base class layout changes.
         /// </summary>
-        protected override void AlignBaseOffsetIfNecessary(MetadataType type, ref LayoutInt baseOffset, bool requiresAlign8)
+        protected override void AlignBaseOffsetIfNecessary(MetadataType type, ref LayoutInt baseOffset, bool requiresAlign8, bool requiresAlignedBase)
         {
-            if (type.IsValueType)
+            if (requiresAlignedBase || _compilationGroup.NeedsAlignmentBetweenBaseTypeAndDerived(baseType: (MetadataType)type.BaseType, derivedType: type))
             {
-                return;
+                bool use8Align = (requiresAlign8 || type.BaseType.RequiresAlign8()) && type.Context.Target.Architecture != TargetArchitecture.X86;
+                LayoutInt alignment = new LayoutInt(use8Align ? 8 : type.Context.Target.PointerSize);
+                baseOffset = LayoutInt.AlignUp(baseOffset, alignment, type.Context.Target);
             }
-            DefType baseType = type.BaseType;
-            if (baseType == null || baseType.IsObject)
-            {
-                return;
-            }
+        }
 
-            if (!_compilationGroup.NeedsAlignmentBetweenBaseTypeAndDerived(baseType: (MetadataType)baseType, derivedType: type))
-            {
-                // The type is defined in the module that's currently being compiled and the type layout doesn't depend on other modules
-                return;
-            }
-
-            LayoutInt alignment = new LayoutInt(type.Context.Target.PointerSize);
-
-            if (requiresAlign8)
-            {
-                alignment = new LayoutInt(8);
-            }
-            baseOffset = LayoutInt.AlignUp(baseOffset, alignment, type.Context.Target);
+        protected override bool AlignUpInstanceByteSizeForExplicitFieldLayoutCompatQuirk(TypeDesc type)
+        {
+            return MarshalUtils.IsBlittableType(type) || IsManagedSequentialType(type);
         }
 
         public static bool IsManagedSequentialType(TypeDesc type)

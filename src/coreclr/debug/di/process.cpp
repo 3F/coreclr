@@ -686,9 +686,9 @@ CordbProcess::CreateDacDbiInterface()
     // in the new arch we can get the module from OpenVirtualProcess2 but in the shim case
     // and the deprecated OpenVirtualProcess case we must assume it comes from DAC in the
     // same directory as DBI
-    if(m_hDacModule == NULL)
+    if (m_hDacModule == NULL)
     {
-        m_hDacModule.Assign(ShimProcess::GetDacModule());
+        m_hDacModule.Assign(ShimProcess::GetDacModule(m_cordb->GetDacModulePath()));
     }
 
     //
@@ -14019,6 +14019,13 @@ void CordbWin32EventThread::AttachProcess()
 
     EX_TRY
     {
+        // Don't allow attach if any metadata/IL updates have been applied
+        if (pProcess->GetDAC()->MetadataUpdatesApplied())
+        {
+            hr = CORDBG_E_ASSEMBLY_UPDATES_APPLIED;
+            goto LExit;
+        }
+
         // Mark interop-debugging
         if (m_actionData.attachData.IsInteropDebugging())
         {

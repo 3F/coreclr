@@ -29,6 +29,8 @@
 #include "prettyprintsig.h"
 #include "formattype.h"
 #include "fieldmarshaler.h"
+#include "versionresilienthashcode.h"
+#include "typehashingalgorithms.h"
 
 #ifdef FEATURE_PREJIT
 #include "compile.h"
@@ -139,10 +141,10 @@ SIZE_T MethodDesc::SizeOf()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    SIZE_T size = s_ClassificationSizeTable[m_wFlags & 
-        (mdcClassification 
-        | mdcHasNonVtableSlot 
-        | mdcMethodImpl 
+    SIZE_T size = s_ClassificationSizeTable[m_wFlags &
+        (mdcClassification
+        | mdcHasNonVtableSlot
+        | mdcMethodImpl
 #ifdef FEATURE_COMINTEROP
         | mdcHasComPlusCallInfo
 #endif
@@ -151,7 +153,7 @@ SIZE_T MethodDesc::SizeOf()
 #ifdef FEATURE_PREJIT
     if (HasNativeCodeSlot())
     {
-        size += (*dac_cast<PTR_TADDR>(GetAddrOfNativeCodeSlot()) & FIXUP_LIST_MASK) ? 
+        size += (*dac_cast<PTR_TADDR>(GetAddrOfNativeCodeSlot()) & FIXUP_LIST_MASK) ?
             sizeof(FixupListSlot) : 0;
     }
 #endif
@@ -650,15 +652,11 @@ PTR_MethodDesc MethodDesc::GetDeclMethodDesc(UINT32 slotNumber)
 //*******************************************************************************
 // Returns a hash for the method.
 // The hash will be the same for the method across multiple process runs.
+#ifndef DACCESS_COMPILE
 COUNT_T MethodDesc::GetStableHash()
 {
     WRAPPER_NO_CONTRACT;
-    _ASSERTE(IsRestored_NoLogging());
-    DefineFullyQualifiedNameForClass();
-
-    const char *  moduleName = GetModule()->GetSimpleName();
-    const char *  className;
-    const char *  methodName = GetName();
+    const char *  className = NULL;
 
     if (IsLCGMethod())
     {
@@ -668,62 +666,18 @@ COUNT_T MethodDesc::GetStableHash()
     {
         className = ILStubResolver::GetStubClassName(this);
     }
+
+    if (className == NULL)
+    {
+        return GetVersionResilientMethodHashCode(this);
+    }
     else
     {
-#if defined(_DEBUG)
-        // Calling _GetFullyQualifiedNameForClass in chk build is very expensive
-        // since it construct the class name everytime we call this method. In chk
-        // builds we already have a cheaper way to get the class name -
-        // GetDebugClassName - which doesn't calculate the class name everytime.
-        // This results in huge saving in Ngen time for checked builds.
-        className = m_pszDebugClassName;
-#else // !_DEBUG
-        // since this is for diagnostic purposes only,
-        // give up on the namespace, as we don't have a buffer to concat it
-        // also note this won't show array class names.
-        LPCUTF8       nameSpace;
-        MethodTable * pMT = GetMethodTable();
-
-        className = pMT->GetFullyQualifiedNameInfo(&nameSpace);
-#endif // !_DEBUG
+        int typeHash = ComputeNameHashCode("", className);
+        return typeHash ^ ComputeNameHashCode(GetName());
     }
-
-    COUNT_T hash = HashStringA(moduleName);             // Start the hash with the Module name
-    hash = HashCOUNT_T(hash, HashStringA(className));   // Hash in the name of the Class name
-    hash = HashCOUNT_T(hash, HashStringA(methodName));  // Hash in the name of the Method name
-
-    // Handle Generic Types and Generic Methods
-    //
-    if (HasClassInstantiation() && !GetMethodTable()->IsGenericTypeDefinition())
-    {
-        Instantiation classInst = GetClassInstantiation();
-        for (DWORD i = 0; i < classInst.GetNumArgs(); i++)
-        {
-            MethodTable * pMT = classInst[i].GetMethodTable();
-            // pMT can be NULL for TypeVarTypeDesc
-            // @TODO: Implement TypeHandle::GetStableHash instead of
-            // checking pMT==NULL
-            if (pMT)
-                hash = HashCOUNT_T(hash, HashStringA(GetFullyQualifiedNameForClass(pMT)));
-        }
-    }
-
-    if (HasMethodInstantiation() && !IsGenericMethodDefinition())
-    {
-        Instantiation methodInst = GetMethodInstantiation();
-        for (DWORD i = 0; i < methodInst.GetNumArgs(); i++)
-        {
-            MethodTable * pMT = methodInst[i].GetMethodTable();
-            // pMT can be NULL for TypeVarTypeDesc
-            // @TODO: Implement TypeHandle::GetStableHash instead of
-            // checking pMT==NULL
-            if (pMT)
-                hash = HashCOUNT_T(hash, HashStringA(GetFullyQualifiedNameForClass(pMT)));
-        }
-    }
-
-    return hash;
 }
+#endif // DACCESS_COMPILE
 
 //*******************************************************************************
 // Get the number of type parameters to a generic method
@@ -1186,7 +1140,7 @@ BOOL MethodDesc::IsVarArg()
 
     Signature signature = GetSignature();
     _ASSERTE(!signature.IsEmpty());
-    return MetaSig::IsVarArg(GetModule(), signature);
+    return MetaSig::IsVarArg(signature);
 }
 
 //*******************************************************************************
@@ -2275,6 +2229,31 @@ PCODE MethodDesc::GetCallTarget(OBJECTREF* pThisObj, TypeHandle ownerType)
     return pTarget;
 }
 
+MethodDesc* NonVirtualEntry2MethodDesc(PCODE entryPoint)
+{
+    CONTRACTL {
+        NOTHROW;
+        GC_NOTRIGGER;
+        MODE_ANY;
+    }
+    CONTRACTL_END
+
+    RangeSection* pRS = ExecutionManager::FindCodeRange(entryPoint, ExecutionManager::GetScanFlags());
+    if (pRS == NULL)
+        return NULL;
+
+    MethodDesc* pMD;
+    if (pRS->pjit->JitCodeToMethodInfo(pRS, entryPoint, &pMD, NULL))
+        return pMD;
+
+    if (pRS->pjit->GetStubCodeBlockKind(pRS, entryPoint) == STUB_CODE_BLOCK_PRECODE)
+        return MethodDesc::GetMethodDescFromStubAddr(entryPoint);
+
+    // We should never get here
+    _ASSERTE(!"NonVirtualEntry2MethodDesc failed for RangeSection");
+    return NULL;
+}
+
 //*******************************************************************************
 // convert an entry point into a method desc
 MethodDesc* Entry2MethodDesc(PCODE entryPoint, MethodTable *pMT)
@@ -2288,26 +2267,13 @@ MethodDesc* Entry2MethodDesc(PCODE entryPoint, MethodTable *pMT)
     }
     CONTRACT_END
 
-    MethodDesc * pMD;
-
-    RangeSection * pRS = ExecutionManager::FindCodeRange(entryPoint, ExecutionManager::GetScanFlags());
-    if (pRS != NULL)
-    {
-        if (pRS->pjit->JitCodeToMethodInfo(pRS, entryPoint, &pMD, NULL))
-            RETURN(pMD);
-
-        if (pRS->pjit->GetStubCodeBlockKind(pRS, entryPoint) == STUB_CODE_BLOCK_PRECODE)
-            RETURN(MethodDesc::GetMethodDescFromStubAddr(entryPoint));
-
-        // We should never get here
-        _ASSERTE(!"Entry2MethodDesc failed for RangeSection");
-        RETURN (NULL);
-    }
+    MethodDesc* pMD = NonVirtualEntry2MethodDesc(entryPoint);
+    if (pMD != NULL)
+        RETURN(pMD);
 
     pMD = VirtualCallStubManagerManager::Entry2MethodDesc(entryPoint, pMT);
     if (pMD != NULL)
         RETURN(pMD);
-
 
     // Is it an FCALL?
     pMD = ECall::MapTargetBackToMethod(entryPoint);
@@ -2615,8 +2581,7 @@ void MethodDesc::Save(DataImage *image)
     {
         EX_TRY
         {
-            PInvokeStaticSigInfo sigInfo;
-            NDirect::PopulateNDirectMethodDesc((NDirectMethodDesc*)this, &sigInfo);
+            NDirect::PopulateNDirectMethodDesc((NDirectMethodDesc*)this);
         }
         EX_CATCH
         {
@@ -3011,10 +2976,10 @@ FixupSignatureContainingInternalTypesParseType(
             bool needsRestore = FixupSignatureContainingInternalTypesParseType(image, pOriginalSig, psig, checkOnly);
 
             // Get generic arg count
-            ULONG nArgs;
+            uint32_t nArgs;
             IfFailThrow(psig.GetData(&nArgs));
 
-            for (ULONG i = 0; i < nArgs; i++)
+            for (uint32_t i = 0; i < nArgs; i++)
             {
                 if (FixupSignatureContainingInternalTypesParseType(image, pOriginalSig, psig, checkOnly))
                 {
@@ -3062,7 +3027,7 @@ FixupSignatureContainingInternalTypes(
     }
     CONTRACTL_END;
 
-    ULONG nArgs;
+    uint32_t nArgs;
     bool needsRestore = false;
 
     SigPointer psig(pSig, cSig);
@@ -3087,7 +3052,7 @@ FixupSignatureContainingInternalTypes(
 
     nArgs++;  // be sure to handle the return type
 
-    for (ULONG i = 0; i < nArgs; i++)
+    for (uint32_t i = 0; i < nArgs; i++)
     {
         if (FixupSignatureContainingInternalTypesParseType(image, pSig, psig, checkOnly))
         {
@@ -3139,10 +3104,10 @@ RestoreSignatureContainingInternalTypesParseType(
             RestoreSignatureContainingInternalTypesParseType(psig);
 
             // Get generic arg count
-            ULONG nArgs;
+            uint32_t nArgs;
             IfFailThrow(psig.GetData(&nArgs));
 
-            for (ULONG i = 0; i < nArgs; i++)
+            for (uint32_t i = 0; i < nArgs; i++)
             {
                 RestoreSignatureContainingInternalTypesParseType(psig);
             }
@@ -3184,7 +3149,7 @@ RestoreSignatureContainingInternalTypes(
     Volatile<BYTE> * pVolatileSig = (Volatile<BYTE> *)pSig;
     if (*pVolatileSig & IMAGE_CEE_CS_CALLCONV_NEEDSRESTORE)
     {
-        ULONG nArgs;
+        uint32_t nArgs;
         SigPointer psig(pSig, cSig);
 
         // Skip calling convention
@@ -4203,10 +4168,10 @@ static const struct CentralJumpCode {
     BYTE m_jmp[1];
     INT32 m_rel32;
 
-    inline void Setup(MethodDesc* pMD, PCODE target, LoaderAllocator *pLoaderAllocator) {
+    inline void Setup(CentralJumpCode* pCodeRX, MethodDesc* pMD, PCODE target, LoaderAllocator *pLoaderAllocator) {
         WRAPPER_NO_CONTRACT;
         m_pBaseMD = pMD;
-        m_rel32 = rel32UsingJumpStub(&m_rel32, target, pMD, pLoaderAllocator);
+        m_rel32 = rel32UsingJumpStub(&pCodeRX->m_rel32, target, pMD, pLoaderAllocator);
     }
 
     inline BOOL CheckTarget(TADDR target) {
@@ -4220,46 +4185,6 @@ c_CentralJumpCode = {
     { 0xC1, 0xE0, MethodDesc::ALIGNMENT_SHIFT },  //   shl   eax, MethodDesc::ALIGNMENT_SHIFT
     { 0x05 }, NULL,                               //   add   eax, pBaseMD
     { 0xE9 }, 0                                   //   jmp   PreStub
-};
-#include <poppack.h>
-
-#elif defined(TARGET_AMD64)
-
-#include <pshpack1.h>
-static const struct CentralJumpCode {
-    BYTE m_movzxRAX[4];
-    BYTE m_shlEAX[4];
-    BYTE m_movRAX[2];
-    MethodDesc* m_pBaseMD;
-    BYTE m_addR10RAX[3];
-    BYTE m_jmp[1];
-    INT32 m_rel32;
-
-    inline void Setup(MethodDesc* pMD, PCODE target, LoaderAllocator *pLoaderAllocator) {
-        WRAPPER_NO_CONTRACT;
-        m_pBaseMD = pMD;
-        m_rel32 = rel32UsingJumpStub(&m_rel32, target, pMD, pLoaderAllocator);
-    }
-
-    inline BOOL CheckTarget(TADDR target) {
-        WRAPPER_NO_CONTRACT;
-        TADDR addr = rel32Decode(PTR_HOST_MEMBER_TADDR(CentralJumpCode, this, m_rel32));
-        if (*PTR_BYTE(addr) == 0x48 &&
-            *PTR_BYTE(addr+1) == 0xB8 &&
-            *PTR_BYTE(addr+10) == 0xFF &&
-            *PTR_BYTE(addr+11) == 0xE0)
-        {
-            addr = *PTR_TADDR(addr+2);
-        }
-        return (addr == target);
-    }
-}
-c_CentralJumpCode = {
-    { 0x48, 0x0F, 0xB6, 0xC0 },                         //   movzx rax,al
-    { 0x48, 0xC1, 0xE0, MethodDesc::ALIGNMENT_SHIFT },  //   shl   rax, MethodDesc::ALIGNMENT_SHIFT
-    { 0x49, 0xBA }, NULL,                               //   mov   r10, pBaseMD
-    { 0x4C, 0x03, 0xD0 },                               //   add   r10,rax
-    { 0xE9 }, 0                     // jmp PreStub
 };
 #include <poppack.h>
 
@@ -4523,15 +4448,17 @@ TADDR MethodDescChunk::AllocateCompactEntryPoints(LoaderAllocator *pLoaderAlloca
     SIZE_T size = SizeOfCompactEntryPoints(count);
 
     TADDR temporaryEntryPoints = (TADDR)pamTracker->Track(pLoaderAllocator->GetPrecodeHeap()->AllocAlignedMem(size, sizeof(TADDR)));
+    ExecutableWriterHolder<void> temporaryEntryPointsWriterHolder((void *)temporaryEntryPoints, size);
+    size_t rxOffset = temporaryEntryPoints - (TADDR)temporaryEntryPointsWriterHolder.GetRW();
 
 #ifdef TARGET_ARM
-    BYTE* p = (BYTE*)temporaryEntryPoints + COMPACT_ENTRY_ARM_CODE;
+    BYTE* p = (BYTE*)temporaryEntryPointsWriterHolder.GetRW() + COMPACT_ENTRY_ARM_CODE;
     int relOffset        = count * TEP_ENTRY_SIZE - TEP_ENTRY_SIZE; // relative offset for the short jump
 
     _ASSERTE (relOffset < MAX_OFFSET_UNCONDITIONAL_BRANCH_THUMB);
 #else // TARGET_ARM
     // make the temporary entrypoints unaligned, so they are easy to identify
-    BYTE* p = (BYTE*)temporaryEntryPoints + 1;
+    BYTE* p = (BYTE*)temporaryEntryPointsWriterHolder.GetRW() + 1;
     int indexInBlock     = TEP_MAX_BLOCK_INDEX;         // recompute relOffset in first iteration
     int relOffset        = 0;                           // relative offset for the short jump
 #endif // TARGET_ARM
@@ -4576,10 +4503,11 @@ TADDR MethodDescChunk::AllocateCompactEntryPoints(LoaderAllocator *pLoaderAlloca
         if (relOffset == 0)
         {
             CentralJumpCode* pCode = (CentralJumpCode*)p;
+            CentralJumpCode* pCodeRX = (CentralJumpCode*)(p + rxOffset);
 
             memcpy(pCode, &c_CentralJumpCode, TEP_CENTRAL_JUMP_SIZE);
 
-            pCode->Setup(pBaseMD, GetPreStubEntryPoint(), pLoaderAllocator);
+            pCode->Setup(pCodeRX, pBaseMD, GetPreStubEntryPoint(), pLoaderAllocator);
 
             p += TEP_CENTRAL_JUMP_SIZE;
 
@@ -4600,11 +4528,11 @@ TADDR MethodDescChunk::AllocateCompactEntryPoints(LoaderAllocator *pLoaderAlloca
     memcpy(pCode, &c_CentralJumpCode, TEP_CENTRAL_JUMP_SIZE);
     pCode->Setup (GetPreStubCompactARMEntryPoint(), this);
 
-    _ASSERTE(p + TEP_CENTRAL_JUMP_SIZE == (BYTE*)temporaryEntryPoints + size);
+    _ASSERTE(p + TEP_CENTRAL_JUMP_SIZE == (BYTE*)temporaryEntryPointsWriterHolder.GetRW() + size);
 
 #else // TARGET_ARM
 
-    _ASSERTE(p == (BYTE*)temporaryEntryPoints + size);
+    _ASSERTE(p == (BYTE*)temporaryEntryPointsWriterHolder.GetRW() + size);
 
 #endif // TARGET_ARM
 
@@ -5070,6 +4998,25 @@ void MethodDesc::ResetCodeEntryPoint()
     }
 }
 
+void MethodDesc::ResetCodeEntryPointForEnC()
+{
+    WRAPPER_NO_CONTRACT;
+    _ASSERTE(!IsVersionable());
+    _ASSERTE(!IsVersionableWithPrecode());
+    _ASSERTE(!MayHaveEntryPointSlotsToBackpatch());
+
+    if (HasPrecode())
+    {
+        GetPrecode()->ResetTargetInterlocked();
+    }
+
+    if (HasNativeCodeSlot())
+    {
+        RelativePointer<TADDR> *pRelPtr = (RelativePointer<TADDR> *)GetAddrOfNativeCodeSlot();
+        pRelPtr->SetValueMaybeNull(NULL);
+    }
+}
+
 #endif // !CROSSGEN_COMPILE
 
 //*******************************************************************************
@@ -5277,7 +5224,7 @@ void NDirectMethodDesc::InterlockedSetNDirectFlags(WORD wFlags)
 #ifndef CROSSGEN_COMPILE
 
 #ifdef TARGET_WINDOWS
-FARPROC NDirectMethodDesc::FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE hMod, PTR_CUTF8 entryPointName) const
+FARPROC NDirectMethodDesc::FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE hMod, PTR_CUTF8 entryPointName)
 {
     CONTRACTL
     {
@@ -5298,12 +5245,7 @@ FARPROC NDirectMethodDesc::FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE hMod
 
     if (IsStdCall())
     {
-        if (GetModule()->IsReadyToRun())
-        {
-            // Computing if marshalling is required also computes the required stack size. We need the stack size to correctly form the
-            // name of the import pinvoke function on x86
-            ((NDirectMethodDesc*)this)->MarshalingRequired();
-        }
+        EnsureStackArgumentSize();
 
         DWORD probedEntrypointNameLength = (DWORD)(strlen(entryPointName) + 1); // 1 for null terminator
         int dstbufsize = (int)(sizeof(char) * (probedEntrypointNameLength + 10)); // 10 for stdcall mangling
@@ -5314,12 +5256,6 @@ FARPROC NDirectMethodDesc::FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE hMod
 
         UINT16 numParamBytesMangle = GetStackArgumentSize();
 
-        if (IsStdCallWithRetBuf())
-        {
-            _ASSERTE(numParamBytesMangle >= sizeof(LPVOID));
-            numParamBytesMangle -= (UINT16)sizeof(LPVOID);
-        }
-
         sprintf_s(szProbedEntrypointName + probedEntrypointNameLength, dstbufsize - probedEntrypointNameLength + 1, "@%lu", (ULONG)numParamBytesMangle);
         pFunc = GetProcAddress(hMod, szProbedEntrypointName);
     }
@@ -5329,7 +5265,7 @@ FARPROC NDirectMethodDesc::FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE hMod
     return pFunc;
 }
 
-FARPROC NDirectMethodDesc::FindEntryPointWithSuffix(NATIVE_LIBRARY_HANDLE hMod, PTR_CUTF8 entryPointName, char suffix) const
+FARPROC NDirectMethodDesc::FindEntryPointWithSuffix(NATIVE_LIBRARY_HANDLE hMod, PTR_CUTF8 entryPointName, char suffix)
 {
     // Allocate space for a copy of the entry point name.
     DWORD entryPointWithSuffixLen = (DWORD)(strlen(entryPointName) + 1); // +1 for charset decorations
@@ -5348,7 +5284,7 @@ FARPROC NDirectMethodDesc::FindEntryPointWithSuffix(NATIVE_LIBRARY_HANDLE hMod, 
 #endif
 
 //*******************************************************************************
-LPVOID NDirectMethodDesc::FindEntryPoint(NATIVE_LIBRARY_HANDLE hMod) const
+LPVOID NDirectMethodDesc::FindEntryPoint(NATIVE_LIBRARY_HANDLE hMod)
 {
     CONTRACTL
     {
@@ -5396,6 +5332,26 @@ LPVOID NDirectMethodDesc::FindEntryPoint(NATIVE_LIBRARY_HANDLE hMod) const
     return reinterpret_cast<LPVOID>(pFunc);
 #endif
 }
+
+#if defined(TARGET_X86)
+//*******************************************************************************
+void NDirectMethodDesc::EnsureStackArgumentSize()
+{
+    STANDARD_VM_CONTRACT;
+
+    if (ndirect.m_cbStackArgumentSize == 0xFFFF)
+    {
+        // Marshalling required check sets the stack size as side-effect when marshalling is not required.
+        if (MarshalingRequired())
+        {
+            // Generating interop stub sets the stack size as side-effect in all cases
+            MethodDesc* pStubMD;
+            GetStubForInteropMethod(this, NDIRECTSTUB_FL_FOR_NUMPARAMBYTES, &pStubMD);
+        }
+    }
+}
+#endif
+
 #endif // CROSSGEN_COMPILE
 
 #if !defined(CROSSGEN_COMPILE)
@@ -5429,6 +5385,38 @@ void NDirectMethodDesc::InitEarlyBoundNDirectTarget()
     SetNDirectTarget((LPVOID)target);
 }
 #endif // !CROSSGEN_COMPILE
+
+//*******************************************************************************
+BOOL MethodDesc::HasUnmanagedCallConvAttribute()
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_NOTRIGGER;
+        FORBID_FAULT;
+    }
+    CONTRACTL_END;
+
+    MethodDesc* tgt = this;
+    if (IsILStub())
+    {
+        // From the IL stub, determine if the actual target has been
+        // marked with UnmanagedCallConv.
+        PTR_DynamicMethodDesc ilStubMD = AsDynamicMethodDesc();
+        PTR_ILStubResolver ilStubResolver = ilStubMD->GetILStubResolver();
+        tgt = ilStubResolver->GetStubTargetMethodDesc();
+        if (tgt == nullptr)
+            return FALSE;
+    }
+
+    _ASSERTE(tgt != nullptr);
+    HRESULT hr = tgt->GetCustomAttribute(
+        WellKnownAttribute::UnmanagedCallConv,
+        nullptr,
+        nullptr);
+
+    return (hr == S_OK) ? TRUE : FALSE;
+}
 
 //*******************************************************************************
 BOOL MethodDesc::HasUnmanagedCallersOnlyAttribute()
@@ -5467,9 +5455,9 @@ BOOL MethodDesc::ShouldSuppressGCTransition()
 {
     CONTRACTL
     {
-        NOTHROW;
-        GC_NOTRIGGER;
-        FORBID_FAULT;
+        THROWS;
+        GC_TRIGGERS;
+        INJECT_FAULT(COMPlusThrowOM());
     }
     CONTRACTL_END;
 
@@ -5497,11 +5485,9 @@ BOOL MethodDesc::ShouldSuppressGCTransition()
     }
 
     _ASSERTE(tgt != nullptr);
-    HRESULT hr = tgt->GetCustomAttribute(
-        WellKnownAttribute::SuppressGCTransition,
-        nullptr,
-        nullptr);
-    return (hr == S_OK) ? TRUE : FALSE;
+    bool suppressGCTransition;
+    NDirect::GetCallingConvention_IgnoreErrors(tgt, NULL /*callConv*/, &suppressGCTransition);
+    return suppressGCTransition ? TRUE : FALSE;
 }
 
 #ifdef FEATURE_COMINTEROP
@@ -5780,12 +5766,12 @@ void MethodDesc::WalkValueTypeParameters(MethodTable *pMT, WalkValueTypeParamete
     }
     CONTRACTL_END;
 
-    ULONG numArgs = 0;
+    uint32_t numArgs = 0;
     Module *pModule = this->GetModule();
     SigPointer ptr = this->GetSigPointer();
 
     // skip over calling convention.
-    ULONG         callConv = 0;
+    uint32_t         callConv = 0;
     IfFailThrowBF(ptr.GetCallingConvInfo(&callConv), BFA_BAD_SIGNATURE, pModule);
 
     // If calling convention is generic, skip GenParamCount

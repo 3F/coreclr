@@ -331,10 +331,10 @@ class Object
 
 #endif // #ifndef DACCESS_COMPILE
 
-    BOOL Wait(INT32 timeOut, BOOL exitContext)
+    BOOL Wait(INT32 timeOut)
     {
         WRAPPER_NO_CONTRACT;
-        return GetHeader()->Wait(timeOut, exitContext);
+        return GetHeader()->Wait(timeOut);
     }
 
     void Pulse()
@@ -441,8 +441,12 @@ class Object
         // A method table pointer should always be aligned.  During GC we set the least
         // significant bit for marked objects, and the second to least significant
         // bit is reserved.  So if we want the actual MT pointer during a GC
-        // we must zero out the lowest 2 bits.
+        // we must zero out the lowest 2 bits on 32-bit and 3 bits on 64-bit.
+#ifdef TARGET_64BIT
+        return dac_cast<PTR_MethodTable>((dac_cast<TADDR>(m_pMethTab)) & ~((UINT_PTR)7));
+#else 
         return dac_cast<PTR_MethodTable>((dac_cast<TADDR>(m_pMethTab)) & ~((UINT_PTR)3));
+#endif //TARGET_64BIT
     }
 
     // There are some cases where it is unsafe to get the type handle during a GC.
@@ -735,6 +739,39 @@ public:
 
 #define OFFSETOF__PtrArray__m_Array_              ARRAYBASE_SIZE
 
+/* Corresponds to the managed Span<T> and ReadOnlySpan<T> types.
+   This should only ever be passed from the managed to the unmanaged world byref,
+   as any copies of this struct made within the unmanaged world will not observe
+   potential GC relocations of the source data. */
+template < class KIND >
+class Span
+{
+private:
+    /* Keep fields below in sync with managed Span / ReadOnlySpan layout. */
+    KIND* _pointer;
+    unsigned int _length;
+
+public:
+    // !! CAUTION !!
+    // Caller must take care not to reassign returned reference if this span corresponds
+    // to a managed ReadOnlySpan<T>. If KIND is a reference type, caller must use a
+    // helper like SetObjectReference instead of assigning values directly to the
+    // reference location.
+    KIND& GetAt(SIZE_T index)
+    {
+        LIMITED_METHOD_CONTRACT;
+        SUPPORTS_DAC;
+        _ASSERTE(index < GetLength());
+        return _pointer[index];
+    }
+
+    // Gets the length (in elements) of this span.
+    __inline SIZE_T GetLength() const
+    {
+        return _length;
+    }
+};
+
 /* a TypedByRef is a structure that is used to implement VB's BYREF variants.
    it is basically a tuple of an address of some data along with a TypeHandle
    that indicates the type of the address */
@@ -779,9 +816,6 @@ typedef DPTR(UPTRArray) PTR_UPTRArray;
 typedef DPTR(PTRArray)  PTR_PTRArray;
 
 class StringObject;
-#ifdef FEATURE_UTF8STRING
-class Utf8StringObject;
-#endif // FEATURE_UTF8STRING
 
 #ifdef USE_CHECKED_OBJECTREFS
 typedef REF<ArrayBase>  BASEARRAYREF;
@@ -800,9 +834,6 @@ typedef REF<UPTRArray>  UPTRARRAYREF;
 typedef REF<CHARArray>  CHARARRAYREF;
 typedef REF<PTRArray>   PTRARRAYREF;  // Warning: Use PtrArray only for single dimensional arrays, not multidim arrays.
 typedef REF<StringObject> STRINGREF;
-#ifdef FEATURE_UTF8STRING
-typedef REF<Utf8StringObject> UTF8STRINGREF;
-#endif // FEATURE_UTF8STRING
 
 #else   // USE_CHECKED_OBJECTREFS
 
@@ -822,9 +853,6 @@ typedef PTR_UPTRArray   UPTRARRAYREF;
 typedef PTR_CHARArray   CHARARRAYREF;
 typedef PTR_PTRArray    PTRARRAYREF;  // Warning: Use PtrArray only for single dimensional arrays, not multidim arrays.
 typedef PTR_StringObject STRINGREF;
-#ifdef FEATURE_UTF8STRING
-typedef PTR_Utf8StringObject UTF8STRINGREF;
-#endif // FEATURE_UTF8STRING
 
 #endif // USE_CHECKED_OBJECTREFS
 
@@ -1062,56 +1090,6 @@ public:
     }
 
 };
-
-#ifdef FEATURE_UTF8STRING
-class Utf8StringObject : public Object
-{
-#ifdef DACCESS_COMPILE
-    friend class ClrDataAccess;
-#endif
-
-private:
-    DWORD   m_StringLength;
-    BYTE    m_FirstChar;
-
-public:
-    VOID    SetLength(DWORD len) { LIMITED_METHOD_CONTRACT; _ASSERTE(len >= 0); m_StringLength = len; }
-
-protected:
-    Utf8StringObject() { LIMITED_METHOD_CONTRACT; }
-    ~Utf8StringObject() { LIMITED_METHOD_CONTRACT; }
-
-public:
-
-    /*=================RefInterpretGetStringValuesDangerousForGC======================
-    **N.B.: This perfoms no range checking and relies on the caller to have done this.
-    **Args: (IN)ref -- the Utf8String to be interpretted.
-    **      (OUT)chars -- a pointer to the characters in the buffer.
-    **      (OUT)length -- a pointer to the length of the buffer.
-    **Returns: void.
-    **Exceptions: None.
-    ==============================================================================*/
-    // !!!! If you use this function, you have to be careful because chars is a pointer
-    // !!!! to the data buffer of ref.  If GC happens after this call, you need to make
-    // !!!! sure that you have a pin handle on ref, or use GCPROTECT_BEGINPINNING on ref.
-    void RefInterpretGetStringValuesDangerousForGC(__deref_out_ecount(*length + 1) CHAR **chars, int *length) {
-        WRAPPER_NO_CONTRACT;
-
-        _ASSERTE(GetGCSafeMethodTable() == g_pUtf8StringClass);
-        *length = GetStringLength();
-        *chars  = GetBuffer();
-#ifdef _DEBUG
-        EnableStressHeapHelper();
-#endif
-    }
-
-    DWORD   GetStringLength()                           { LIMITED_METHOD_DAC_CONTRACT; return( m_StringLength );}
-    CHAR*   GetBuffer()                                 { LIMITED_METHOD_CONTRACT;  return (CHAR*)( dac_cast<TADDR>(this) + offsetof(Utf8StringObject, m_FirstChar) );  }
-
-    static DWORD GetBaseSize();
-    static SIZE_T GetSize(DWORD stringLength);
-};
-#endif // FEATURE_UTF8STRING
 
 // This is the Method version of the Reflection object.
 //  A Method has adddition information.
@@ -1356,8 +1334,7 @@ private:
     OBJECTREF     m_ExecutionContext;
     OBJECTREF     m_SynchronizationContext;
     STRINGREF     m_Name;
-    OBJECTREF     m_Delegate;
-    OBJECTREF     m_ThreadStartArg;
+    OBJECTREF     m_StartHelper;
 
     // The next field (m_InternalThread) is declared as IntPtr in the managed
     // definition of Thread.  The loader will sort it next.
@@ -1367,8 +1344,11 @@ private:
     Thread       *m_InternalThread;
     INT32         m_Priority;
 
-    //We need to cache the thread id in managed code for perf reasons.
+    // We need to cache the thread id in managed code for perf reasons.
     INT32         m_ManagedThreadId;
+
+    // Only used by managed code, see comment there
+    bool          m_MayNeedResetForThreadPool;
 
 protected:
     // the ctor and dtor can do no useful work.
@@ -1397,24 +1377,10 @@ public:
         m_ManagedThreadId = id;
     }
 
-    OBJECTREF GetThreadStartArg() { LIMITED_METHOD_CONTRACT; return m_ThreadStartArg; }
-    void SetThreadStartArg(OBJECTREF newThreadStartArg)
-    {
-        WRAPPER_NO_CONTRACT;
-
-        _ASSERTE(newThreadStartArg == NULL);
-        // Note: this is an unchecked assignment.  We are cleaning out the ThreadStartArg field when
-        // a thread starts so that ADU does not cause problems
-        SetObjectReference( (OBJECTREF *)&m_ThreadStartArg, newThreadStartArg);
-
-    }
-
     STRINGREF GetName() {
         LIMITED_METHOD_CONTRACT;
         return m_Name;
     }
-    OBJECTREF GetDelegate()                   { LIMITED_METHOD_CONTRACT; return m_Delegate; }
-    void      SetDelegate(OBJECTREF delegate);
 
     OBJECTREF GetSynchronizationContext()
     {
@@ -1422,10 +1388,13 @@ public:
         return m_SynchronizationContext;
     }
 
-    // SetDelegate is our "constructor" for the pathway where the exposed object is
-    // created first.  InitExisting is our "constructor" for the pathway where an
-    // existing physical thread is later exposed.
     void      InitExisting();
+
+    void ResetStartHelper()
+    {
+        LIMITED_METHOD_CONTRACT
+        m_StartHelper = NULL;
+    }
 
     void ResetName()
     {
@@ -1566,7 +1535,6 @@ class AssemblyNameBaseObject : public Object
     OBJECTREF     _cultureInfo;
     OBJECTREF     _codeBase;
     OBJECTREF     _version;
-    OBJECTREF     _strongNameKeyPair;
     DWORD         _hashAlgorithm;
     DWORD         _versionCompatibility;
     DWORD         _flags;
@@ -1579,7 +1547,6 @@ class AssemblyNameBaseObject : public Object
     OBJECTREF GetSimpleName() { LIMITED_METHOD_CONTRACT; return _name; }
     U1ARRAYREF GetPublicKey() { LIMITED_METHOD_CONTRACT; return _publicKey; }
     U1ARRAYREF GetPublicKeyToken() { LIMITED_METHOD_CONTRACT; return _publicKeyToken; }
-    OBJECTREF GetStrongNameKeyPair() { LIMITED_METHOD_CONTRACT; return _strongNameKeyPair; }
     OBJECTREF GetCultureInfo() { LIMITED_METHOD_CONTRACT; return _cultureInfo; }
     OBJECTREF GetAssemblyCodeBase() { LIMITED_METHOD_CONTRACT; return _codeBase; }
     OBJECTREF GetVersion() { LIMITED_METHOD_CONTRACT; return _version; }
@@ -2451,7 +2418,7 @@ public:
     OBJECTREF GetInnerException()
     {
         LIMITED_METHOD_DAC_CONTRACT;
-        return _innerException;
+        return VolatileLoadWithoutBarrierOBJECTREF(&_innerException);
     }
 
     // Returns the innermost exception object - equivalent of the
@@ -2464,7 +2431,7 @@ public:
         OBJECTREF oInnerMostException = NULL;
         OBJECTREF oCurrent = NULL;
 
-        oCurrent = _innerException;
+        oCurrent = GetInnerException();
         while(oCurrent != NULL)
         {
             oInnerMostException = oCurrent;
@@ -2502,7 +2469,7 @@ public:
     STRINGREF GetRemoteStackTraceString()
     {
         LIMITED_METHOD_DAC_CONTRACT;
-        return _remoteStackTraceString;
+        return (STRINGREF)VolatileLoadWithoutBarrierOBJECTREF(&_remoteStackTraceString);
     }
 
     void SetHelpURL(STRINGREF helpURL)
@@ -2545,7 +2512,7 @@ public:
     U1ARRAYREF GetWatsonBucketReference()
     {
         LIMITED_METHOD_CONTRACT;
-        return _watsonBuckets;
+        return (U1ARRAYREF)VolatileLoadWithoutBarrierOBJECTREF(&_watsonBuckets);
     }
 
     // This method will return a BOOL to indicate if the
@@ -2553,7 +2520,7 @@ public:
     BOOL AreWatsonBucketsPresent()
     {
         LIMITED_METHOD_CONTRACT;
-        return (_watsonBuckets != NULL)?TRUE:FALSE;
+        return (GetWatsonBucketReference() != NULL)?TRUE:FALSE;
     }
 
     // This method will save the IP to be used for watson bucketing.
@@ -2578,7 +2545,7 @@ public:
     {
         LIMITED_METHOD_CONTRACT;
 
-        return _ipForWatsonBuckets;
+        return VolatileLoadWithoutBarrier(&_ipForWatsonBuckets);
     }
 
     // README:

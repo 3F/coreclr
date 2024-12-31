@@ -3,6 +3,7 @@
 
 using System;
 using System.Diagnostics;
+using System.Numerics;
 using System.Text;
 
 using Internal.TypeSystem;
@@ -33,10 +34,10 @@ namespace ILCompiler
             byte[] src = Encoding.UTF8.GetBytes(name);
             for (int i = 0; i < src.Length; i += 2)
             {
-                hash1 = unchecked(hash1 + RotateLeft(hash1, 5)) ^ src[i];
+                hash1 = unchecked(hash1 + RotateLeft(hash1, 5)) ^ (int)unchecked((sbyte)src[i]);
                 if (i + 1 < src.Length)
                 {
-                    hash2 = unchecked(hash2 + RotateLeft(hash2, 5)) ^ src[i + 1];
+                    hash2 = unchecked(hash2 + RotateLeft(hash2, 5)) ^ (int)unchecked((sbyte)src[i + 1]);
                 }
                 else
                 {
@@ -219,7 +220,7 @@ namespace ILCompiler
         /// <param name="bitCount">Number of bits</param>
         private static int RotateLeft(int value, int bitCount)
         {
-            return unchecked((int)(((uint)value << bitCount) | ((uint)value >> (32 - bitCount))));
+            return (int)BitOperations.RotateLeft((uint)value, bitCount);
         }
 
         private static uint XXHash32_MixEmptyState()
@@ -231,7 +232,7 @@ namespace ILCompiler
 
         private static uint XXHash32_QueueRound(uint hash, uint queuedValue)
         {
-            return ((uint)RotateLeft((int)(hash + queuedValue * 3266489917U/*Prime3*/), 17)) * 668265263U/*Prime4*/;
+            return (BitOperations.RotateLeft((hash + queuedValue * 3266489917U/*Prime3*/), 17)) * 668265263U/*Prime4*/;
         }
 
         private static uint XXHash32_MixFinal(uint hash)

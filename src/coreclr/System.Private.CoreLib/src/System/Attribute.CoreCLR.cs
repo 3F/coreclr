@@ -1,9 +1,10 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Reflection;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
 
 namespace System
 {
@@ -24,24 +25,26 @@ namespace System
             if (!inherit)
                 return attributes;
 
+            // if this is an index we need to get the parameter types to help disambiguate
+            Type[] indexParamTypes = GetIndexParameterTypes(element);
+            PropertyInfo? baseProp = GetParentDefinition(element, indexParamTypes);
+            if (baseProp == null)
+                return attributes;
+
             // create the hashtable that keeps track of inherited types
             Dictionary<Type, AttributeUsageAttribute> types = new Dictionary<Type, AttributeUsageAttribute>(11);
 
             // create an array list to collect all the requested attibutes
             List<Attribute> attributeList = new List<Attribute>();
-            CopyToArrayList(attributeList, attributes, types);
-
-            // if this is an index we need to get the parameter types to help disambiguate
-            Type[] indexParamTypes = GetIndexParameterTypes(element);
-
-
-            PropertyInfo? baseProp = GetParentDefinition(element, indexParamTypes);
-            while (baseProp != null)
+            CopyToAttributeList(attributeList, attributes, types);
+            do
             {
                 attributes = GetCustomAttributes(baseProp, type, false);
                 AddAttributesToList(attributeList, attributes, types);
                 baseProp = GetParentDefinition(baseProp, indexParamTypes);
             }
+            while (baseProp != null);
+
             Attribute[] array = CreateAttributeArrayHelper(type, attributeList.Count);
             attributeList.CopyTo(array, 0);
             return array;
@@ -77,6 +80,9 @@ namespace System
             return false;
         }
 
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2075:UnrecognizedReflectionPattern",
+            Justification = "rtPropAccessor.DeclaringType is guaranteed to have the specified property because " +
+                "rtPropAccessor.GetParentDefinition() returned a non-null MethodInfo.")]
         private static PropertyInfo? GetParentDefinition(PropertyInfo property, Type[] propertyParameters)
         {
             Debug.Assert(property != null);
@@ -119,29 +125,38 @@ namespace System
 
             // walk up the hierarchy chain
             Attribute[] attributes = (Attribute[])element.GetCustomAttributes(type, inherit);
-            if (inherit)
+            if (!inherit)
             {
-                // create the hashtable that keeps track of inherited types
-                Dictionary<Type, AttributeUsageAttribute> types = new Dictionary<Type, AttributeUsageAttribute>(11);
-                // create an array list to collect all the requested attibutes
-                List<Attribute> attributeList = new List<Attribute>();
-                CopyToArrayList(attributeList, attributes, types);
-
-                EventInfo? baseEvent = GetParentDefinition(element);
-                while (baseEvent != null)
-                {
-                    attributes = GetCustomAttributes(baseEvent, type, false);
-                    AddAttributesToList(attributeList, attributes, types);
-                    baseEvent = GetParentDefinition(baseEvent);
-                }
-                Attribute[] array = CreateAttributeArrayHelper(type, attributeList.Count);
-                attributeList.CopyTo(array, 0);
-                return array;
-            }
-            else
                 return attributes;
+            }
+
+            EventInfo? baseEvent = GetParentDefinition(element);
+            if (baseEvent == null)
+            {
+                return attributes;
+            }
+
+            // create the hashtable that keeps track of inherited types
+            // create an array list to collect all the requested attibutes
+            Dictionary<Type, AttributeUsageAttribute> types = new Dictionary<Type, AttributeUsageAttribute>(11);
+            List<Attribute> attributeList = new List<Attribute>();
+            CopyToAttributeList(attributeList, attributes, types);
+            do
+            {
+                attributes = GetCustomAttributes(baseEvent, type, false);
+                AddAttributesToList(attributeList, attributes, types);
+                baseEvent = GetParentDefinition(baseEvent);
+            }
+            while (baseEvent != null);
+
+            Attribute[] array = CreateAttributeArrayHelper(type, attributeList.Count);
+            attributeList.CopyTo(array, 0);
+            return array;
         }
 
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2075:UnrecognizedReflectionPattern",
+            Justification = "rtAdd.DeclaringType is guaranteed to have the specified event because " +
+                "rtAdd.GetParentDefinition() returned a non-null MethodInfo.")]
         private static EventInfo? GetParentDefinition(EventInfo ev)
         {
             Debug.Assert(ev != null);
@@ -287,9 +302,9 @@ namespace System
                 count = 0;
                 for (int i = 0; i < objAttr.Length; i++)
                 {
-                    if (objAttr[i] != null)
+                    if (objAttr[i] is object attr)
                     {
-                        attributes[count] = (Attribute)objAttr[i]!; // TODO-NULLABLE: Indexer nullability tracked (https://github.com/dotnet/roslyn/issues/34644)
+                        attributes[count] = (Attribute)attr;
                         count++;
                     }
                 }
@@ -350,7 +365,7 @@ namespace System
         #endregion
 
         #region Utility
-        private static void CopyToArrayList(List<Attribute> attributeList, Attribute[] attributes, Dictionary<Type, AttributeUsageAttribute> types)
+        private static void CopyToAttributeList(List<Attribute> attributeList, Attribute[] attributes, Dictionary<Type, AttributeUsageAttribute> types)
         {
             for (int i = 0; i < attributes.Length; i++)
             {
@@ -377,7 +392,7 @@ namespace System
                 return indexParamTypes;
             }
 
-            return Array.Empty<Type>();
+            return Type.EmptyTypes;
         }
 
         private static void AddAttributesToList(List<Attribute> attributeList, Attribute[] attributes, Dictionary<Type, AttributeUsageAttribute> types)
@@ -430,27 +445,27 @@ namespace System
         #region Public Statics
 
         #region MemberInfo
-        public static Attribute[] GetCustomAttributes(MemberInfo element, Type type)
+        public static Attribute[] GetCustomAttributes(MemberInfo element, Type attributeType)
         {
-            return GetCustomAttributes(element, type, true);
+            return GetCustomAttributes(element, attributeType, true);
         }
 
-        public static Attribute[] GetCustomAttributes(MemberInfo element, Type type, bool inherit)
+        public static Attribute[] GetCustomAttributes(MemberInfo element, Type attributeType, bool inherit)
         {
             if (element == null)
                 throw new ArgumentNullException(nameof(element));
 
-            if (type == null)
-                throw new ArgumentNullException(nameof(type));
+            if (attributeType == null)
+                throw new ArgumentNullException(nameof(attributeType));
 
-            if (!type.IsSubclassOf(typeof(Attribute)) && type != typeof(Attribute))
+            if (!attributeType.IsSubclassOf(typeof(Attribute)) && attributeType != typeof(Attribute))
                 throw new ArgumentException(SR.Argument_MustHaveAttributeBaseClass);
 
             return element.MemberType switch
             {
-                MemberTypes.Property => InternalGetCustomAttributes((PropertyInfo)element, type, inherit),
-                MemberTypes.Event => InternalGetCustomAttributes((EventInfo)element, type, inherit),
-                _ => (element.GetCustomAttributes(type, inherit) as Attribute[])!,
+                MemberTypes.Property => InternalGetCustomAttributes((PropertyInfo)element, attributeType, inherit),
+                MemberTypes.Event => InternalGetCustomAttributes((EventInfo)element, attributeType, inherit),
+                _ => (element.GetCustomAttributes(attributeType, inherit) as Attribute[])!,
             };
         }
 

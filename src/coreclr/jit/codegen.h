@@ -31,7 +31,7 @@ public:
     // This could use further abstraction
     CodeGen(Compiler* theCompiler);
 
-    virtual void genGenerateCode(void** codePtr, ULONG* nativeSizeOfCode);
+    virtual void genGenerateCode(void** codePtr, uint32_t* nativeSizeOfCode);
 
     void genGenerateMachineCode();
     void genEmitMachineCode();
@@ -88,7 +88,7 @@ private:
 
     void genPrepForCompiler();
 
-    void genPrepForEHCodegen();
+    void genMarkLabelsForCodegen();
 
     inline RegState* regStateForType(var_types t)
     {
@@ -205,17 +205,18 @@ protected:
     // the current (pending) label ref, a label which has been referenced but not yet seen
     BasicBlock* genPendingCallLabel;
 
-    void**   codePtr;
-    ULONG*   nativeSizeOfCode;
-    unsigned codeSize;
-    void*    coldCodePtr;
-    void*    consPtr;
+    void**    codePtr;
+    uint32_t* nativeSizeOfCode;
+    unsigned  codeSize;
+    void*     coldCodePtr;
+    void*     consPtr;
 
 #ifdef DEBUG
     // Last instr we have displayed for dspInstrs
     unsigned genCurDispOffset;
 
     static const char* genInsName(instruction ins);
+    const char* genInsDisplayName(emitter::instrDesc* id);
 #endif // DEBUG
 
     //-------------------------------------------------------------------------
@@ -348,6 +349,8 @@ protected:
 
     void genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pInitRegZeroed, regMaskTP maskArgRegsLiveIn);
 
+    void genPoisonFrame(regMaskTP bbRegLiveIn);
+
 #if defined(TARGET_ARM)
 
     bool genInstrWithConstant(
@@ -448,8 +451,6 @@ protected:
     void genProfilingEnterCallback(regNumber initReg, bool* pInitRegZeroed);
     void genProfilingLeaveCallback(unsigned helper);
 #endif // PROFILING_SUPPORTED
-
-    void genPrologPadForReJit();
 
     // clang-format off
     void genEmitCall(int                   callType,
@@ -845,6 +846,7 @@ protected:
 
     void genCodeForDivMod(GenTreeOp* treeNode);
     void genCodeForMul(GenTreeOp* treeNode);
+    void genCodeForIncSaturate(GenTree* treeNode);
     void genCodeForMulHi(GenTreeOp* treeNode);
     void genLeaInstruction(GenTreeAddrMode* lea);
     void genSetRegToCond(regNumber dstReg, GenTree* tree);
@@ -979,8 +981,6 @@ protected:
     void genSIMDIntrinsicUnOp(GenTreeSIMD* simdNode);
     void genSIMDIntrinsicBinOp(GenTreeSIMD* simdNode);
     void genSIMDIntrinsicRelOp(GenTreeSIMD* simdNode);
-    void genSIMDIntrinsicSetItem(GenTreeSIMD* simdNode);
-    void genSIMDIntrinsicGetItem(GenTreeSIMD* simdNode);
     void genSIMDIntrinsicShuffleSSE2(GenTreeSIMD* simdNode);
     void genSIMDIntrinsicUpperSave(GenTreeSIMD* simdNode);
     void genSIMDIntrinsicUpperRestore(GenTreeSIMD* simdNode);
@@ -1155,7 +1155,10 @@ protected:
     void genConsumeHWIntrinsicOperands(GenTreeHWIntrinsic* tree);
 #endif // FEATURE_HW_INTRINSICS
     void genEmitGSCookieCheck(bool pushReg);
-    void genSetRegToIcon(regNumber reg, ssize_t val, var_types type = TYP_INT, insFlags flags = INS_FLAGS_DONT_CARE);
+    void genSetRegToIcon(regNumber reg,
+                         ssize_t   val,
+                         var_types type = TYP_INT,
+                         insFlags flags = INS_FLAGS_DONT_CARE DEBUGARG(GenTreeFlags gtFlags = GTF_EMPTY));
     void genCodeForShift(GenTree* tree);
 
 #if defined(TARGET_X86) || defined(TARGET_ARM)
@@ -1303,12 +1306,7 @@ protected:
 
     void genReturn(GenTree* treeNode);
 
-#ifdef TARGET_ARMARCH
-    void genStackPointerConstantAdjustment(ssize_t spDelta);
-#else  // !TARGET_ARMARCH
     void genStackPointerConstantAdjustment(ssize_t spDelta, regNumber regTmp);
-#endif // !TARGET_ARMARCH
-
     void genStackPointerConstantAdjustmentWithProbe(ssize_t spDelta, regNumber regTmp);
     target_ssize_t genStackPointerConstantAdjustmentLoopWithProbe(ssize_t spDelta, regNumber regTmp);
 
@@ -1369,15 +1367,27 @@ public:
     void instInit();
 
     void instGen(instruction ins);
-#ifdef TARGET_XARCH
-    void instNop(unsigned size);
-#endif
 
     void inst_JMP(emitJumpKind jmp, BasicBlock* tgtBlock);
 
     void inst_SET(emitJumpKind condition, regNumber reg);
 
     void inst_RV(instruction ins, regNumber reg, var_types type, emitAttr size = EA_UNKNOWN);
+
+    void inst_Mov(var_types dstType,
+                  regNumber dstReg,
+                  regNumber srcReg,
+                  bool      canSkip,
+                  emitAttr  size  = EA_UNKNOWN,
+                  insFlags  flags = INS_FLAGS_DONT_CARE);
+
+    void inst_Mov_Extend(var_types srcType,
+                         bool      srcInReg,
+                         regNumber dstReg,
+                         regNumber srcReg,
+                         bool      canSkip,
+                         emitAttr  size  = EA_UNKNOWN,
+                         insFlags  flags = INS_FLAGS_DONT_CARE);
 
     void inst_RV_RV(instruction ins,
                     regNumber   reg1,
@@ -1393,8 +1403,8 @@ public:
                        emitAttr    size,
                        insFlags    flags = INS_FLAGS_DONT_CARE);
 
-    void inst_IV(instruction ins, int val);
-    void inst_IV_handle(instruction ins, int val);
+    void inst_IV(instruction ins, cnsval_ssize_t val);
+    void inst_IV_handle(instruction ins, cnsval_ssize_t val);
 
     void inst_RV_IV(
         instruction ins, regNumber reg, target_ssize_t val, emitAttr size, insFlags flags = INS_FLAGS_DONT_CARE);
@@ -1460,8 +1470,6 @@ public:
 
     instruction ins_Copy(var_types dstType);
     instruction ins_Copy(regNumber srcReg, var_types dstType);
-    instruction ins_CopyIntToFloat(var_types srcType, var_types dstTyp);
-    instruction ins_CopyFloatToInt(var_types srcType, var_types dstTyp);
     static instruction ins_FloatStore(var_types type = TYP_DOUBLE);
     static instruction ins_FloatCopy(var_types type = TYP_DOUBLE);
     instruction ins_FloatConv(var_types to, var_types from);
@@ -1485,7 +1493,7 @@ public:
                                 regNumber reg,
                                 ssize_t   imm,
                                 insFlags flags = INS_FLAGS_DONT_CARE DEBUGARG(size_t targetHandle = 0)
-                                    DEBUGARG(unsigned gtFlags = 0));
+                                    DEBUGARG(GenTreeFlags gtFlags = GTF_EMPTY));
 
     void instGen_Compare_Reg_To_Zero(emitAttr size, regNumber reg);
 
@@ -1496,10 +1504,6 @@ public:
     void instGen_Load_Reg_From_Lcl(var_types srcType, regNumber dstReg, int varNum, int offs);
 
     void instGen_Store_Reg_Into_Lcl(var_types dstType, regNumber srcReg, int varNum, int offs);
-
-#ifdef DEBUG
-    void __cdecl instDisp(instruction ins, bool noNL, const char* fmt, ...);
-#endif
 
 #ifdef TARGET_XARCH
     instruction genMapShiftInsToShiftByConstantIns(instruction ins, int shiftByValue);

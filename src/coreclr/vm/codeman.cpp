@@ -951,9 +951,9 @@ ExecutionManager::ScanFlag ExecutionManager::GetScanFlags()
     } CONTRACTL_END;
 
 #if !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)
-    BEGIN_GETTHREAD_ALLOWED;
+    
 
-    Thread *pThread = GetThread();
+    Thread *pThread = GetThreadNULLOk();
 
     if (!pThread)
         return ScanNoReaderLock;
@@ -966,7 +966,7 @@ ExecutionManager::ScanFlag ExecutionManager::GetScanFlags()
     if (pThread->PreemptiveGCDisabled() || (pThread == ThreadSuspend::GetSuspensionThread()))
         return ScanNoReaderLock;
 
-    END_GETTHREAD_ALLOWED;
+    
 
     return ScanReaderLock;
 #else
@@ -1010,30 +1010,31 @@ PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFuncti
 
     return pUnwindInfo;
 
-#elif defined(TARGET_ARM)
+#elif defined(TARGET_ARM) || defined(TARGET_ARM64)
 
     // if this function uses packed unwind data then at least one of the two least significant bits
     // will be non-zero.  if this is the case then there will be no xdata record to enumerate.
     _ASSERTE((pRuntimeFunction->UnwindData & 0x3) == 0);
 
     // compute the size of the unwind info
-    PTR_ULONG xdata = dac_cast<PTR_ULONG>(pRuntimeFunction->UnwindData + moduleBase);
+    PTR_DWORD xdata = dac_cast<PTR_DWORD>(pRuntimeFunction->UnwindData + moduleBase);
+    int size = 4;
 
-    ULONG epilogScopes = 0;
-    ULONG unwindWords = 0;
-    ULONG size = 0;
+#if defined(TARGET_ARM)
+    // See https://docs.microsoft.com/en-us/cpp/build/arm-exception-handling
+    int unwindWords = xdata[0] >> 28;
+    int epilogScopes = (xdata[0] >> 23) & 0x1f;
+#else
+    // See https://docs.microsoft.com/en-us/cpp/build/arm64-exception-handling
+    int unwindWords = xdata[0] >> 27;
+    int epilogScopes = (xdata[0] >> 22) & 0x1f;
+#endif
 
-    if ((xdata[0] >> 23) != 0)
+    if (unwindWords == 0 && epilogScopes == 0)
     {
-        size = 4;
-        epilogScopes = (xdata[0] >> 23) & 0x1f;
-        unwindWords = (xdata[0] >> 28) & 0x0f;
-    }
-    else
-    {
-        size = 8;
-        epilogScopes = xdata[1] & 0xffff;
+        size += 4;
         unwindWords = (xdata[1] >> 16) & 0xff;
+        epilogScopes = xdata[1] & 0xffff;
     }
 
     if (!(xdata[0] & (1 << 21)))
@@ -1046,45 +1047,6 @@ PTR_VOID GetUnwindDataBlob(TADDR moduleBase, PTR_RUNTIME_FUNCTION pRuntimeFuncti
 
     *pSize = size;
     return xdata;
-
-#elif defined(TARGET_ARM64)
-	// if this function uses packed unwind data then at least one of the two least significant bits
-	// will be non-zero.  if this is the case then there will be no xdata record to enumerate.
-	_ASSERTE((pRuntimeFunction->UnwindData & 0x3) == 0);
-
-    // compute the size of the unwind info
-    PTR_ULONG xdata    = dac_cast<PTR_ULONG>(pRuntimeFunction->UnwindData + moduleBase);
-    ULONG epilogScopes = 0;
-    ULONG unwindWords  = 0;
-    ULONG size = 0;
-
-    //If both Epilog Count and Code Word is not zero
-    //Info of Epilog and Unwind scopes are given by 1 word header
-    //Otherwise this info is given by a 2 word header
-    if ((xdata[0] >> 27) != 0)
-    {
-        size = 4;
-        epilogScopes = (xdata[0] >> 22) & 0x1f;
-        unwindWords = (xdata[0] >> 27) & 0x0f;
-    }
-    else
-    {
-        size = 8;
-        epilogScopes = xdata[1] & 0xffff;
-        unwindWords = (xdata[1] >> 16) & 0xff;
-    }
-
-    if (!(xdata[0] & (1 << 21)))
-        size += 4 * epilogScopes;
-
-    size += 4 * unwindWords;
-
-    _ASSERTE(xdata[0] & (1 << 20)); // personality routine should be always present
-    size += 4;                      // exception handler RVA
-
-    *pSize = size;
-    return xdata;
-
 
 #else
     PORTABILITY_ASSERT("GetUnwindDataBlob");
@@ -1263,6 +1225,10 @@ bool DoesOSSupportAVX()
 
 #endif // defined(TARGET_X86) || defined(TARGET_AMD64)
 
+#ifdef TARGET_ARM64
+extern "C" DWORD64 __stdcall GetDataCacheZeroIDReg();
+#endif
+
 void EEJitManager::SetCpuInfo()
 {
     LIMITED_METHOD_CONTRACT;
@@ -1342,6 +1308,9 @@ void EEJitManager::SetCpuInfo()
     //   CORJIT_FLAG_USE_AVX2 if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
     //      CORJIT_FLAG_USE_AVX
     //      AVX2      - EBX bit 5
+    //   CORJIT_FLAG_USE_AVXVNNI if the following feature bit is set (input EAX of 0x07 and input ECX of 1):
+    //      CORJIT_FLAG_USE_AVX2
+    //      AVXVNNI   - EAX bit 4
     //   CORJIT_FLAG_USE_AVX_512 is not currently set, but defined so that it can be used in future without
     //   CORJIT_FLAG_USE_BMI1 if the following feature bit is set (input EAX of 0x07 and input ECX of 0):
     //      BMI1 - EBX bit 3
@@ -1419,6 +1388,12 @@ void EEJitManager::SetCpuInfo()
                                         if ((cpuidInfo[EBX] & (1 << 5)) != 0)                               // AVX2
                                         {
                                             CPUCompileFlags.Set(InstructionSet_AVX2);
+
+                                            __cpuidex(cpuidInfo, 0x00000007, 0x00000001);
+                                            if ((cpuidInfo[EAX] & (1 << 4)) != 0)                           // AVX-VNNI
+                                            {
+                                                CPUCompileFlags.Set(InstructionSet_AVXVNNI);
+                                            }
                                         }
                                     }
                                 }
@@ -1514,6 +1489,16 @@ void EEJitManager::SetCpuInfo()
         CPUCompileFlags.Set(InstructionSet_Crc32);
     }
 #endif // HOST_64BIT
+#ifndef CROSSGEN_COMPILE
+    if (GetDataCacheZeroIDReg() == 4)
+    {
+        // DCZID_EL0<4> (DZP) indicates whether use of DC ZVA instructions is permitted (0) or prohibited (1).
+        // DCZID_EL0<3:0> (BS) specifies Log2 of the block size in words.
+        //
+        // We set the flag when the instruction is permitted and the block size is 64 bytes.
+        CPUCompileFlags.Set(InstructionSet_Dczva);
+    }
+#endif
 #endif // TARGET_ARM64
 
     CPUCompileFlags.Set64BitInstructionSetVariants();
@@ -1529,7 +1514,7 @@ enum JIT_LOAD_JIT_ID
 {
     JIT_LOAD_MAIN = 500,    // The "main" JIT. Normally, this is named "clrjit.dll". Start at a number that is somewhat uncommon (i.e., not zero or 1) to help distinguish from garbage, in process dumps.
     // 501 is JIT_LOAD_LEGACY on some platforms; please do not reuse this value.
-    JIT_LOAD_ALTJIT = 502   // An "altjit". By default, named "protojit.dll". Used both internally, as well as externally for JIT CTP builds.
+    JIT_LOAD_ALTJIT = 502   // An "altjit". By default, named something like "clrjit_<targetos>_<target_arch>_<host_arch>.dll". Used both internally, as well as externally for JIT CTP builds.
 };
 
 enum JIT_LOAD_STATUS
@@ -1556,6 +1541,39 @@ struct JIT_LOAD_DATA
 
 // Here's the global data for JIT load and initialization state.
 JIT_LOAD_DATA g_JitLoadData;
+
+//  Validate that the name used to load the JIT is just a simple file name
+//  and does not contain something that could be used in a non-qualified path.
+//  For example, using the string "..\..\..\myjit.dll" we might attempt to
+//  load a JIT from the root of the drive.
+//
+//  The minimal set of characters that we must check for and exclude are:
+//     '\\' - (backslash)
+//     '/'  - (forward slash)
+//     ':'  - (colon)
+//
+//  Returns false if we find any of these characters in 'pwzJitName'
+//  Returns true if we reach the null terminator without encountering 
+//  any of these characters.
+//
+static bool ValidateJitName(LPCWSTR pwzJitName)
+{
+    LPCWSTR pCurChar = pwzJitName;
+    wchar_t curChar;
+    do {
+        curChar = *pCurChar;
+        if ((curChar == '\\') || (curChar == '/') || (curChar == ':'))
+        {
+            //  Return false if we find any of these character in 'pwzJitName'
+            return false;
+        }
+        pCurChar++;
+    } while (curChar != 0);
+
+    //  Return true; we have reached the null terminator
+    //
+    return true;
+}
 
 // LoadAndInitializeJIT: load the JIT dll into the process, and initialize it (call the UtilCode initialization function,
 // check the JIT-EE interface GUID, etc.)
@@ -1589,35 +1607,40 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName, OUT HINSTANCE* phJit, OUT I
     *phJit = NULL;
     *ppICorJitCompiler = NULL;
 
-    HRESULT hr = E_FAIL;
-
-    PathString CoreClrFolderHolder;
-    extern HINSTANCE g_hThisInst;
-    bool havePath = false;
-
-    if (WszGetModuleFileName(g_hThisInst, CoreClrFolderHolder))
+    if (pwzJitName == nullptr)
     {
-        // Load JIT from next to CoreCLR binary
-        havePath = true;
+        pJitLoadData->jld_hr = E_FAIL;
+        LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: pwzJitName is null"));
+        return;
     }
 
-    if (havePath && !CoreClrFolderHolder.IsEmpty())
-    {
-        SString::Iterator iter = CoreClrFolderHolder.End();
-        BOOL findSep = CoreClrFolderHolder.FindBack(iter, DIRECTORY_SEPARATOR_CHAR_W);
-        if (findSep)
-        {
-            SString sJitName(pwzJitName);
-            CoreClrFolderHolder.Replace(iter + 1, CoreClrFolderHolder.End() - (iter + 1), sJitName);
+    HRESULT hr = E_FAIL;
 
-            *phJit = CLRLoadLibrary(CoreClrFolderHolder.GetUnicode());
-            if (*phJit != NULL)
+    if (ValidateJitName(pwzJitName))
+    {
+        // Load JIT from next to CoreCLR binary
+        PathString CoreClrFolderHolder;
+        if (GetClrModulePathName(CoreClrFolderHolder) && !CoreClrFolderHolder.IsEmpty())
+        {
+            SString::Iterator iter = CoreClrFolderHolder.End();
+            BOOL findSep = CoreClrFolderHolder.FindBack(iter, DIRECTORY_SEPARATOR_CHAR_W);
+            if (findSep)
             {
-                hr = S_OK;
+                SString sJitName(pwzJitName);
+                CoreClrFolderHolder.Replace(iter + 1, CoreClrFolderHolder.End() - (iter + 1), sJitName);
+
+                *phJit = CLRLoadLibrary(CoreClrFolderHolder.GetUnicode());
+                if (*phJit != NULL)
+                {
+                    hr = S_OK;
+                }
             }
         }
     }
-
+    else
+    {
+        LOG((LF_JIT, LL_FATALERROR, "LoadAndInitializeJIT: invalid characters in %S\n", pwzJitName));
+    }
 
     if (SUCCEEDED(hr))
     {
@@ -1625,7 +1648,7 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName, OUT HINSTANCE* phJit, OUT I
 
         EX_TRY
         {
-            typedef void (__stdcall* pjitStartup)(ICorJitHost*);
+            typedef void (* pjitStartup)(ICorJitHost*);
             pjitStartup jitStartupFn = (pjitStartup) GetProcAddress(*phJit, "jitStartup");
 
             if (jitStartupFn)
@@ -1695,8 +1718,8 @@ static void LoadAndInitializeJIT(LPCWSTR pwzJitName, OUT HINSTANCE* phJit, OUT I
 }
 
 #ifdef FEATURE_MERGE_JIT_AND_ENGINE
-EXTERN_C void __stdcall jitStartup(ICorJitHost* host);
-EXTERN_C ICorJitCompiler* __stdcall getJit();
+EXTERN_C void jitStartup(ICorJitHost* host);
+EXTERN_C ICorJitCompiler* getJit();
 #endif // FEATURE_MERGE_JIT_AND_ENGINE
 
 BOOL EEJitManager::LoadJIT()
@@ -1767,7 +1790,27 @@ BOOL EEJitManager::LoadJIT()
 
         if (altJitName == NULL)
         {
-            altJitName = MAKEDLLNAME_W(W("protojit"));
+#ifdef TARGET_WINDOWS
+#ifdef TARGET_X86
+            altJitName = MAKEDLLNAME_W(W("clrjit_win_x86_x86"));
+#elif defined(TARGET_AMD64)
+            altJitName = MAKEDLLNAME_W(W("clrjit_win_x64_x64"));
+#elif defined(TARGET_ARM)
+            altJitName = MAKEDLLNAME_W(W("clrjit_win_arm_arm"));
+#elif defined(TARGET_ARM64)
+            altJitName = MAKEDLLNAME_W(W("clrjit_win_arm64_arm64"));
+#endif
+#else // TARGET_WINDOWS
+#ifdef TARGET_X86
+            altJitName = MAKEDLLNAME_W(W("clrjit_unix_x86_x86"));
+#elif defined(TARGET_AMD64)
+            altJitName = MAKEDLLNAME_W(W("clrjit_unix_x64_x64"));
+#elif defined(TARGET_ARM)
+            altJitName = MAKEDLLNAME_W(W("clrjit_unix_arm_arm"));
+#elif defined(TARGET_ARM64)
+            altJitName = MAKEDLLNAME_W(W("clrjit_unix_arm64_arm64"));
+#endif
+#endif // TARGET_WINDOWS
         }
 
         g_JitLoadData.jld_id = JIT_LOAD_ALTJIT;
@@ -1804,11 +1847,29 @@ CodeFragmentHeap::CodeFragmentHeap(LoaderAllocator * pAllocator, StubCodeBlockKi
 
 void CodeFragmentHeap::AddBlock(VOID * pMem, size_t dwSize)
 {
-    LIMITED_METHOD_CONTRACT;
-    FreeBlock * pBlock = (FreeBlock *)pMem;
-    pBlock->m_pNext = m_pFreeBlocks;
-    pBlock->m_dwSize = dwSize;
-    m_pFreeBlocks = pBlock;
+     CONTRACTL
+    {
+        NOTHROW;
+        GC_NOTRIGGER;
+        MODE_ANY;
+    }
+    CONTRACTL_END;
+
+    // The new "nothrow" below failure is handled in a non-fault way, so
+    // make sure that callers with FORBID_FAULT can call this method without
+    // firing the contract violation assert.
+    PERMANENT_CONTRACT_VIOLATION(FaultViolation, ReasonContractInfrastructure);
+
+    FreeBlock * pBlock = new (nothrow) FreeBlock;
+    // In the OOM case we don't add the block to the list of free blocks
+    // as we are in a FORBID_FAULT code path.
+    if (pBlock != NULL)
+    {
+        pBlock->m_pNext = m_pFreeBlocks;
+        pBlock->m_pBlock = pMem;
+        pBlock->m_dwSize = dwSize;
+        m_pFreeBlocks = pBlock;
+    }
 }
 
 void CodeFragmentHeap::RemoveBlock(FreeBlock ** ppBlock)
@@ -1816,7 +1877,18 @@ void CodeFragmentHeap::RemoveBlock(FreeBlock ** ppBlock)
     LIMITED_METHOD_CONTRACT;
     FreeBlock * pBlock = *ppBlock;
     *ppBlock = pBlock->m_pNext;
-    ZeroMemory(pBlock, sizeof(FreeBlock));
+    delete pBlock;
+}
+
+CodeFragmentHeap::~CodeFragmentHeap()
+{
+    FreeBlock* pBlock = m_pFreeBlocks;
+    while (pBlock != NULL)
+    {
+        FreeBlock *pNextBlock = pBlock->m_pNext;
+        delete pBlock;
+        pBlock = pNextBlock;
+    }
 }
 
 TaggedMemAllocPtr CodeFragmentHeap::RealAllocAlignedMem(size_t  dwRequestedSize
@@ -1831,9 +1903,6 @@ TaggedMemAllocPtr CodeFragmentHeap::RealAllocAlignedMem(size_t  dwRequestedSize
 
     dwRequestedSize = ALIGN_UP(dwRequestedSize, sizeof(TADDR));
 
-    if (dwRequestedSize < sizeof(FreeBlock))
-        dwRequestedSize = sizeof(FreeBlock);
-
     // We will try to batch up allocation of small blocks into one large allocation
 #define SMALL_BLOCK_THRESHOLD 0x100
     SIZE_T nFreeSmallBlocks = 0;
@@ -1843,7 +1912,7 @@ TaggedMemAllocPtr CodeFragmentHeap::RealAllocAlignedMem(size_t  dwRequestedSize
     while (*ppFreeBlock != NULL)
     {
         FreeBlock * pFreeBlock = *ppFreeBlock;
-        if (((BYTE *)pFreeBlock + pFreeBlock->m_dwSize) - (BYTE *)ALIGN_UP(pFreeBlock, dwAlignment) >= (SSIZE_T)dwRequestedSize)
+        if (((BYTE *)pFreeBlock->m_pBlock + pFreeBlock->m_dwSize) - (BYTE *)ALIGN_UP(pFreeBlock->m_pBlock, dwAlignment) >= (SSIZE_T)dwRequestedSize)
         {
             if (ppBestFit == NULL || pFreeBlock->m_dwSize < (*ppBestFit)->m_dwSize)
                 ppBestFit = ppFreeBlock;
@@ -1860,7 +1929,7 @@ TaggedMemAllocPtr CodeFragmentHeap::RealAllocAlignedMem(size_t  dwRequestedSize
     SIZE_T dwSize;
     if (ppBestFit != NULL)
     {
-        pMem = *ppBestFit;
+        pMem = (*ppBestFit)->m_pBlock;
         dwSize = (*ppBestFit)->m_dwSize;
 
         RemoveBlock(ppBestFit);
@@ -1908,9 +1977,10 @@ void CodeFragmentHeap::RealBackoutMem(void *pMem
 {
     CrstHolder ch(&m_CritSec);
 
-    _ASSERTE(dwSize >= sizeof(FreeBlock));
-
-    ZeroMemory((BYTE *)pMem, dwSize);
+    {
+        ExecutableWriterHolder<BYTE> memWriterHolder((BYTE*)pMem, dwSize);
+        ZeroMemory(memWriterHolder.GetRW(), dwSize);
+    }
 
     //
     // Try to coalesce blocks if possible
@@ -2069,8 +2139,7 @@ VOID EEJitManager::EnsureJumpStubReserve(BYTE * pImageBase, SIZE_T imageSize, SI
                 return; // Unable to allocate the reserve - give up
             }
 
-            pNewReserve->m_ptr = ClrVirtualAllocWithinRange(loAddrCurrent, hiAddrCurrent,
-                                               allocChunk, MEM_RESERVE, PAGE_NOACCESS);
+            pNewReserve->m_ptr = (BYTE*)ExecutableAllocator::Instance()->ReserveWithinRange(allocChunk, loAddrCurrent, hiAddrCurrent);
 
             if (pNewReserve->m_ptr != NULL)
                 break;
@@ -2161,8 +2230,7 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
             if (!pInfo->getThrowOnOutOfMemoryWithinRange() && PEDecoder::GetForceRelocs())
                 RETURN NULL;
 #endif
-            pBaseAddr = ClrVirtualAllocWithinRange(loAddr, hiAddr,
-                                                   reserveSize, MEM_RESERVE, PAGE_NOACCESS);
+            pBaseAddr = (BYTE*)ExecutableAllocator::Instance()->ReserveWithinRange(reserveSize, loAddr, hiAddr);
 
             if (!pBaseAddr)
             {
@@ -2181,7 +2249,7 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
         }
         else
         {
-            pBaseAddr = ClrVirtualAllocExecutable(reserveSize, MEM_RESERVE, PAGE_NOACCESS);
+            pBaseAddr = (BYTE*)ExecutableAllocator::Instance()->Reserve(reserveSize);
             if (!pBaseAddr)
                 ThrowOutOfMemory();
         }
@@ -2190,14 +2258,22 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
 
 
     // this first allocation is critical as it sets up correctly the loader heap info
-    HeapList *pHp = (HeapList*)pCodeHeap->m_LoaderHeap.AllocMem(sizeof(HeapList));
+    HeapList *pHp = new HeapList;
+
+#if defined(TARGET_AMD64) || defined(TARGET_ARM64)
+    pHp->CLRPersonalityRoutine = (BYTE *)pCodeHeap->m_LoaderHeap.AllocMem(JUMP_ALLOCATE_SIZE);
+#else
+    // Ensure that the heap has a reserved block of memory and so the GetReservedBytesFree()
+    // and GetAllocPtr() calls below return nonzero values.
+    pCodeHeap->m_LoaderHeap.ReservePages(1);
+#endif
 
     pHp->pHeap = pCodeHeap;
 
     size_t heapSize = pCodeHeap->m_LoaderHeap.GetReservedBytesFree();
     size_t nibbleMapSize = HEAP2MAPSIZE(ROUND_UP_TO_PAGE(heapSize));
 
-    pHp->startAddress    = (TADDR)pHp + sizeof(HeapList);
+    pHp->startAddress = (TADDR)pCodeHeap->m_LoaderHeap.GetAllocPtr();
 
     pHp->endAddress      = pHp->startAddress;
     pHp->maxCodeHeapSize = heapSize;
@@ -2217,7 +2293,8 @@ HeapList* LoaderCodeHeap::CreateCodeHeap(CodeHeapRequestInfo *pInfo, LoaderHeap 
          ));
 
 #ifdef TARGET_64BIT
-    emitJump((LPBYTE)pHp->CLRPersonalityRoutine, (void *)ProcessCLRException);
+    ExecutableWriterHolder<BYTE> personalityRoutineWriterHolder(pHp->CLRPersonalityRoutine, 12);
+    emitJump(pHp->CLRPersonalityRoutine, personalityRoutineWriterHolder.GetRW(), (void *)ProcessCLRException);
 #endif // TARGET_64BIT
 
     pCodeHeap.SuppressRelease();
@@ -2334,13 +2411,12 @@ HeapList* EEJitManager::NewCodeHeap(CodeHeapRequestInfo *pInfo, DomainCodeHeapLi
     }
 #endif
 
-    // <BUGNUM> VSW 433293 </BUGNUM>
-    // SETUP_NEW_BLOCK reserves the first sizeof(LoaderHeapBlock) bytes for LoaderHeapBlock.
-    // In other word, the first m_pAllocPtr starts at sizeof(LoaderHeapBlock) bytes
-    // after the allocated memory. Therefore, we need to take it into account.
-    size_t requestAndHeadersSize = sizeof(LoaderHeapBlock) + sizeof(HeapList) + initialRequestSize;
+    size_t reserveSize = initialRequestSize;
 
-    size_t reserveSize = requestAndHeadersSize;
+#if defined(TARGET_AMD64) || defined(TARGET_ARM64)
+    reserveSize += JUMP_ALLOCATE_SIZE;
+#endif
+
     if (reserveSize < minReserveSize)
         reserveSize = minReserveSize;
     reserveSize = ALIGN_UP(reserveSize, VIRTUAL_ALLOC_RESERVE_GRANULARITY);
@@ -2378,7 +2454,7 @@ HeapList* EEJitManager::NewCodeHeap(CodeHeapRequestInfo *pInfo, DomainCodeHeapLi
 
     EX_TRY
     {
-        TADDR pStartRange = (TADDR) pHp;
+        TADDR pStartRange = pHp->GetModuleBase();
         TADDR pEndRange = (TADDR) &((BYTE*)pHp->startAddress)[pHp->maxCodeHeapSize];
 
         ExecutionManager::AddCodeRange(pStartRange,
@@ -2402,8 +2478,8 @@ HeapList* EEJitManager::NewCodeHeap(CodeHeapRequestInfo *pInfo, DomainCodeHeapLi
         // If we failed to alloc memory in ExecutionManager::AddCodeRange()
         // then we will delete the LoaderHeap that we allocated
 
-        // pHp is allocated in pHeap, so only need to delete the LoaderHeap itself
         delete pHp->pHeap;
+        delete pHp;
 
         pHp = NULL;
     }
@@ -2524,18 +2600,20 @@ void* EEJitManager::allocCodeRaw(CodeHeapRequestInfo *pInfo,
     RETURN(mem);
 }
 
-CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t reserveForJumpStubs, CorJitAllocMemFlag flag
-#ifdef FEATURE_EH_FUNCLETS
-                                    , UINT nUnwindInfos
-                                    , TADDR * pModuleBase
+void EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t reserveForJumpStubs, CorJitAllocMemFlag flag, CodeHeader** ppCodeHeader, CodeHeader** ppCodeHeaderRW,
+                             size_t* pAllocatedSize, HeapList** ppCodeHeap
+#ifdef USE_INDIRECT_CODEHEADER
+                           , BYTE** ppRealHeader
 #endif
-                                    )
+#ifdef FEATURE_EH_FUNCLETS
+                           , UINT nUnwindInfos
+#endif
+                           )
 {
-    CONTRACT(CodeHeader *) {
+    CONTRACTL {
         THROWS;
         GC_NOTRIGGER;
-        POSTCONDITION(CheckPointer(RETVAL));
-    } CONTRACT_END;
+    } CONTRACTL_END;
 
     //
     // Alignment
@@ -2568,6 +2646,7 @@ CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t re
     SIZE_T totalSize = blockSize;
 
     CodeHeader * pCodeHdr = NULL;
+    CodeHeader * pCodeHdrRW = NULL;
 
     CodeHeapRequestInfo requestInfo(pMD);
 #if defined(FEATURE_JIT_PITCHING)
@@ -2595,11 +2674,9 @@ CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t re
     {
         CrstHolder ch(&m_CodeHeapCritSec);
 
-        HeapList *pCodeHeap = NULL;
-
-        TADDR pCode = (TADDR) allocCodeRaw(&requestInfo, sizeof(CodeHeader), totalSize, alignment, &pCodeHeap);
-
-        _ASSERTE(pCodeHeap);
+        *ppCodeHeap = NULL;
+        TADDR pCode = (TADDR) allocCodeRaw(&requestInfo, sizeof(CodeHeader), totalSize, alignment, ppCodeHeap);
+        _ASSERTE(*ppCodeHeap);
 
         if (pMD->IsLCGMethod())
         {
@@ -2608,16 +2685,24 @@ CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t re
 
         _ASSERTE(IS_ALIGNED(pCode, alignment));
 
-        // Initialize the CodeHeader *BEFORE* we publish this code range via the nibble
-        // map so that we don't have to harden readers against uninitialized data.
-        // However because we hold the lock, this initialization should be fast and cheap!
-
         pCodeHdr = ((CodeHeader *)pCode) - 1;
+
+        *pAllocatedSize = sizeof(CodeHeader) + totalSize;
+
+        if (ExecutableAllocator::IsWXORXEnabled())
+        {
+            pCodeHdrRW = (CodeHeader *)new BYTE[*pAllocatedSize];
+        }
+        else
+        {
+            pCodeHdrRW = pCodeHdr;
+        }
 
 #ifdef USE_INDIRECT_CODEHEADER
         if (requestInfo.IsDynamicDomain())
         {
-            pCodeHdr->SetRealCodeHeader((BYTE*)pCode + ALIGN_UP(blockSize, sizeof(void*)));
+            // Set the real code header to the writeable mapping so that we can set its members via the CodeHeader methods below
+            pCodeHdrRW->SetRealCodeHeader((BYTE *)(pCodeHdrRW + 1) + ALIGN_UP(blockSize, sizeof(void*)));
         }
         else
         {
@@ -2625,23 +2710,32 @@ CodeHeader* EEJitManager::allocCode(MethodDesc* pMD, size_t blockSize, size_t re
             //
             // allocate the real header in the low frequency heap
             BYTE* pRealHeader = (BYTE*)(void*)pMD->GetLoaderAllocator()->GetLowFrequencyHeap()->AllocMem(S_SIZE_T(realHeaderSize));
-            pCodeHdr->SetRealCodeHeader(pRealHeader);
+            pCodeHdrRW->SetRealCodeHeader(pRealHeader);
         }
 #endif
 
-        pCodeHdr->SetDebugInfo(NULL);
-        pCodeHdr->SetEHInfo(NULL);
-        pCodeHdr->SetGCInfo(NULL);
-        pCodeHdr->SetMethodDesc(pMD);
+        pCodeHdrRW->SetDebugInfo(NULL);
+        pCodeHdrRW->SetEHInfo(NULL);
+        pCodeHdrRW->SetGCInfo(NULL);
+        pCodeHdrRW->SetMethodDesc(pMD);
 #ifdef FEATURE_EH_FUNCLETS
-        pCodeHdr->SetNumberOfUnwindInfos(nUnwindInfos);
-        *pModuleBase = (TADDR)pCodeHeap;
+        pCodeHdrRW->SetNumberOfUnwindInfos(nUnwindInfos);
 #endif
 
-        NibbleMapSet(pCodeHeap, pCode, TRUE);
+#ifdef USE_INDIRECT_CODEHEADER
+        if (requestInfo.IsDynamicDomain())
+        {
+            *ppRealHeader = (BYTE*)pCode + ALIGN_UP(blockSize, sizeof(void*));
+        }
+        else
+        {
+            *ppRealHeader = NULL;
+        }
+#endif // USE_INDIRECT_CODEHEADER
     }
 
-    RETURN(pCodeHdr);
+    *ppCodeHeader = pCodeHdr;
+    *ppCodeHeaderRW = pCodeHdrRW;
 }
 
 EEJitManager::DomainCodeHeapList *EEJitManager::GetCodeHeapList(CodeHeapRequestInfo *pInfo, LoaderAllocator *pAllocator, BOOL fDynamicOnly)
@@ -2910,13 +3004,13 @@ JumpStubBlockHeader *  EEJitManager::allocJumpStubBlock(MethodDesc* pMD, DWORD n
     requestInfo.setThrowOnOutOfMemoryWithinRange(throwOnOutOfMemoryWithinRange);
 
     TADDR                  mem;
-    JumpStubBlockHeader *  pBlock;
+    ExecutableWriterHolder<JumpStubBlockHeader> blockWriterHolder;
 
     // Scope the lock
     {
         CrstHolder ch(&m_CodeHeapCritSec);
 
-        mem = (TADDR) allocCodeRaw(&requestInfo, sizeof(TADDR), blockSize, CODE_SIZE_ALIGN, &pCodeHeap);
+        mem = (TADDR) allocCodeRaw(&requestInfo, sizeof(CodeHeader), blockSize, CODE_SIZE_ALIGN, &pCodeHeap);
         if (mem == NULL)
         {
             _ASSERTE(!throwOnOutOfMemoryWithinRange);
@@ -2925,27 +3019,28 @@ JumpStubBlockHeader *  EEJitManager::allocJumpStubBlock(MethodDesc* pMD, DWORD n
 
         // CodeHeader comes immediately before the block
         CodeHeader * pCodeHdr = (CodeHeader *) (mem - sizeof(CodeHeader));
-        pCodeHdr->SetStubCodeBlockKind(STUB_CODE_BLOCK_JUMPSTUB);
+        ExecutableWriterHolder<CodeHeader> codeHdrWriterHolder(pCodeHdr, sizeof(CodeHeader));
+        codeHdrWriterHolder.GetRW()->SetStubCodeBlockKind(STUB_CODE_BLOCK_JUMPSTUB);
 
-        NibbleMapSet(pCodeHeap, mem, TRUE);
+        NibbleMapSetUnlocked(pCodeHeap, mem, TRUE);
 
-        pBlock = (JumpStubBlockHeader *)mem;
+        blockWriterHolder = ExecutableWriterHolder<JumpStubBlockHeader>((JumpStubBlockHeader *)mem, sizeof(JumpStubBlockHeader));
 
-        _ASSERTE(IS_ALIGNED(pBlock, CODE_SIZE_ALIGN));
+        _ASSERTE(IS_ALIGNED(blockWriterHolder.GetRW(), CODE_SIZE_ALIGN));
     }
 
-    pBlock->m_next            = NULL;
-    pBlock->m_used            = 0;
-    pBlock->m_allocated       = numJumps;
+    blockWriterHolder.GetRW()->m_next            = NULL;
+    blockWriterHolder.GetRW()->m_used            = 0;
+    blockWriterHolder.GetRW()->m_allocated       = numJumps;
     if (pMD && pMD->IsLCGMethod())
-        pBlock->SetHostCodeHeap(static_cast<HostCodeHeap*>(pCodeHeap->pHeap));
+        blockWriterHolder.GetRW()->SetHostCodeHeap(static_cast<HostCodeHeap*>(pCodeHeap->pHeap));
     else
-        pBlock->SetLoaderAllocator(pLoaderAllocator);
+        blockWriterHolder.GetRW()->SetLoaderAllocator(pLoaderAllocator);
 
     LOG((LF_JIT, LL_INFO1000, "Allocated new JumpStubBlockHeader for %d stubs at" FMT_ADDR " in loader allocator " FMT_ADDR "\n",
-         numJumps, DBG_ADDR(pBlock) , DBG_ADDR(pLoaderAllocator) ));
+         numJumps, DBG_ADDR(mem) , DBG_ADDR(pLoaderAllocator) ));
 
-    RETURN(pBlock);
+    RETURN((JumpStubBlockHeader*)mem);
 }
 
 void * EEJitManager::allocCodeFragmentBlock(size_t blockSize, unsigned alignment, LoaderAllocator *pLoaderAllocator, StubCodeBlockKind kind)
@@ -2976,9 +3071,10 @@ void * EEJitManager::allocCodeFragmentBlock(size_t blockSize, unsigned alignment
 
         // CodeHeader comes immediately before the block
         CodeHeader * pCodeHdr = (CodeHeader *) (mem - sizeof(CodeHeader));
-        pCodeHdr->SetStubCodeBlockKind(kind);
+        ExecutableWriterHolder<CodeHeader> codeHdrWriterHolder(pCodeHdr, sizeof(CodeHeader));
+        codeHdrWriterHolder.GetRW()->SetStubCodeBlockKind(kind);
 
-        NibbleMapSet(pCodeHeap, (TADDR)mem, TRUE);
+        NibbleMapSetUnlocked(pCodeHeap, mem, TRUE);
 
         // Record the jump stub reservation
         pCodeHeap->reserveForJumpStubs += requestInfo.getReserveForJumpStubs();
@@ -3156,7 +3252,7 @@ void EEJitManager::RemoveJitData (CodeHeader * pCHdr, size_t GCinfo_len, size_t 
         if (pHp == NULL)
             return;
 
-        NibbleMapSet(pHp, (TADDR)(pCHdr + 1), FALSE);
+        NibbleMapSetUnlocked(pHp, (TADDR)(pCHdr + 1), FALSE);
     }
 
     // Backout the GCInfo
@@ -3253,7 +3349,7 @@ void EEJitManager::Unload(LoaderAllocator *pAllocator)
         }
     }
 
-    ResetCodeAllocHint();
+    ExecutableAllocator::ResetCodeAllocHint();
 }
 
 EEJitManager::DomainCodeHeapList::DomainCodeHeapList()
@@ -3318,7 +3414,7 @@ void EEJitManager::FreeCodeMemory(HostCodeHeap *pCodeHeap, void * codeStart)
     // so pCodeHeap can only be a HostCodeHeap.
 
     // clean up the NibbleMap
-    NibbleMapSet(pCodeHeap->m_pHeapList, (TADDR)codeStart, FALSE);
+    NibbleMapSetUnlocked(pCodeHeap->m_pHeapList, (TADDR)codeStart, FALSE);
 
     // The caller of this method doesn't call HostCodeHeap->FreeMemForCode
     // directly because the operation should be protected by m_CodeHeapCritSec.
@@ -3471,20 +3567,17 @@ void EEJitManager::DeleteCodeHeap(HeapList *pHeapList)
         pHp->SetNext(pHeapList->GetNext());
     }
 
-    DeleteEEFunctionTable((PVOID)pHeapList);
+    DeleteEEFunctionTable((PVOID)pHeapList->GetModuleBase());
 
-    ExecutionManager::DeleteRange((TADDR)pHeapList);
+    ExecutionManager::DeleteRange((TADDR)pHeapList->GetModuleBase());
 
     LOG((LF_JIT, LL_INFO100, "DeleteCodeHeap start" FMT_ADDR "end" FMT_ADDR "\n",
                               (const BYTE*)pHeapList->startAddress,
                               (const BYTE*)pHeapList->endAddress     ));
 
-    // pHeapList is allocated in pHeap, so only need to delete the CodeHeap itself
-    // !!! For SoC, compiler inserts code to write a special cookie at pHeapList->pHeap after delete operator, at least for debug code.
-    // !!! Since pHeapList is deleted at the same time as pHeap, this causes AV.
-    // delete pHeapList->pHeap;
     CodeHeap* pHeap = pHeapList->pHeap;
     delete pHeap;
+    delete pHeapList;
 }
 
 #endif // #ifndef DACCESS_COMPILE
@@ -3777,7 +3870,19 @@ TADDR EEJitManager::FindMethodCode(RangeSection * pRangeSection, PCODE currentPC
 }
 
 #if !defined(DACCESS_COMPILE)
+
 void EEJitManager::NibbleMapSet(HeapList * pHp, TADDR pCode, BOOL bSet)
+{
+    CONTRACTL {
+        NOTHROW;
+        GC_NOTRIGGER;
+    } CONTRACTL_END;
+
+    CrstHolder ch(&m_CodeHeapCritSec);
+    NibbleMapSetUnlocked(pHp, pCode, bSet);
+}
+
+void EEJitManager::NibbleMapSetUnlocked(HeapList * pHp, TADDR pCode, BOOL bSet)
 {
     CONTRACTL {
         NOTHROW;
@@ -3970,6 +4075,23 @@ void GetUnmanagedStackWalkInfo(IN  ULONG64   ControlPc,
                     else
                     {
                         _ASSERTE(pFuncEntry);
+#ifdef _TARGET_AMD64_
+                        // On amd64, match RtlLookupFunctionEntry behavior by resolving indirect function entries
+                        // back to the associated owning function entry.
+                        if ((functionEntry.UnwindData & RUNTIME_FUNCTION_INDIRECT) != 0)
+                        {
+                            DWORD dwRvaOfOwningFunctionEntry = (functionEntry.UnwindData & ~RUNTIME_FUNCTION_INDIRECT);
+                            taFuncEntry = peDecoder.GetRvaData(dwRvaOfOwningFunctionEntry);
+                            hr = DacReadAll(taFuncEntry, &functionEntry, sizeof(functionEntry), false);
+                            if (FAILED(hr))
+                            {
+                                return;
+                            }
+
+                            _ASSERTE((functionEntry.UnwindData & RUNTIME_FUNCTION_INDIRECT) == 0);
+                        }
+#endif // _TARGET_AMD64_
+
                         *pFuncEntry = (UINT_PTR)(T_RUNTIME_FUNCTION*)PTR_RUNTIME_FUNCTION(taFuncEntry);
                         break;
                     }
@@ -4340,7 +4462,17 @@ LPCWSTR ExecutionManager::GetJitName()
 {
     STANDARD_VM_CONTRACT;
 
-    return MAKEDLLNAME_W(W("clrjit"));
+    LPCWSTR  pwzJitName = NULL;
+
+    // Try to obtain a name for the jit library from the env. variable
+    IfFailThrow(CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_JitName, const_cast<LPWSTR *>(&pwzJitName)));
+    
+    if (NULL == pwzJitName)
+    {
+        pwzJitName = MAKEDLLNAME_W(W("clrjit"));
+    }
+
+    return pwzJitName;
 }
 #endif // !FEATURE_MERGE_JIT_AND_ENGINE
 
@@ -4991,9 +5123,18 @@ PCODE ExecutionManager::getNextJumpStub(MethodDesc* pMD, PCODE target,
         POSTCONDITION((RETVAL != NULL) || !throwOnOutOfMemoryWithinRange);
     } CONTRACT_END;
 
-    DWORD            numJumpStubs   = DEFAULT_JUMPSTUBS_PER_BLOCK;  // a block of 32 JumpStubs
     BYTE *           jumpStub       = NULL;
+    BYTE *           jumpStubRW     = NULL;
     bool             isLCG          = pMD && pMD->IsLCGMethod();
+    // For LCG we request a small block of 4 jumpstubs, because we can not share them
+    // with any other methods and very frequently our method only needs one jump stub.
+    // Using 4 gives a request size of (32 + 4*12) or 80 bytes.
+    // Also note that request sizes are rounded up to a multiples of 16.
+    // The request size is calculated into 'blockSize' in allocJumpStubBlock.
+    // For x64 the value of BACK_TO_BACK_JUMP_ALLOCATE_SIZE is 12 bytes
+    // and the sizeof(JumpStubBlockHeader) is 32.
+    //
+    DWORD            numJumpStubs   = isLCG ? 4 : DEFAULT_JUMPSTUBS_PER_BLOCK;
     JumpStubCache *  pJumpStubCache = (JumpStubCache *) pLoaderAllocator->m_pJumpStubCache;
 
     if (isLCG)
@@ -5005,6 +5146,7 @@ PCODE ExecutionManager::getNextJumpStub(MethodDesc* pMD, PCODE target,
 
     JumpStubBlockHeader ** ppHead   = &(pJumpStubCache->m_pBlocks);
     JumpStubBlockHeader *  curBlock = *ppHead;
+    ExecutableWriterHolder<JumpStubBlockHeader> curBlockWriterHolder;
 
     // allocate a new jumpstub from 'curBlock' if it is not fully allocated
     //
@@ -5019,6 +5161,9 @@ PCODE ExecutionManager::getNextJumpStub(MethodDesc* pMD, PCODE target,
             if ((loAddr <= jumpStub) && (jumpStub <= hiAddr))
             {
                 // We will update curBlock->m_used at "DONE"
+                size_t blockSize = sizeof(JumpStubBlockHeader) + (size_t) numJumpStubs * BACK_TO_BACK_JUMP_ALLOCATE_SIZE;
+                curBlockWriterHolder = ExecutableWriterHolder<JumpStubBlockHeader>(curBlock, blockSize);
+                jumpStubRW = (BYTE *)((TADDR)jumpStub + (TADDR)curBlockWriterHolder.GetRW() - (TADDR)curBlock);
                 goto DONE;
             }
         }
@@ -5029,17 +5174,6 @@ PCODE ExecutionManager::getNextJumpStub(MethodDesc* pMD, PCODE target,
 
     if (isLCG)
     {
-        // For LCG we request a small block of 4 jumpstubs, because we can not share them
-        // with any other methods and very frequently our method only needs one jump stub.
-        // Using 4 gives a request size of (32 + 4*12) or 80 bytes.
-        // Also note that request sizes are rounded up to a multiples of 16.
-        // The request size is calculated into 'blockSize' in allocJumpStubBlock.
-        // For x64 the value of BACK_TO_BACK_JUMP_ALLOCATE_SIZE is 12 bytes
-        // and the sizeof(JumpStubBlockHeader) is 32.
-        //
-
-        numJumpStubs = 4;
-
 #ifdef TARGET_AMD64
         // Note this these values are not requirements, instead we are
         // just confirming the values that are mentioned in the comments.
@@ -5068,11 +5202,14 @@ PCODE ExecutionManager::getNextJumpStub(MethodDesc* pMD, PCODE target,
         RETURN(NULL);
     }
 
+    curBlockWriterHolder = ExecutableWriterHolder<JumpStubBlockHeader>(curBlock, sizeof(JumpStubBlockHeader) + ((size_t) (curBlock->m_used + 1) * BACK_TO_BACK_JUMP_ALLOCATE_SIZE));
+
+    jumpStubRW = (BYTE *) curBlockWriterHolder.GetRW() + sizeof(JumpStubBlockHeader) + ((size_t) curBlock->m_used * BACK_TO_BACK_JUMP_ALLOCATE_SIZE);
     jumpStub = (BYTE *) curBlock + sizeof(JumpStubBlockHeader) + ((size_t) curBlock->m_used * BACK_TO_BACK_JUMP_ALLOCATE_SIZE);
 
     _ASSERTE((loAddr <= jumpStub) && (jumpStub <= hiAddr));
 
-    curBlock->m_next = *ppHead;
+    curBlockWriterHolder.GetRW()->m_next = *ppHead;
     *ppHead = curBlock;
 
 DONE:
@@ -5084,7 +5221,7 @@ DONE:
     _ASSERTE(((UINT_PTR)jumpStub & 7) == 0);
 #endif
 
-    emitBackToBackJump(jumpStub, (void*) target);
+    emitBackToBackJump(jumpStub, jumpStubRW, (void*) target);
 
 #ifdef FEATURE_PERFMAP
     PerfMap::LogStubs(__FUNCTION__, "emitBackToBackJump", (PCODE)jumpStub, BACK_TO_BACK_JUMP_ALLOCATE_SIZE);
@@ -5101,7 +5238,7 @@ DONE:
 
     pJumpStubCache->m_Table.Add(entry);
 
-    curBlock->m_used++;    // record that we have used up one more jumpStub in the block
+    curBlockWriterHolder.GetRW()->m_used++;    // record that we have used up one more jumpStub in the block
 
     // Every time we create a new jumpStub thunk one of these counters is incremented
     if (isLCG)

@@ -3,7 +3,10 @@
 
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
 using Internal.Runtime.CompilerServices;
 
 namespace System.Runtime.CompilerServices
@@ -39,12 +42,17 @@ namespace System.Runtime.CompilerServices
         // This call will generate an exception if the specified class constructor threw an
         // exception when it ran.
 
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        private static extern void _RunClassConstructor(RuntimeType type);
+        [DllImport(RuntimeHelpers.QCall, CharSet = CharSet.Unicode)]
+        private static extern void RunClassConstructor(QCallTypeHandle type);
 
+        [RequiresUnreferencedCode("Trimmer can't guarantee existence of class constructor")]
         public static void RunClassConstructor(RuntimeTypeHandle type)
         {
-            _RunClassConstructor(type.GetRuntimeType());
+            RuntimeType rt = type.GetRuntimeType();
+            if (rt is null)
+                throw new ArgumentException(SR.InvalidOperation_HandleIsNotInitialized, nameof(type));
+
+            RunClassConstructor(new QCallTypeHandle(ref rt));
         }
 
         // RunModuleConstructor causes the module constructor for the given type to be triggered
@@ -55,39 +63,41 @@ namespace System.Runtime.CompilerServices
         // This call will generate an exception if the specified module constructor threw an
         // exception when it ran.
 
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        private static extern void _RunModuleConstructor(System.Reflection.RuntimeModule module);
+        [DllImport(RuntimeHelpers.QCall, CharSet = CharSet.Unicode)]
+        private static extern void RunModuleConstructor(QCallModule module);
 
         public static void RunModuleConstructor(ModuleHandle module)
         {
-            _RunModuleConstructor(module.GetRuntimeModule());
-        }
+            RuntimeModule rm = module.GetRuntimeModule();
+            if (rm is null)
+                throw new ArgumentException(SR.InvalidOperation_HandleIsNotInitialized, nameof(module));
 
+            RunModuleConstructor(new QCallModule(ref rm));
+        }
 
         [DllImport(RuntimeHelpers.QCall, CharSet = CharSet.Unicode)]
-        internal static extern void _CompileMethod(RuntimeMethodHandleInternal method);
+        internal static extern void CompileMethod(RuntimeMethodHandleInternal method);
 
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        private static extern unsafe void _PrepareMethod(IRuntimeMethodInfo method, IntPtr* pInstantiation, int cInstantiation);
+        [DllImport(RuntimeHelpers.QCall, CharSet = CharSet.Unicode)]
+        private static extern unsafe void PrepareMethod(RuntimeMethodHandleInternal method, IntPtr* pInstantiation, int cInstantiation);
 
-        public static void PrepareMethod(RuntimeMethodHandle method)
+        public static void PrepareMethod(RuntimeMethodHandle method) => PrepareMethod(method, null);
+
+        public static unsafe void PrepareMethod(RuntimeMethodHandle method, RuntimeTypeHandle[]? instantiation)
         {
-            unsafe
-            {
-                _PrepareMethod(method.GetMethodInfo(), null, 0);
-            }
-        }
+            IRuntimeMethodInfo methodInfo = method.GetMethodInfo();
+            if (methodInfo == null)
+                throw new ArgumentException(SR.InvalidOperation_HandleIsNotInitialized, nameof(method));
 
-        public static void PrepareMethod(RuntimeMethodHandle method, RuntimeTypeHandle[]? instantiation)
-        {
-            unsafe
+            // defensive copy of user-provided array, per CopyRuntimeTypeHandles contract
+            instantiation = (RuntimeTypeHandle[]?)instantiation?.Clone();
+
+            IntPtr[]? instantiationHandles = RuntimeTypeHandle.CopyRuntimeTypeHandles(instantiation, out int length);
+            fixed (IntPtr* pInstantiation = instantiationHandles)
             {
-                IntPtr[]? instantiationHandles = RuntimeTypeHandle.CopyRuntimeTypeHandles(instantiation, out int length);
-                fixed (IntPtr* pInstantiation = instantiationHandles)
-                {
-                    _PrepareMethod(method.GetMethodInfo(), pInstantiation, length);
-                    GC.KeepAlive(instantiation);
-                }
+                PrepareMethod(methodInfo.Value, pInstantiation, length);
+                GC.KeepAlive(instantiation);
+                GC.KeepAlive(methodInfo);
             }
         }
 
@@ -123,27 +133,42 @@ namespace System.Runtime.CompilerServices
 
         // This method ensures that there is sufficient stack to execute the average Framework function.
         // If there is not enough stack, then it throws System.InsufficientExecutionStackException.
-        // Note: this method is not part of the CER support, and is not to be confused with ProbeForSufficientStack
-        // below.
+        // Note: this method is not part of the CER support, and is not to be confused with ProbeForSufficientStack.
         [MethodImpl(MethodImplOptions.InternalCall)]
         public static extern void EnsureSufficientExecutionStack();
 
         // This method ensures that there is sufficient stack to execute the average Framework function.
         // If there is not enough stack, then it return false.
-        // Note: this method is not part of the CER support, and is not to be confused with ProbeForSufficientStack
-        // below.
+        // Note: this method is not part of the CER support, and is not to be confused with ProbeForSufficientStack.
         [MethodImpl(MethodImplOptions.InternalCall)]
         public static extern bool TryEnsureSufficientExecutionStack();
 
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        private static extern object GetUninitializedObjectInternal(
+        public static object GetUninitializedObject(
             // This API doesn't call any constructors, but the type needs to be seen as constructed.
             // A type is seen as constructed if a constructor is kept.
             // This obviously won't cover a type with no constructor. Reference types with no
             // constructor are an academic problem. Valuetypes with no constructors are a problem,
             // but IL Linker currently treats them as always implicitly boxed.
             [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.NonPublicConstructors)]
-            Type type);
+            Type type)
+        {
+            if (type is not RuntimeType rt)
+            {
+                if (type is null)
+                {
+                    throw new ArgumentNullException(nameof(type), SR.ArgumentNull_Type);
+                }
+
+                throw new SerializationException(SR.Format(SR.Serialization_InvalidType, type));
+            }
+
+            object? obj = null;
+            GetUninitializedObject(new QCallTypeHandle(ref rt), ObjectHandleOnStack.Create(ref obj));
+            return obj!;
+        }
+
+        [DllImport(RuntimeHelpers.QCall)]
+        private static extern void GetUninitializedObject(QCallTypeHandle type, ObjectHandleOnStack retObject);
 
         [MethodImpl(MethodImplOptions.InternalCall)]
         internal static extern object AllocateUninitializedClone(object obj);
@@ -202,11 +227,6 @@ namespace System.Runtime.CompilerServices
 
             return rawSize;
         }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static unsafe ref byte GetRawArrayData(this Array array) =>
-            // See comment on RawArrayData for details
-            ref Unsafe.AddByteOffset(ref Unsafe.As<RawData>(array).Data, (nuint)GetMethodTable(array)->BaseSize - (nuint)(2 * sizeof(IntPtr)));
 
         internal static unsafe ushort GetElementSize(this Array array)
         {
@@ -277,21 +297,22 @@ namespace System.Runtime.CompilerServices
             if (size < 0)
                 throw new ArgumentOutOfRangeException(nameof(size));
 
-            return AllocateTypeAssociatedMemoryInternal(new QCallTypeHandle(ref rt), (uint)size);
+            return AllocateTypeAssociatedMemory(new QCallTypeHandle(ref rt), (uint)size);
         }
 
         [DllImport(RuntimeHelpers.QCall)]
-        private static extern IntPtr AllocateTypeAssociatedMemoryInternal(QCallTypeHandle type, uint size);
+        private static extern IntPtr AllocateTypeAssociatedMemory(QCallTypeHandle type, uint size);
 
         [MethodImpl(MethodImplOptions.InternalCall)]
         private static extern IntPtr AllocTailCallArgBuffer(int size, IntPtr gcDesc);
 
         [MethodImpl(MethodImplOptions.InternalCall)]
-        private static unsafe extern TailCallTls* GetTailCallInfo(IntPtr retAddrSlot, IntPtr* retAddr);
+        private static extern unsafe TailCallTls* GetTailCallInfo(IntPtr retAddrSlot, IntPtr* retAddr);
 
+        [StackTraceHidden]
         private static unsafe void DispatchTailCalls(
             IntPtr callersRetAddrSlot,
-            delegate*<IntPtr, IntPtr, IntPtr*, void> callTarget,
+            delegate*<IntPtr, IntPtr, PortableTailCallFrame*, void> callTarget,
             IntPtr retVal)
         {
             IntPtr callersRetAddr;
@@ -304,7 +325,9 @@ namespace System.Runtime.CompilerServices
             }
 
             PortableTailCallFrame newFrame;
-            newFrame.Prev = prevFrame;
+            // GC uses NextCall to keep LoaderAllocator alive after we link it below,
+            // so we must null it out before that.
+            newFrame.NextCall = null;
 
             try
             {
@@ -312,8 +335,7 @@ namespace System.Runtime.CompilerServices
 
                 do
                 {
-                    newFrame.NextCall = null;
-                    callTarget(tls->ArgBuffer, retVal, &newFrame.TailCallAwareReturnAddress);
+                    callTarget(tls->ArgBuffer, retVal, &newFrame);
                     callTarget = newFrame.NextCall;
                 } while (callTarget != null);
             }
@@ -328,16 +350,10 @@ namespace System.Runtime.CompilerServices
                 }
             }
         }
-
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern long GetILBytesJitted();
-
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern int GetMethodsJittedCount();
     }
     // Helper class to assist with unsafe pinning of arbitrary objects.
     // It's used by VM code.
-    internal class RawData
+    internal sealed class RawData
     {
         public byte Data;
     }
@@ -350,7 +366,7 @@ namespace System.Runtime.CompilerServices
     // The BaseSize of an array includes all the fields before the array data,
     // including the sync block and method table. The reference to RawData.Data
     // points at the number of components, skipping over these two pointer-sized fields.
-    internal class RawArrayData
+    internal sealed class RawArrayData
     {
         public uint Length; // Array._numComponents padded to IntPtr
 #if TARGET_64BIT
@@ -381,12 +397,13 @@ namespace System.Runtime.CompilerServices
         // WFLAGS_HIGH_ENUM
         private const uint enum_flag_ContainsPointers = 0x01000000;
         private const uint enum_flag_HasComponentSize = 0x80000000;
-        private const uint enum_flag_HasTypeEquivalence = 0x00004000;
+        private const uint enum_flag_HasTypeEquivalence = 0x02000000;
         // Types that require non-trivial interface cast have this bit set in the category
         private const uint enum_flag_NonTrivialInterfaceCast = 0x00080000 // enum_flag_Category_Array
                                                              | 0x40000000 // enum_flag_ComObject
                                                              | 0x00400000 // enum_flag_ICastable;
-                                                             | 0x00200000;// enum_flag_IDynamicInterfaceCastable;
+                                                             | 0x00200000 // enum_flag_IDynamicInterfaceCastable;
+                                                             | 0x00040000; // enum_flag_Category_ValueType
 
         private const int DebugClassNamePtr = // adjust for debug_m_szClassName
 #if DEBUG
@@ -474,9 +491,8 @@ namespace System.Runtime.CompilerServices
     [StructLayout(LayoutKind.Sequential)]
     internal unsafe struct PortableTailCallFrame
     {
-        public PortableTailCallFrame* Prev;
         public IntPtr TailCallAwareReturnAddress;
-        public delegate*<IntPtr, IntPtr, IntPtr*, void> NextCall;
+        public delegate*<IntPtr, IntPtr, PortableTailCallFrame*, void> NextCall;
     }
 
     [StructLayout(LayoutKind.Sequential)]

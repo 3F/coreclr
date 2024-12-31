@@ -256,10 +256,12 @@ BOOL ReadyToRunInfo::GetEnclosingToken(IMDInternalImport * pImport, mdToken mdTy
     case mdtTypeRef:
         if (SUCCEEDED(pImport->GetResolutionScopeOfTypeRef(mdType, pEnclosingToken)))
             return ((TypeFromToken(*pEnclosingToken) == mdtTypeRef) && (*pEnclosingToken != mdTypeRefNil));
+        break;
 
     case mdtExportedType:
         if (SUCCEEDED(pImport->GetExportedTypeProps(mdType, NULL, NULL, pEnclosingToken, NULL, NULL)))
             return ((TypeFromToken(*pEnclosingToken) == mdtExportedType) && (*pEnclosingToken != mdExportedTypeNil));
+        break;
     }
 
     return FALSE;
@@ -600,7 +602,7 @@ PTR_ReadyToRunInfo ReadyToRunInfo::Initialize(Module * pModule, AllocMemTracker 
     {
         if (!AcquireImage(pModule, pLayout, pHeader))
         {
-            DoLog("Ready to Run disabled - module already loaded in another AppDomain");
+            DoLog("Ready to Run disabled - module already loaded in another assembly load context");
             return NULL;
         }
     }
@@ -610,7 +612,7 @@ PTR_ReadyToRunInfo ReadyToRunInfo::Initialize(Module * pModule, AllocMemTracker 
 
     DoLog("Ready to Run initialized successfully");
 
-    return new (pMemory) ReadyToRunInfo(pModule, pLayout, pHeader, nativeImage, pamTracker);
+    return new (pMemory) ReadyToRunInfo(pModule, pModule->GetLoaderAllocator(), pLayout, pHeader, nativeImage, pamTracker);
 }
 
 bool ReadyToRunInfo::IsNativeImageSharedBy(PTR_Module pModule1, PTR_Module pModule2)
@@ -618,7 +620,7 @@ bool ReadyToRunInfo::IsNativeImageSharedBy(PTR_Module pModule1, PTR_Module pModu
     return pModule1->GetReadyToRunInfo()->m_pComposite == pModule2->GetReadyToRunInfo()->m_pComposite;
 }
 
-ReadyToRunInfo::ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader, NativeImage *pNativeImage, AllocMemTracker *pamTracker)
+ReadyToRunInfo::ReadyToRunInfo(Module * pModule, LoaderAllocator* pLoaderAllocator, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader, NativeImage *pNativeImage, AllocMemTracker *pamTracker)
     : m_pModule(pModule),
     m_pHeader(pHeader),
     m_pNativeImage(pNativeImage),
@@ -633,16 +635,7 @@ ReadyToRunInfo::ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYT
         // In multi-assembly composite images, per assembly sections are stored next to their core headers.
         m_pCompositeInfo = pNativeImage->GetReadyToRunInfo();
         m_pComposite = m_pCompositeInfo->GetComponentInfo();
-        if (pNativeImage->GetComponentAssemblyCount() == 1)
-        {
-            // When there's just 1 component assembly in the composite image, we're skipping the
-            // assembly headers and store all sections directly in the main R2R header.
-            m_component = *m_pComposite;
-        }
-        else
-        {
-            m_component = ReadyToRunCoreInfo(m_pComposite->GetLayout(), pNativeImage->GetComponentAssemblyHeader(pModule->GetSimpleName()));
-        }
+        m_component = ReadyToRunCoreInfo(m_pComposite->GetLayout(), pNativeImage->GetComponentAssemblyHeader(pModule->GetSimpleName()));
         m_isComponentAssembly = true;
     }
     else
@@ -698,6 +691,22 @@ ReadyToRunInfo::ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYT
         NativeParser parser = NativeParser(&m_nativeReader, pAvailableTypesDir->VirtualAddress);
         m_availableTypesHashtable = NativeHashtable(parser);
     }
+
+    // For format version 5.2 and later, there is an optional table of instrumentation data
+#ifdef FEATURE_PGO
+    if (IsImageVersionAtLeast(5, 2))
+    {
+        IMAGE_DATA_DIRECTORY * pPgoInstrumentationDataDir = m_pComposite->FindSection(ReadyToRunSectionType::PgoInstrumentationData);
+        if (pPgoInstrumentationDataDir)
+        {
+            NativeParser parser = NativeParser(&m_nativeReader, pPgoInstrumentationDataDir->VirtualAddress);
+            m_pgoInstrumentationDataHashtable = NativeHashtable(parser);
+        }
+
+        // Force the Pgo manager infrastructure to be initialized
+        pLoaderAllocator->GetOrCreatePgoManager();
+    }
+#endif
 
     if (!m_isComponentAssembly)
     {
@@ -766,13 +775,13 @@ static bool SigMatchesMethodDesc(MethodDesc* pMD, SigPointer &sig, Module * pMod
     ZapSig::Context    zapSigContext(pModule, (void *)pModule, ZapSig::NormalTokens);
     ZapSig::Context *  pZapSigContext = &zapSigContext;
 
-    DWORD methodFlags;
+    uint32_t methodFlags;
     IfFailThrow(sig.GetData(&methodFlags));
 
     if (methodFlags & ENCODE_METHOD_SIG_OwnerType)
     {
         PCCOR_SIGNATURE pSigType;
-        DWORD cbSigType;
+        uint32_t cbSigType;
         sig.GetSignature(&pSigType, &cbSigType);
         if (!ZapSig::CompareSignatureToTypeHandle(pSigType, pModule, TypeHandle(pMD->GetMethodTable()), pZapSigContext))
             return false;
@@ -790,16 +799,16 @@ static bool SigMatchesMethodDesc(MethodDesc* pMD, SigPointer &sig, Module * pMod
 
     if (methodFlags & ENCODE_METHOD_SIG_MethodInstantiation)
     {
-        DWORD numGenericArgs;
+        uint32_t numGenericArgs;
         IfFailThrow(sig.GetData(&numGenericArgs));
         Instantiation inst = pMD->GetMethodInstantiation();
         if (numGenericArgs != inst.GetNumArgs())
             return false;
 
-        for (DWORD i = 0; i < numGenericArgs; i++)
+        for (uint32_t i = 0; i < numGenericArgs; i++)
         {
             PCCOR_SIGNATURE pSigArg;
-            DWORD cbSigArg;
+            uint32_t cbSigArg;
             sig.GetSignature(&pSigArg, &cbSigArg);
             if (!ZapSig::CompareSignatureToTypeHandle(pSigArg, pModule, inst[i], pZapSigContext))
                 return false;
@@ -810,6 +819,77 @@ static bool SigMatchesMethodDesc(MethodDesc* pMD, SigPointer &sig, Module * pMod
 
     return true;
 }
+
+#ifndef CROSSGEN_COMPILE
+bool ReadyToRunInfo::GetPgoInstrumentationData(MethodDesc * pMD, BYTE** pAllocatedMemory, ICorJitInfo::PgoInstrumentationSchema**ppSchema, UINT *pcSchema, BYTE** pInstrumentationData)
+{
+    STANDARD_VM_CONTRACT;
+
+    PCODE pEntryPoint = NULL;
+#ifndef CROSSGEN_COMPILE
+#ifdef PROFILING_SUPPORTED
+    BOOL fShouldSearchCache = TRUE;
+#endif // PROFILING_SUPPORTED
+#endif // CROSSGEN_COMPILE
+    mdToken token = pMD->GetMemberDef();
+    int rid = RidFromToken(token);
+    if (rid == 0)
+        return false;
+
+    // If R2R code is disabled for this module, simply behave as if it is never found
+    if (ReadyToRunCodeDisabled())
+        return false;
+
+    if (m_pgoInstrumentationDataHashtable.IsNull())
+        return false;
+
+    NativeHashtable::Enumerator lookup = m_pgoInstrumentationDataHashtable.Lookup(GetVersionResilientMethodHashCode(pMD));
+    NativeParser entryParser;
+    while (lookup.GetNext(entryParser))
+    {
+        PCCOR_SIGNATURE pBlob = (PCCOR_SIGNATURE)entryParser.GetBlob();
+        SigPointer sig(pBlob);
+        if (SigMatchesMethodDesc(pMD, sig, m_pModule))
+        {
+            // Get the updated SigPointer location, so we can calculate the size of the blob,
+            // in order to skip the blob and find the entry point data.
+            entryParser = NativeParser(entryParser.GetNativeReader(), entryParser.GetOffset() + (uint)(sig.GetPtr() - pBlob));
+            uint32_t versionAndFlags = entryParser.GetUnsigned();
+            const uint32_t flagsMask = 0x3;
+            const uint32_t versionShift = 2;
+            uint32_t flags = versionAndFlags & flagsMask;
+            uint32_t version = versionAndFlags >> versionShift;
+
+            // Only version 0 is supported
+            if (version != 0)
+                return false;
+
+            uint offset = entryParser.GetOffset();
+
+            if (flags == 1)
+            {
+                // Offset is correct already
+            }
+            else if (flags == 3)
+            {
+                // Adjust offset as relative pointer
+                uint32_t val;
+                m_nativeReader.DecodeUnsigned(offset, &val);
+                offset -= val;
+            }
+
+            BYTE* instrumentationDataPtr = ((BYTE*)GetImage()->GetBase()) + offset;
+            IMAGE_DATA_DIRECTORY * pPgoInstrumentationDataDir = m_pComposite->FindSection(ReadyToRunSectionType::PgoInstrumentationData);
+            size_t maxSize = offset - pPgoInstrumentationDataDir->VirtualAddress + pPgoInstrumentationDataDir->Size;
+
+            return SUCCEEDED(PgoManager::getPgoInstrumentationResultsFromR2RFormat(this, m_pModule, m_pModule->GetNativeOrReadyToRunImage(), instrumentationDataPtr, maxSize, pAllocatedMemory, ppSchema, pcSchema, pInstrumentationData));
+        }
+    }
+
+    return false;
+}
+#endif // !CROSSGEN_COMPILE
+
 
 PCODE ReadyToRunInfo::GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig, BOOL fFixups)
 {
@@ -827,7 +907,7 @@ PCODE ReadyToRunInfo::GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig
         goto done;
 
     // If R2R code is disabled for this module, simply behave as if it is never found
-    if (m_readyToRunCodeDisabled)
+    if (ReadyToRunCodeDisabled())
         goto done;
 
     ETW::MethodLog::GetR2RGetEntryPointStart(pMD);
@@ -866,12 +946,17 @@ PCODE ReadyToRunInfo::GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig
 #ifndef CROSSGEN_COMPILE
 #ifdef PROFILING_SUPPORTED
         {
-            BEGIN_PIN_PROFILER(CORProfilerTrackCacheSearches());
-            g_profControlBlock.pProfInterface->
+            BEGIN_PROFILER_CALLBACK(CORProfilerTrackCacheSearches());
+            (&g_profControlBlock)->
                 JITCachedFunctionSearchStarted((FunctionID)pMD, &fShouldSearchCache);
-            END_PIN_PROFILER();
+            END_PROFILER_CALLBACK();
         }
         if (!fShouldSearchCache)
+        {
+            pConfig->SetProfilerRejectedPrecompiledCode();
+            goto done;
+        }
+        if (CORProfilerTrackTransitions() && pMD->HasUnmanagedCallersOnlyAttribute())
         {
             pConfig->SetProfilerRejectedPrecompiledCode();
             goto done;
@@ -893,7 +978,12 @@ PCODE ReadyToRunInfo::GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig
 
         if (fFixups)
         {
-            if (!m_pModule->FixupDelayList(dac_cast<TADDR>(GetImage()->GetBase()) + offset))
+            BOOL mayUsePrecompiledNDirectMethods = TRUE;
+#ifndef CROSSGEN_COMPILE
+            mayUsePrecompiledNDirectMethods = !pConfig->IsForMulticoreJit();
+#endif // CROSSGEN_COMPILE
+
+            if (!m_pModule->FixupDelayList(dac_cast<TADDR>(GetImage()->GetBase()) + offset, mayUsePrecompiledNDirectMethods))
             {
 #ifndef CROSSGEN_COMPILE
                 pConfig->SetReadyToRunRejectedPrecompiledCode();
@@ -916,10 +1006,10 @@ PCODE ReadyToRunInfo::GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig
 #ifndef CROSSGEN_COMPILE
 #ifdef PROFILING_SUPPORTED
         {
-            BEGIN_PIN_PROFILER(CORProfilerTrackCacheSearches());
-            g_profControlBlock.pProfInterface->
+            BEGIN_PROFILER_CALLBACK(CORProfilerTrackCacheSearches());
+            (&g_profControlBlock)->
                 JITCachedFunctionSearchFinished((FunctionID)pMD, COR_PRF_CACHED_FUNCTION_FOUND);
-            END_PIN_PROFILER();
+            END_PROFILER_CALLBACK();
         }
 #endif // PROFILING_SUPPORTED
 #endif // CROSSGEN_COMPILE
@@ -952,7 +1042,7 @@ void ReadyToRunInfo::MethodIterator::ParseGenericMethodSignatureAndRid(uint *pOf
     PCCOR_SIGNATURE pBlob = (PCCOR_SIGNATURE)m_genericParser.GetBlob();
     SigPointer sig(pBlob);
 
-    DWORD methodFlags = 0;
+    uint32_t methodFlags = 0;
     // Skip the signature so we can get to the offset
     hr = sig.GetData(&methodFlags);
     if (FAILED(hr))
@@ -980,7 +1070,7 @@ void ReadyToRunInfo::MethodIterator::ParseGenericMethodSignatureAndRid(uint *pOf
 
     if (methodFlags & ENCODE_METHOD_SIG_MethodInstantiation)
     {
-        DWORD numGenericArgs;
+        uint32_t numGenericArgs;
         hr = sig.GetData(&numGenericArgs);
         if (FAILED(hr))
         {
@@ -999,7 +1089,7 @@ void ReadyToRunInfo::MethodIterator::ParseGenericMethodSignatureAndRid(uint *pOf
 
     // Now that we have the size of the signature we can grab the offset and decode it
     PCCOR_SIGNATURE pSigNew;
-    DWORD cbSigNew;
+    uint32_t cbSigNew;
     sig.GetSignature(&pSigNew, &cbSigNew);
 
     m_genericCurrentSig = pBlob;
@@ -1016,7 +1106,7 @@ BOOL ReadyToRunInfo::MethodIterator::Next()
     }
     CONTRACTL_END;
 
-    if (m_pInfo->m_readyToRunCodeDisabled)
+    if (m_pInfo->ReadyToRunCodeDisabled())
         return FALSE;
 
     // Enumerate non-generic methods

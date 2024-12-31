@@ -8,7 +8,7 @@ using System.Diagnostics;
 
 namespace System.Reflection.Emit
 {
-    internal class DynamicILGenerator : ILGenerator
+    internal sealed class DynamicILGenerator : ILGenerator
     {
         internal DynamicScope m_scope;
         private int m_methodSigToken;
@@ -406,15 +406,6 @@ namespace System.Reflection.Emit
             throw new NotSupportedException(SR.InvalidOperation_NotAllowedInDynamicMethod);
         }
 
-        public override void MarkSequencePoint(ISymbolDocumentWriter document,
-                                               int startLine,
-                                               int startColumn,
-                                               int endLine,
-                                               int endColumn)
-        {
-            throw new NotSupportedException(SR.InvalidOperation_NotAllowedInDynamicMethod);
-        }
-
         public override void BeginScope()
         {
             throw new NotSupportedException(SR.InvalidOperation_NotAllowedInDynamicMethod);
@@ -428,6 +419,8 @@ namespace System.Reflection.Emit
         private int GetMemberRefToken(MethodBase methodInfo, Type[]? optionalParameterTypes)
         {
             Type[]? parameterTypes;
+            Type[][]? requiredCustomModifiers;
+            Type[][]? optionalCustomModifiers;
 
             if (optionalParameterTypes != null && (methodInfo.CallingConvention & CallingConventions.VarArgs) == 0)
                 throw new InvalidOperationException(SR.InvalidOperation_NotAVarArgCallingConvention);
@@ -442,17 +435,28 @@ namespace System.Reflection.Emit
             if (paramInfo != null && paramInfo.Length != 0)
             {
                 parameterTypes = new Type[paramInfo.Length];
+                requiredCustomModifiers = new Type[parameterTypes.Length][];
+                optionalCustomModifiers = new Type[parameterTypes.Length][];
+
                 for (int i = 0; i < paramInfo.Length; i++)
+                {
                     parameterTypes[i] = paramInfo[i].ParameterType;
+                    requiredCustomModifiers[i] = paramInfo[i].GetRequiredCustomModifiers();
+                    optionalCustomModifiers[i] = paramInfo[i].GetOptionalCustomModifiers();
+                }
             }
             else
             {
                 parameterTypes = null;
+                requiredCustomModifiers = null;
+                optionalCustomModifiers = null;
             }
 
             SignatureHelper sig = GetMemberRefSignature(methodInfo.CallingConvention,
                                                      MethodBuilder.GetMethodBaseReturnType(methodInfo),
                                                      parameterTypes,
+                                                     requiredCustomModifiers,
+                                                     optionalCustomModifiers,
                                                      optionalParameterTypes);
 
             if (rtMeth != null)
@@ -465,20 +469,16 @@ namespace System.Reflection.Emit
                                                 CallingConventions call,
                                                 Type? returnType,
                                                 Type[]? parameterTypes,
+                                                Type[][]? requiredCustomModifiers,
+                                                Type[][]? optionalCustomModifiers,
                                                 Type[]? optionalParameterTypes)
         {
-            SignatureHelper sig = SignatureHelper.GetMethodSigHelper(call, returnType);
-            if (parameterTypes != null)
-            {
-                foreach (Type t in parameterTypes)
-                    sig.AddArgument(t);
-            }
+            SignatureHelper sig = SignatureHelper.GetMethodSigHelper(null, call, returnType, null, null, parameterTypes, requiredCustomModifiers, optionalCustomModifiers);
+
             if (optionalParameterTypes != null && optionalParameterTypes.Length != 0)
             {
-                // add the sentinel
                 sig.AddSentinel();
-                foreach (Type t in optionalParameterTypes)
-                    sig.AddArgument(t);
+                sig.AddArguments(optionalParameterTypes, null, null);
             }
             return sig;
         }
@@ -554,7 +554,7 @@ namespace System.Reflection.Emit
 
     }
 
-    internal class DynamicResolver : Resolver
+    internal sealed class DynamicResolver : Resolver
     {
         #region Private Data Members
         private __ExceptionInfo[]? m_exceptions;
@@ -634,7 +634,7 @@ namespace System.Reflection.Emit
             scout.m_methodHandle = method.m_methodHandle.Value;
         }
 
-        private class DestroyScout
+        private sealed class DestroyScout
         {
             internal RuntimeMethodHandleInternal m_methodHandle;
 
@@ -973,7 +973,7 @@ namespace System.Reflection.Emit
         #endregion
     }
 
-    internal class DynamicScope
+    internal sealed class DynamicScope
     {
         #region Private Data Members
         internal readonly List<object?> m_tokens = new List<object?> { null };

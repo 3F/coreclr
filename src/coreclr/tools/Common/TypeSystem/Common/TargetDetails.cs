@@ -7,19 +7,6 @@ using Debug = System.Diagnostics.Debug;
 namespace Internal.TypeSystem
 {
     /// <summary>
-    /// Specifies the target CPU architecture.
-    /// </summary>
-    public enum TargetArchitecture
-    {
-        Unknown,
-        ARM,
-        ARM64,
-        X64,
-        X86,
-        Wasm32,
-    }
-
-    /// <summary>
     /// Specifies the target ABI.
     /// </summary>
     public enum TargetOS
@@ -41,6 +28,10 @@ namespace Internal.TypeSystem
         /// Cross-platform console model
         /// </summary>
         CoreRT,
+        /// <summary>
+        /// model for armel execution model
+        /// </summary>
+        CoreRTArmel,
         /// <summary>
         /// Jit runtime ABI
         /// </summary>
@@ -274,7 +265,8 @@ namespace Internal.TypeSystem
             switch (Architecture)
             {
                 case TargetArchitecture.ARM:
-                    // ARM supports two alignments for objects on the GC heap (4 byte and 8 byte)
+                case TargetArchitecture.Wasm32:
+                    // ARM & Wasm32 support two alignments for objects on the GC heap (4 byte and 8 byte)
                     if (fieldAlignment.IsIndeterminate)
                         return LayoutInt.Indeterminate;
 
@@ -286,7 +278,6 @@ namespace Internal.TypeSystem
                 case TargetArchitecture.ARM64:
                     return new LayoutInt(8);
                 case TargetArchitecture.X86:
-                case TargetArchitecture.Wasm32:
                     return new LayoutInt(4);
                 default:
                     throw new NotSupportedException();
@@ -331,6 +322,21 @@ namespace Internal.TypeSystem
                     Architecture == TargetArchitecture.X86);
 
                 return 4;
+            }
+        }
+
+        public int MaximumAutoLayoutPackingSize
+        {
+            get
+            {
+                if (Abi == TargetAbi.CoreRT)
+                {
+                    if (Architecture == TargetArchitecture.X86)
+                    {
+                        return PointerSize;
+                    }
+                }
+                return MaximumAlignment;
             }
         }
     }

@@ -23,11 +23,11 @@ namespace System.Reflection.Emit
 
             m_methodBuilder.GetMethodSignature().InternalGetSignature(out _);
 
-            m_methodBuilder.GetToken();
+            int dummy = m_methodBuilder.MetadataToken;
         }
 
         internal ConstructorBuilder(string name, MethodAttributes attributes, CallingConventions callingConvention,
-            Type[]? parameterTypes, ModuleBuilder mod, TypeBuilder type) :
+            Type[]? parameterTypes, ModuleBuilder mod, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)] TypeBuilder type) :
             this(name, attributes, callingConvention, parameterTypes, null, null, mod, type)
         {
         }
@@ -45,6 +45,10 @@ namespace System.Reflection.Emit
         {
             return m_methodBuilder.GetTypeBuilder();
         }
+        internal SignatureHelper GetMethodSignature()
+        {
+            return m_methodBuilder.GetMethodSignature();
+        }
         #endregion
 
         #region Object Overrides
@@ -56,7 +60,7 @@ namespace System.Reflection.Emit
         #endregion
 
         #region MemberInfo Overrides
-        internal int MetadataTokenInternal => m_methodBuilder.MetadataTokenInternal;
+        public override int MetadataToken => m_methodBuilder.MetadataToken;
 
         public override Module Module => m_methodBuilder.Module;
 
@@ -118,11 +122,6 @@ namespace System.Reflection.Emit
         #endregion
 
         #region Public Members
-        public MethodToken GetToken()
-        {
-            return m_methodBuilder.GetToken();
-        }
-
         public ParameterBuilder DefineParameter(int iSequence, ParameterAttributes attributes, string? strParamName)
         {
             // Theoretically we shouldn't allow iSequence to be 0 because in reflection ctors don't have
@@ -161,17 +160,10 @@ namespace System.Reflection.Emit
             }
         }
 
-        public Module GetModule()
-        {
-            return m_methodBuilder.GetModule();
-        }
-
         internal override Type GetReturnType()
         {
             return m_methodBuilder.ReturnType;
         }
-
-        public string Signature => m_methodBuilder.Signature;
 
         public void SetCustomAttribute(ConstructorInfo con, byte[] binaryAttribute)
         {

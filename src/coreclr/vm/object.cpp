@@ -335,62 +335,36 @@ void STDCALL CopyValueClassUnchecked(void* dest, void* src, MethodTable *pMT)
 
     _ASSERTE(!pMT->IsArray());  // bunch of assumptions about arrays wrong.
 
-    // <TODO> @todo Only call MemoryBarrier() if needed.
-    // Reflection is a known use case where this is required.
-    // Unboxing is a use case where this should not be required.
-    // </TODO>
-    MemoryBarrier();
-
-        // Copy the bulk of the data, and any non-GC refs.
-    switch (pMT->GetNumInstanceFieldBytes())
-    {
-    case 1:
-        *(UINT8*)dest = *(UINT8*)src;
-        break;
-#ifndef ALIGN_ACCESS
-        // we can hit an alignment fault if the value type has multiple
-        // smaller fields.  Example: if there are two I4 fields, the
-        // value class can be aligned to 4-byte boundaries, yet the
-        // NumInstanceFieldBytes is 8
-    case 2:
-        *(UINT16*)dest = *(UINT16*)src;
-        break;
-    case 4:
-        *(UINT32*)dest = *(UINT32*)src;
-        break;
-    case 8:
-        *(UINT64*)dest = *(UINT64*)src;
-        break;
-#endif // !ALIGN_ACCESS
-    default:
-        memcpyNoGCRefs(dest, src, pMT->GetNumInstanceFieldBytes());
-        break;
-    }
-
-        // Tell the GC about any copies.
     if (pMT->ContainsPointers())
     {
-        CGCDesc* map = CGCDesc::GetCGCDescFromMT(pMT);
-        CGCDescSeries* cur = map->GetHighestSeries();
-        CGCDescSeries* last = map->GetLowestSeries();
-        DWORD size = pMT->GetBaseSize();
-        _ASSERTE(cur >= last);
-        do
+        memmoveGCRefs(dest, src, pMT->GetNumInstanceFieldBytes());
+    }
+    else
+    {
+        switch (pMT->GetNumInstanceFieldBytes())
         {
-            // offset to embedded references in this series must be
-            // adjusted by the VTable pointer, when in the unboxed state.
-            size_t offset = cur->GetSeriesOffset() - sizeof(void*);
-            OBJECTREF* srcPtr = (OBJECTREF*)(((BYTE*) src) + offset);
-            OBJECTREF* destPtr = (OBJECTREF*)(((BYTE*) dest) + offset);
-            OBJECTREF* srcPtrStop = (OBJECTREF*)((BYTE*) srcPtr + cur->GetSeriesSize() + size);
-            while (srcPtr < srcPtrStop)
-            {
-                SetObjectReference(destPtr, ObjectToOBJECTREF(*(Object**)srcPtr));
-                srcPtr++;
-                destPtr++;
-            }
-            cur--;
-        } while (cur >= last);
+        case 1:
+            *(UINT8*)dest = *(UINT8*)src;
+            break;
+#ifndef ALIGN_ACCESS
+            // we can hit an alignment fault if the value type has multiple
+            // smaller fields.  Example: if there are two I4 fields, the
+            // value class can be aligned to 4-byte boundaries, yet the
+            // NumInstanceFieldBytes is 8
+        case 2:
+            *(UINT16*)dest = *(UINT16*)src;
+            break;
+        case 4:
+            *(UINT32*)dest = *(UINT32*)src;
+            break;
+        case 8:
+            *(UINT64*)dest = *(UINT64*)src;
+            break;
+#endif // !ALIGN_ACCESS
+        default:
+            memcpyNoGCRefs(dest, src, pMT->GetNumInstanceFieldBytes());
+            break;
+        }
     }
 }
 
@@ -490,8 +464,7 @@ VOID Object::Validate(BOOL bDeep, BOOL bVerifyNextHeader, BOOL bVerifySyncBlock)
 
 #ifdef _DEBUG
     {
-        BEGIN_GETTHREAD_ALLOWED_IN_NO_THROW_REGION;
-        Thread *pThread = GetThread();
+        Thread *pThread = GetThreadNULLOk();
 
         if (pThread != NULL && !(pThread->PreemptiveGCDisabled()))
         {
@@ -506,7 +479,6 @@ VOID Object::Validate(BOOL bDeep, BOOL bVerifyNextHeader, BOOL bVerifySyncBlock)
             if (!dbgOnly_IsSpecialEEThread() && !IsGCSpecialThread())
                 _ASSERTE(!"OBJECTREF being accessed while thread is in preemptive GC mode.");
         }
-        END_GETTHREAD_ALLOWED_IN_NO_THROW_REGION;
     }
 #endif
 
@@ -1062,6 +1034,41 @@ OBJECTREF::OBJECTREF(const OBJECTREF & objref)
 
 
 //-------------------------------------------------------------
+// VolatileLoadWithoutBarrier constructor
+//-------------------------------------------------------------
+OBJECTREF::OBJECTREF(const OBJECTREF *pObjref, tagVolatileLoadWithoutBarrier tag)
+{
+    STATIC_CONTRACT_NOTHROW;
+    STATIC_CONTRACT_GC_NOTRIGGER;
+    STATIC_CONTRACT_MODE_COOPERATIVE;
+    STATIC_CONTRACT_FORBID_FAULT;
+
+    Object* objrefAsObj = VolatileLoadWithoutBarrier(&pObjref->m_asObj);
+    VALIDATEOBJECT(objrefAsObj);
+
+    // !!! If this assert is fired, there are two possibilities:
+    // !!! 1.  You are doing a type cast, e.g.  *(OBJECTREF*)pObj
+    // !!!     Instead, you should use ObjectToOBJECTREF(*(Object**)pObj),
+    // !!!                          or ObjectToSTRINGREF(*(StringObject**)pObj)
+    // !!! 2.  There is a real GC hole here.
+    // !!! Either way you need to fix the code.
+    _ASSERTE(Thread::IsObjRefValid(pObjref));
+    if ((objrefAsObj != 0) &&
+        ((IGCHeap*)GCHeapUtilities::GetGCHeap())->IsHeapPointer( (BYTE*)this ))
+    {
+        _ASSERTE(!"Write Barrier violation. Must use SetObjectReference() to assign OBJECTREF's into the GC heap!");
+    }
+    m_asObj = objrefAsObj;
+
+    if (m_asObj != 0) {
+        ENABLESTRESSHEAP();
+    }
+
+    Thread::ObjectRefNew(this);
+}
+
+
+//-------------------------------------------------------------
 // To allow NULL to be used as an OBJECTREF.
 //-------------------------------------------------------------
 OBJECTREF::OBJECTREF(TADDR nul)
@@ -1329,7 +1336,7 @@ void* __cdecl GCSafeMemCpy(void * dest, const void * src, size_t len)
     if (!(((*(BYTE**)&dest) <  g_lowest_address ) ||
           ((*(BYTE**)&dest) >= g_highest_address)))
     {
-        Thread* pThread = GetThread();
+        Thread* pThread = GetThreadNULLOk();
 
         // GCHeapUtilities::IsHeapPointer has race when called in preemptive mode. It walks the list of segments
         // that can be modified by GC. Do the check below only if it is safe to do so.
@@ -1414,7 +1421,7 @@ void StackTraceArray::CheckState() const
     if (!m_array)
         return;
 
-    assert(GetObjectThread() == GetThread());
+    assert(GetObjectThread() == GetThreadNULLOk());
 
     size_t size = Size();
     StackTraceElement const * p;
@@ -1469,7 +1476,7 @@ void StackTraceArray::EnsureThreadAffinity()
     if (!m_array)
         return;
 
-    if (GetObjectThread() != GetThread())
+    if (GetObjectThread() != GetThreadNULLOk())
     {
         // object is being changed by a thread different from the one which created it
         // make a copy of the array to prevent a race condition when two different threads try to change it

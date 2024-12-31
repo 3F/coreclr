@@ -15,24 +15,26 @@ namespace System.Reflection
         {
             Debug.Assert(method is RuntimeMethodInfo || method is RuntimeConstructorInfo);
 
-            return GetParameters(method, member, sig, out _, false);
+            return GetParameters(method, member, sig, out _, fetchReturnParameter: false);
         }
 
         internal static ParameterInfo GetReturnParameter(IRuntimeMethodInfo method, MemberInfo member, Signature sig)
         {
             Debug.Assert(method is RuntimeMethodInfo || method is RuntimeConstructorInfo);
 
-            ParameterInfo returnParameter;
-            GetParameters(method, member, sig, out returnParameter!, true);
-            return returnParameter;
+            GetParameters(method, member, sig, out ParameterInfo? returnParameter, fetchReturnParameter: true);
+            return returnParameter!;
         }
 
-        internal static ParameterInfo[] GetParameters(
+        private static ParameterInfo[] GetParameters(
             IRuntimeMethodInfo methodHandle, MemberInfo member, Signature sig, out ParameterInfo? returnParameter, bool fetchReturnParameter)
         {
             returnParameter = null;
             int sigArgCount = sig.Arguments.Length;
-            ParameterInfo[] args = fetchReturnParameter ? null! : new ParameterInfo[sigArgCount];
+            ParameterInfo[] args =
+                fetchReturnParameter ? null! :
+                sigArgCount == 0 ? Array.Empty<ParameterInfo>() :
+                new ParameterInfo[sigArgCount];
 
             int tkMethodDef = RuntimeMethodHandle.GetMethodDef(methodHandle);
             int cParamDefs = 0;
@@ -318,8 +320,8 @@ namespace System.Reflection
                 if (raw)
                 {
                     CustomAttributeTypedArgument value =
-                        CustomAttributeData.Filter(
-                            CustomAttributeData.GetCustomAttributes(this), typeof(DateTimeConstantAttribute), 0);
+                        RuntimeCustomAttributeData.Filter(
+                            RuntimeCustomAttributeData.GetCustomAttributes(this), typeof(DateTimeConstantAttribute), 0);
 
                     if (value.ArgumentType != null)
                         return new DateTime((long)value.Value!);
@@ -539,7 +541,7 @@ namespace System.Reflection
 
         public override IList<CustomAttributeData> GetCustomAttributesData()
         {
-            return CustomAttributeData.GetCustomAttributesInternal(this);
+            return RuntimeCustomAttributeData.GetCustomAttributesInternal(this);
         }
         #endregion
     }

@@ -145,8 +145,8 @@ inline void DbgTransportLog(DbgTransportLogClass eClass, const char *szFormat, .
 
     if (s_dwLoggingEnabled == LE_Unknown)
     {
-        s_dwLoggingEnabled = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_DbgTransportLog, LE_None);
-        s_dwLoggingClass = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_DbgTransportLogClass, LC_All);
+        s_dwLoggingEnabled = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_DbgTransportLog);
+        s_dwLoggingClass = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_DbgTransportLogClass);
     }
 
     if ((s_dwLoggingEnabled & DBG_TRANSPORT_LOG_THIS_SIDE) &&
@@ -793,7 +793,7 @@ private:
 
     // Upon receiving a reply message, signal the event on the message to wake up the thread waiting for
     // the reply message and close the handle to the event.
-    void SignalReplyEvent(Message * pMesssage);
+    void SignalReplyEvent(Message * pMessage);
 
     // Given a message ID, find the matching message in the send queue.  If there is no match, return NULL.
     // If there is a match, remove the message from the send queue and return it.

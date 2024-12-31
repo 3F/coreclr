@@ -94,6 +94,8 @@ typedef PVOID NATIVE_LIBRARY_HANDLE;
 #define _M_ARM 7
 #elif defined(__aarch64__) && !defined(_M_ARM64)
 #define _M_ARM64 1
+#elif defined(__s390x__) && !defined(_M_S390X)
+#define _M_S390X 1
 #endif
 
 #if defined(_M_IX86) && !defined(HOST_X86)
@@ -104,6 +106,8 @@ typedef PVOID NATIVE_LIBRARY_HANDLE;
 #define HOST_ARM
 #elif defined(_M_ARM64) && !defined(HOST_ARM64)
 #define HOST_ARM64
+#elif defined(_M_S390X) && !defined(HOST_S390X)
+#define HOST_S390X
 #endif
 
 #endif // !_MSC_VER
@@ -142,6 +146,12 @@ typedef PVOID NATIVE_LIBRARY_HANDLE;
 #define THROW_DECL throw()
 #endif // !_MSC_VER
 #endif // !THROW_DECL
+
+#ifdef __sun
+#define MATH_THROW_DECL
+#else
+#define MATH_THROW_DECL THROW_DECL
+#endif
 
 #if defined(_MSC_VER)
 #define DECLSPEC_ALIGN(x)   __declspec(align(x))
@@ -190,6 +200,18 @@ typedef PVOID NATIVE_LIBRARY_HANDLE;
 #define NODEBUG_ATTRIBUTE __artificial__
 #endif
 #endif
+
+#ifndef __has_cpp_attribute
+#define __has_cpp_attribute(x) (0)
+#endif
+
+#ifndef FALLTHROUGH
+#if __has_cpp_attribute(fallthrough)
+#define FALLTHROUGH [[fallthrough]]
+#else // __has_cpp_attribute(fallthrough)
+#define FALLTHROUGH
+#endif // __has_cpp_attribute(fallthrough)
+#endif // FALLTHROUGH
 
 #ifndef PAL_STDCPP_COMPAT
 
@@ -372,7 +394,7 @@ PALIMPORT
 DWORD
 PALAPI
 PAL_InitializeCoreCLR(
-    const char *szExePath, bool runningInExe);
+    const char *szExePath, BOOL runningInExe);
 
 /// <summary>
 /// This function shuts down PAL WITHOUT exiting the current process.
@@ -402,7 +424,7 @@ PALAPI
 PAL_TerminateEx(
     int exitCode);
 
-typedef VOID (*PSHUTDOWN_CALLBACK)(void);
+typedef VOID (*PSHUTDOWN_CALLBACK)(bool isExecutingOnAltStack);
 
 PALIMPORT
 VOID
@@ -410,13 +432,22 @@ PALAPI
 PAL_SetShutdownCallback(
     IN PSHUTDOWN_CALLBACK callback);
 
+// Must be the same as the copy in excep.h and the WriteDumpFlags enum in the diagnostics repo
+enum
+{
+    GenerateDumpFlagsNone = 0x00,
+    GenerateDumpFlagsLoggingEnabled = 0x01,
+    GenerateDumpFlagsVerboseLoggingEnabled = 0x02,
+    GenerateDumpFlagsCrashReportEnabled = 0x04
+};
+
 PALIMPORT
 BOOL
 PALAPI
 PAL_GenerateCoreDump(
     IN LPCSTR dumpName,
     IN INT dumpType,
-    IN BOOL diag);
+    IN ULONG32 flags);
 
 typedef VOID (*PPAL_STARTUP_CALLBACK)(
     char *modulePath,
@@ -487,18 +518,6 @@ VOID
 PALAPI
 PAL_UnregisterModule(
     IN HINSTANCE hInstance);
-
-PALIMPORT
-BOOL
-PALAPI
-PAL_GetPALDirectoryW(
-    OUT LPWSTR lpDirectoryName,
-    IN OUT UINT* cchDirectoryName);
-#ifdef UNICODE
-#define PAL_GetPALDirectory PAL_GetPALDirectoryW
-#else
-#define PAL_GetPALDirectory PAL_GetPALDirectoryA
-#endif
 
 PALIMPORT
 VOID
@@ -707,13 +726,8 @@ SearchPathW(
     OUT LPWSTR lpBuffer,
     OUT LPWSTR *lpFilePart
     );
-#ifdef UNICODE
+
 #define SearchPath  SearchPathW
-#else
-#define SearchPath  SearchPathA
-#endif // !UNICODE
-
-
 
 PALIMPORT
 BOOL
@@ -729,7 +743,6 @@ CopyFileW(
 #define CopyFile CopyFileA
 #endif
 
-
 PALIMPORT
 BOOL
 PALAPI
@@ -742,11 +755,8 @@ DeleteFileW(
 #define DeleteFile DeleteFileA
 #endif
 
-
-
 #define MOVEFILE_REPLACE_EXISTING      0x00000001
 #define MOVEFILE_COPY_ALLOWED          0x00000002
-
 
 PALIMPORT
 BOOL
@@ -1078,15 +1088,6 @@ GetCurrentDirectoryW(
 PALIMPORT
 HANDLE
 PALAPI
-CreateSemaphoreW(
-         IN LPSECURITY_ATTRIBUTES lpSemaphoreAttributes,
-         IN LONG lInitialCount,
-         IN LONG lMaximumCount,
-         IN LPCWSTR lpName);
-
-PALIMPORT
-HANDLE
-PALAPI
 CreateSemaphoreExW(
         IN LPSECURITY_ATTRIBUTES lpSemaphoreAttributes,
         IN LONG lInitialCount,
@@ -1103,13 +1104,7 @@ OpenSemaphoreW(
     IN BOOL bInheritHandle,
     IN LPCWSTR lpName);
 
-#ifdef UNICODE
-#define CreateSemaphore CreateSemaphoreW
 #define CreateSemaphoreEx CreateSemaphoreExW
-#else
-#define CreateSemaphore CreateSemaphoreA
-#define CreateSemaphoreEx CreateSemaphoreExA
-#endif
 
 PALIMPORT
 BOOL
@@ -1141,11 +1136,7 @@ CreateEventExW(
 #define CREATE_EVENT_MANUAL_RESET ((DWORD)0x1)
 #define CREATE_EVENT_INITIAL_SET ((DWORD)0x2)
 
-#ifdef UNICODE
 #define CreateEvent CreateEventW
-#else
-#define CreateEvent CreateEventA
-#endif
 
 PALIMPORT
 BOOL
@@ -1191,11 +1182,7 @@ CreateMutexExW(
 // CreateMutexExW: dwFlags
 #define CREATE_MUTEX_INITIAL_OWNER ((DWORD)0x1)
 
-#ifdef UNICODE
 #define CreateMutex CreateMutexW
-#else
-#define CreateMutex CreateMutexA
-#endif
 
 PALIMPORT
 HANDLE
@@ -1205,12 +1192,9 @@ OpenMutexW(
        IN BOOL bInheritHandle,
        IN LPCWSTR lpName);
 
-
 #ifdef UNICODE
 #define OpenMutex  OpenMutexW
-#else
-#define OpenMutex  OpenMutexA
-#endif // UNICODE
+#endif
 
 PALIMPORT
 BOOL
@@ -1274,34 +1258,8 @@ typedef struct _STARTUPINFOW {
     HANDLE hStdError;
 } STARTUPINFOW, *LPSTARTUPINFOW;
 
-typedef struct _STARTUPINFOA {
-    DWORD cb;
-    LPSTR lpReserved_PAL_Undefined;
-    LPSTR lpDesktop_PAL_Undefined;
-    LPSTR lpTitle_PAL_Undefined;
-    DWORD dwX_PAL_Undefined;
-    DWORD dwY_PAL_Undefined;
-    DWORD dwXSize_PAL_Undefined;
-    DWORD dwYSize_PAL_Undefined;
-    DWORD dwXCountChars_PAL_Undefined;
-    DWORD dwYCountChars_PAL_Undefined;
-    DWORD dwFillAttribute_PAL_Undefined;
-    DWORD dwFlags;
-    WORD wShowWindow_PAL_Undefined;
-    WORD cbReserved2_PAL_Undefined;
-    LPBYTE lpReserved2_PAL_Undefined;
-    HANDLE hStdInput;
-    HANDLE hStdOutput;
-    HANDLE hStdError;
-} STARTUPINFOA, *LPSTARTUPINFOA;
-
-#ifdef UNICODE
 typedef STARTUPINFOW STARTUPINFO;
 typedef LPSTARTUPINFOW LPSTARTUPINFO;
-#else
-typedef STARTUPINFOA STARTUPINFO;
-typedef LPSTARTUPINFOW LPSTARTUPINFO;
-#endif
 
 #define CREATE_NEW_CONSOLE          0x00000010
 
@@ -1329,11 +1287,7 @@ CreateProcessW(
            IN LPSTARTUPINFOW lpStartupInfo,
            OUT LPPROCESS_INFORMATION lpProcessInformation);
 
-#ifdef UNICODE
 #define CreateProcess CreateProcessW
-#else
-#define CreateProcess CreateProcessA
-#endif
 
 PALIMPORT
 PAL_NORETURN
@@ -2248,6 +2202,112 @@ typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
 
 } KNONVOLATILE_CONTEXT_POINTERS, *PKNONVOLATILE_CONTEXT_POINTERS;
 
+#elif defined(HOST_S390X)
+
+// There is no context for s390x defined in winnt.h,
+// so we re-use the amd64 values.
+#define CONTEXT_S390X   0x100000
+
+#define CONTEXT_CONTROL (CONTEXT_S390X | 0x1L)
+#define CONTEXT_INTEGER (CONTEXT_S390X | 0x2L)
+#define CONTEXT_FLOATING_POINT  (CONTEXT_S390X | 0x4L)
+
+#define CONTEXT_FULL (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT)
+
+#define CONTEXT_ALL (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT)
+
+#define CONTEXT_EXCEPTION_ACTIVE 0x8000000
+#define CONTEXT_SERVICE_ACTIVE 0x10000000
+#define CONTEXT_EXCEPTION_REQUEST 0x40000000
+#define CONTEXT_EXCEPTION_REPORTING 0x80000000
+
+typedef struct DECLSPEC_ALIGN(8) _CONTEXT {
+
+    //
+    // Control flags.
+    //
+
+    DWORD ContextFlags;
+
+    //
+    // Integer registers.
+    //
+
+    union {
+        DWORD64 Gpr[16];
+        struct {
+            DWORD64 R0;
+            DWORD64 R1;
+            DWORD64 R2;
+            DWORD64 R3;
+            DWORD64 R4;
+            DWORD64 R5;
+            DWORD64 R6;
+            DWORD64 R7;
+            DWORD64 R8;
+            DWORD64 R9;
+            DWORD64 R10;
+            DWORD64 R11;
+            DWORD64 R12;
+            DWORD64 R13;
+            DWORD64 R14;
+            DWORD64 R15;
+        };
+    };
+
+    //
+    // Floating-point registers.
+    //
+
+    union {
+        DWORD64 Fpr[16];
+        struct {
+            DWORD64 F0;
+            DWORD64 F1;
+            DWORD64 F2;
+            DWORD64 F3;
+            DWORD64 F4;
+            DWORD64 F5;
+            DWORD64 F6;
+            DWORD64 F7;
+            DWORD64 F8;
+            DWORD64 F9;
+            DWORD64 F10;
+            DWORD64 F11;
+            DWORD64 F12;
+            DWORD64 F13;
+            DWORD64 F14;
+            DWORD64 F15;
+        };
+    };
+
+    //
+    // Control registers.
+    //
+
+    DWORD64 PSWMask;
+    DWORD64 PSWAddr;
+
+} CONTEXT, *PCONTEXT, *LPCONTEXT;
+
+//
+// Nonvolatile context pointer record.
+//
+
+typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
+    PDWORD64 R6;
+    PDWORD64 R7;
+    PDWORD64 R8;
+    PDWORD64 R9;
+    PDWORD64 R10;
+    PDWORD64 R11;
+    PDWORD64 R12;
+    PDWORD64 R13;
+    PDWORD64 R14;
+    PDWORD64 R15;
+
+} KNONVOLATILE_CONTEXT_POINTERS, *PKNONVOLATILE_CONTEXT_POINTERS;
+
 #else
 #error Unknown architecture for defining CONTEXT.
 #endif
@@ -2354,14 +2414,15 @@ PALIMPORT
 size_t
 PALAPI
 PAL_GetLogicalProcessorCacheSizeFromOS();
+#define GetLogicalProcessorCacheSizeFromOS PAL_GetLogicalProcessorCacheSizeFromOS
 
 typedef BOOL(*UnwindReadMemoryCallback)(PVOID address, PVOID buffer, SIZE_T size);
 
 PALIMPORT BOOL PALAPI PAL_VirtualUnwind(CONTEXT *context, KNONVOLATILE_CONTEXT_POINTERS *contextPointers);
 
-PALIMPORT BOOL PALAPI PAL_VirtualUnwindOutOfProc(CONTEXT *context, KNONVOLATILE_CONTEXT_POINTERS *contextPointers, SIZE_T baseAddress, UnwindReadMemoryCallback readMemoryCallback);
+PALIMPORT BOOL PALAPI PAL_VirtualUnwindOutOfProc(CONTEXT *context, KNONVOLATILE_CONTEXT_POINTERS *contextPointers, PULONG64 functionStart, SIZE_T baseAddress, UnwindReadMemoryCallback readMemoryCallback);
 
-#define GetLogicalProcessorCacheSizeFromOS PAL_GetLogicalProcessorCacheSizeFromOS
+PALIMPORT BOOL PALAPI PAL_GetUnwindInfoSize(SIZE_T baseAddress, ULONG64 ehFrameHdrAddr, UnwindReadMemoryCallback readMemoryCallback, PULONG64 ehFrameStart, PULONG64 ehFrameSize);
 
 /* PAL_CS_NATIVE_DATA_SIZE is defined as sizeof(PAL_CRITICAL_SECTION_NATIVE_DATA) */
 
@@ -2382,6 +2443,8 @@ PALIMPORT BOOL PALAPI PAL_VirtualUnwindOutOfProc(CONTEXT *context, KNONVOLATILE_
 #elif defined(__linux__) && defined(__i386__)
 #define PAL_CS_NATIVE_DATA_SIZE 76
 #elif defined(__linux__) && defined(__x86_64__)
+#define PAL_CS_NATIVE_DATA_SIZE 96
+#elif defined(__linux__) && defined(HOST_S390X)
 #define PAL_CS_NATIVE_DATA_SIZE 96
 #elif defined(__NetBSD__) && defined(__amd64__)
 #define PAL_CS_NATIVE_DATA_SIZE 96
@@ -2464,11 +2527,7 @@ CreateFileMappingW(
            IN DWORD dwMaximumSizeLow,
            IN LPCWSTR lpName);
 
-#ifdef UNICODE
 #define CreateFileMapping CreateFileMappingW
-#else
-#define CreateFileMapping CreateFileMappingA
-#endif
 
 #define SECTION_QUERY       0x0001
 #define SECTION_MAP_WRITE   0x0002
@@ -2488,11 +2547,7 @@ OpenFileMappingW(
          IN BOOL bInheritHandle,
          IN LPCWSTR lpName);
 
-#ifdef UNICODE
 #define OpenFileMapping OpenFileMappingW
-#else
-#define OpenFileMapping OpenFileMappingA
-#endif
 
 typedef INT_PTR (PALAPI_NOEXPORT *FARPROC)();
 
@@ -2549,6 +2604,11 @@ BOOL
 PALAPI
 PAL_FreeLibraryDirect(
         IN NATIVE_LIBRARY_HANDLE dl_handle);
+
+PALIMPORT
+HMODULE
+PALAPI
+PAL_GetPalHostModule();
 
 PALIMPORT
 FARPROC
@@ -2710,6 +2770,17 @@ VirtualFree(
         IN SIZE_T dwSize,
         IN DWORD dwFreeType);
 
+
+#if defined(HOST_OSX) && defined(HOST_ARM64)
+
+PALIMPORT
+VOID
+PALAPI
+PAL_JitWriteProtect(bool writeEnable);
+
+#endif // defined(HOST_OSX) && defined(HOST_ARM64)
+
+
 PALIMPORT
 BOOL
 PALAPI
@@ -2775,14 +2846,6 @@ LocalAlloc(
 PALIMPORT
 HLOCAL
 PALAPI
-LocalReAlloc(
-       IN HLOCAL hMem,
-       IN SIZE_T uBytes,
-       IN UINT   uFlags);
-
-PALIMPORT
-HLOCAL
-PALAPI
 LocalFree(
       IN HLOCAL hMem);
 
@@ -2807,26 +2870,6 @@ typedef struct _cpinfo {
     BYTE DefaultChar[MAX_DEFAULTCHAR];
     BYTE LeadByte[MAX_LEADBYTES];
 } CPINFO, *LPCPINFO;
-
-PALIMPORT
-BOOL
-PALAPI
-GetCPInfo(
-      IN UINT CodePage,
-      OUT LPCPINFO lpCPInfo);
-
-PALIMPORT
-BOOL
-PALAPI
-IsDBCSLeadByteEx(
-         IN UINT CodePage,
-         IN BYTE TestChar);
-
-PALIMPORT
-BOOL
-PALAPI
-IsDBCSLeadByte(
-        IN BYTE TestChar);
 
 #define MB_PRECOMPOSED            0x00000001
 #define MB_ERR_INVALID_CHARS      0x00000008
@@ -3020,11 +3063,7 @@ LPWSTR
 PALAPI
 GetEnvironmentStringsW();
 
-#ifdef UNICODE
 #define GetEnvironmentStrings GetEnvironmentStringsW
-#else
-#define GetEnvironmentStrings GetEnvironmentStringsA
-#endif
 
 PALIMPORT
 BOOL
@@ -3032,11 +3071,7 @@ PALAPI
 FreeEnvironmentStringsW(
             IN LPWSTR);
 
-#ifdef UNICODE
 #define FreeEnvironmentStrings FreeEnvironmentStringsW
-#else
-#define FreeEnvironmentStrings FreeEnvironmentStringsA
-#endif
 
 PALIMPORT
 BOOL
@@ -3557,7 +3592,7 @@ YieldProcessor()
     __asm__ __volatile__(
         "rep\n"
         "nop");
-#elif defined(HOST_ARM64)
+#elif defined(HOST_ARM) || defined(HOST_ARM64)
     __asm__ __volatile__( "yield");
 #else
     return;
@@ -3846,6 +3881,7 @@ PAL_GetCurrentThreadAffinitySet(SIZE_T size, UINT_PTR* data);
 #define fopen         PAL_fopen
 #define strtok        PAL_strtok
 #define strtoul       PAL_strtoul
+#define strtoull      PAL_strtoull
 #define fprintf       PAL_fprintf
 #define fwprintf      PAL_fwprintf
 #define vfprintf      PAL_vfprintf
@@ -3868,31 +3904,23 @@ PAL_GetCurrentThreadAffinitySet(SIZE_T size, UINT_PTR* data);
 #define fsetpos       PAL_fsetpos
 #define setvbuf       PAL_setvbuf
 #define acos          PAL_acos
-#define acosh         PAL_acosh
 #define asin          PAL_asin
-#define asinh         PAL_asinh
 #define atan2         PAL_atan2
 #define exp           PAL_exp
-#define fma           PAL_fma
 #define ilogb         PAL_ilogb
 #define log           PAL_log
-#define log2          PAL_log2
 #define log10         PAL_log10
 #define pow           PAL_pow
-#define scalbn        PAL_scalbn
+#define sincos        PAL_sincos
 #define acosf         PAL_acosf
-#define acoshf        PAL_acoshf
 #define asinf         PAL_asinf
-#define asinhf        PAL_asinhf
 #define atan2f        PAL_atan2f
 #define expf          PAL_expf
-#define fmaf          PAL_fmaf
 #define ilogbf        PAL_ilogbf
 #define logf          PAL_logf
-#define log2f         PAL_log2f
 #define log10f        PAL_log10f
 #define powf          PAL_powf
-#define scalbnf       PAL_scalbnf
+#define sincosf       PAL_sincosf
 #define malloc        PAL_malloc
 #define free          PAL_free
 #define _strdup       PAL__strdup
@@ -3962,11 +3990,7 @@ PALIMPORT int    __cdecl memcmp(const void *, const void *, size_t);
 PALIMPORT void * __cdecl memset(void *, int, size_t);
 PALIMPORT void * __cdecl memmove(void *, const void *, size_t);
 PALIMPORT void * __cdecl memchr(const void *, int, size_t);
-PALIMPORT long long int __cdecl atoll(const char *)
-#ifndef __sun
-THROW_DECL
-#endif
-;
+PALIMPORT long long int __cdecl atoll(const char *) MATH_THROW_DECL;
 PALIMPORT size_t __cdecl strlen(const char *);
 PALIMPORT int __cdecl strcmp(const char*, const char *);
 PALIMPORT int __cdecl strncmp(const char*, const char *, size_t);
@@ -3984,6 +4008,7 @@ PALIMPORT size_t __cdecl strspn(const char *, const char *);
 PALIMPORT size_t  __cdecl strcspn(const char *, const char *);
 PALIMPORT int __cdecl atoi(const char *);
 PALIMPORT ULONG __cdecl strtoul(const char *, char **, int);
+PALIMPORT ULONGLONG __cdecl strtoull(const char *, char **, int);
 PALIMPORT double __cdecl atof(const char *);
 PALIMPORT double __cdecl strtod(const char *, char **);
 PALIMPORT int __cdecl isprint(int);
@@ -4017,9 +4042,6 @@ PALIMPORT DLLEXPORT int __cdecl _stricmp(const char *, const char *);
 PALIMPORT DLLEXPORT int __cdecl vsprintf_s(char *, size_t, const char *, va_list);
 PALIMPORT char * __cdecl _gcvt_s(char *, int, double, int);
 PALIMPORT int __cdecl __iscsym(int);
-PALIMPORT unsigned char * __cdecl _mbsinc(const unsigned char *);
-PALIMPORT unsigned char * __cdecl _mbsninc(const unsigned char *, size_t);
-PALIMPORT unsigned char * __cdecl _mbsdec(const unsigned char *, const unsigned char *);
 PALIMPORT DLLEXPORT int __cdecl _wcsicmp(const WCHAR *, const WCHAR*);
 PALIMPORT int __cdecl _wcsnicmp(const WCHAR *, const WCHAR *, size_t);
 PALIMPORT int __cdecl _vsnprintf(char *, size_t, const char *, va_list);
@@ -4052,7 +4074,7 @@ PALIMPORT int __cdecl PAL_swscanf(const WCHAR *, const WCHAR *, ...);
 PALIMPORT DLLEXPORT ULONG __cdecl PAL_wcstoul(const WCHAR *, WCHAR **, int);
 PALIMPORT double __cdecl PAL_wcstod(const WCHAR *, WCHAR **);
 
-PALIMPORT WCHAR * __cdecl _wcslwr(WCHAR *);
+PALIMPORT errno_t __cdecl _wcslwr_s(WCHAR *, size_t sz);
 PALIMPORT DLLEXPORT ULONGLONG _wcstoui64(const WCHAR *, WCHAR **, int);
 PALIMPORT DLLEXPORT errno_t __cdecl _i64tow_s(long long, WCHAR *, size_t, int);
 PALIMPORT int __cdecl _wtoi(const WCHAR *);
@@ -4070,15 +4092,11 @@ inline WCHAR *PAL_wcsstr(WCHAR* S, const WCHAR* P)
 }
 #endif
 
-#if defined(__llvm__)
-#define HAS_ROTL __has_builtin(_rotl)
-#define HAS_ROTR __has_builtin(_rotr)
-#else
-#define HAS_ROTL 0
-#define HAS_ROTR 0
+#ifndef __has_builtin
+#define __has_builtin(x) 0
 #endif
 
-#if !HAS_ROTL
+#if !__has_builtin(_rotl)
 /*++
 Function:
 _rotl
@@ -4096,14 +4114,14 @@ unsigned int __cdecl _rotl(unsigned int value, int shift)
     retval = (value << shift) | (value >> (sizeof(int) * CHAR_BIT - shift));
     return retval;
 }
-#endif // !HAS_ROTL
+#endif // !__has_builtin(_rotl)
 
 // On 64 bit unix, make the long an int.
 #ifdef HOST_64BIT
 #define _lrotl _rotl
-#endif // HOST_64BIT
+#endif
 
-#if !HAS_ROTR
+#if !__has_builtin(_rotr)
 
 /*++
 Function:
@@ -4123,7 +4141,7 @@ unsigned int __cdecl _rotr(unsigned int value, int shift)
     return retval;
 }
 
-#endif // !HAS_ROTR
+#endif // !__has_builtin(_rotr)
 
 PALIMPORT int __cdecl abs(int);
 // clang complains if this is declared with __int64
@@ -4134,21 +4152,13 @@ PALIMPORT int __cdecl _finite(double);
 PALIMPORT int __cdecl _isnan(double);
 PALIMPORT double __cdecl _copysign(double, double);
 PALIMPORT double __cdecl acos(double);
-PALIMPORT double __cdecl acosh(double);
+PALIMPORT double __cdecl acosh(double) MATH_THROW_DECL;
 PALIMPORT double __cdecl asin(double);
-PALIMPORT double __cdecl asinh(double);
-PALIMPORT double __cdecl atan(double) THROW_DECL;
-PALIMPORT double __cdecl atanh(double)
-#ifndef __sun
-THROW_DECL
-#endif
-;
+PALIMPORT double __cdecl asinh(double) MATH_THROW_DECL;
+PALIMPORT double __cdecl atan(double) MATH_THROW_DECL;
+PALIMPORT double __cdecl atanh(double) MATH_THROW_DECL;
 PALIMPORT double __cdecl atan2(double, double);
-PALIMPORT double __cdecl cbrt(double)
-#ifndef __sun
-THROW_DECL
-#endif
-;
+PALIMPORT double __cdecl cbrt(double) MATH_THROW_DECL;
 PALIMPORT double __cdecl ceil(double);
 PALIMPORT double __cdecl cos(double);
 PALIMPORT double __cdecl cosh(double);
@@ -4156,15 +4166,15 @@ PALIMPORT double __cdecl exp(double);
 PALIMPORT double __cdecl fabs(double);
 PALIMPORT double __cdecl floor(double);
 PALIMPORT double __cdecl fmod(double, double);
-PALIMPORT double __cdecl fma(double, double, double);
+PALIMPORT double __cdecl fma(double, double, double) MATH_THROW_DECL;
 PALIMPORT int __cdecl ilogb(double);
 PALIMPORT double __cdecl log(double);
-PALIMPORT double __cdecl log2(double);
+PALIMPORT double __cdecl log2(double) MATH_THROW_DECL;
 PALIMPORT double __cdecl log10(double);
 PALIMPORT double __cdecl modf(double, double*);
 PALIMPORT double __cdecl pow(double, double);
-PALIMPORT double __cdecl scalbn(double, int);
 PALIMPORT double __cdecl sin(double);
+PALIMPORT void __cdecl sincos(double, double*, double*);
 PALIMPORT double __cdecl sinh(double);
 PALIMPORT double __cdecl sqrt(double);
 PALIMPORT double __cdecl tan(double);
@@ -4174,25 +4184,13 @@ PALIMPORT int __cdecl _finitef(float);
 PALIMPORT int __cdecl _isnanf(float);
 PALIMPORT float __cdecl _copysignf(float, float);
 PALIMPORT float __cdecl acosf(float);
-PALIMPORT float __cdecl acoshf(float);
+PALIMPORT float __cdecl acoshf(float) MATH_THROW_DECL;
 PALIMPORT float __cdecl asinf(float);
-PALIMPORT float __cdecl asinhf(float);
-PALIMPORT float __cdecl atanf(float)
-#ifndef __sun
-THROW_DECL
-#endif
-;
-PALIMPORT float __cdecl atanhf(float)
-#ifndef __sun
-THROW_DECL
-#endif
-;
+PALIMPORT float __cdecl asinhf(float) MATH_THROW_DECL;
+PALIMPORT float __cdecl atanf(float) MATH_THROW_DECL;
+PALIMPORT float __cdecl atanhf(float) MATH_THROW_DECL;
 PALIMPORT float __cdecl atan2f(float, float);
-PALIMPORT float __cdecl cbrtf(float)
-#ifndef __sun
-THROW_DECL
-#endif
-;
+PALIMPORT float __cdecl cbrtf(float) MATH_THROW_DECL;
 PALIMPORT float __cdecl ceilf(float);
 PALIMPORT float __cdecl cosf(float);
 PALIMPORT float __cdecl coshf(float);
@@ -4200,15 +4198,15 @@ PALIMPORT float __cdecl expf(float);
 PALIMPORT float __cdecl fabsf(float);
 PALIMPORT float __cdecl floorf(float);
 PALIMPORT float __cdecl fmodf(float, float);
-PALIMPORT float __cdecl fmaf(float, float, float);
+PALIMPORT float __cdecl fmaf(float, float, float) MATH_THROW_DECL;
 PALIMPORT int __cdecl ilogbf(float);
 PALIMPORT float __cdecl logf(float);
-PALIMPORT float __cdecl log2f(float);
+PALIMPORT float __cdecl log2f(float) MATH_THROW_DECL;
 PALIMPORT float __cdecl log10f(float);
 PALIMPORT float __cdecl modff(float, float*);
 PALIMPORT float __cdecl powf(float, float);
-PALIMPORT float __cdecl scalbnf(float, int);
 PALIMPORT float __cdecl sinf(float);
+PALIMPORT void __cdecl sincosf(float, float*, float*);
 PALIMPORT float __cdecl sinhf(float);
 PALIMPORT float __cdecl sqrtf(float);
 PALIMPORT float __cdecl tanf(float);
@@ -4441,6 +4439,8 @@ private:
         ExceptionPointers.ContextRecord = ex.ExceptionPointers.ContextRecord;
         TargetFrameSp = ex.TargetFrameSp;
         RecordsOnStack = ex.RecordsOnStack;
+        ManagedToNativeExceptionCallback = ex.ManagedToNativeExceptionCallback;
+        ManagedToNativeExceptionCallbackContext = ex.ManagedToNativeExceptionCallbackContext;
 
         ex.Clear();
     }
@@ -4461,12 +4461,17 @@ public:
     SIZE_T TargetFrameSp;
     bool RecordsOnStack;
 
+    void(*ManagedToNativeExceptionCallback)(void* context);
+    void* ManagedToNativeExceptionCallbackContext;
+
     PAL_SEHException(EXCEPTION_RECORD *pExceptionRecord, CONTEXT *pContextRecord, bool onStack = false)
     {
         ExceptionPointers.ExceptionRecord = pExceptionRecord;
         ExceptionPointers.ContextRecord = pContextRecord;
         TargetFrameSp = NoTargetFrameSp;
         RecordsOnStack = onStack;
+        ManagedToNativeExceptionCallback = NULL;
+        ManagedToNativeExceptionCallbackContext = NULL;
     }
 
     PAL_SEHException()
@@ -4503,6 +4508,8 @@ public:
         ExceptionPointers.ContextRecord = NULL;
         TargetFrameSp = NoTargetFrameSp;
         RecordsOnStack = false;
+        ManagedToNativeExceptionCallback = NULL;
+        ManagedToNativeExceptionCallbackContext = NULL;
     }
 
     CONTEXT* GetContextRecord()
@@ -4523,6 +4530,19 @@ public:
     void SecondPassDone()
     {
         TargetFrameSp = NoTargetFrameSp;
+    }
+
+    bool HasPropagateExceptionCallback()
+    {
+        return ManagedToNativeExceptionCallback != NULL;
+    }
+
+    void SetPropagateExceptionCallback(
+        void(*callback)(void*),
+        void* context)
+    {
+        ManagedToNativeExceptionCallback = callback;
+        ManagedToNativeExceptionCallbackContext = context;
     }
 };
 

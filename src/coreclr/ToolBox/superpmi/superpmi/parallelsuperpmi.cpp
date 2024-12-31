@@ -1,7 +1,5 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 #include "standardpch.h"
 #include "superpmi.h"
@@ -31,9 +29,18 @@ bool StartProcess(char* commandLine, HANDLE hStdOutput, HANDLE hStdError, HANDLE
 
     ZeroMemory(&pi, sizeof(pi));
 
+#if TARGET_UNIX
+    const unsigned cmdLen = (unsigned)strlen(commandLine) + 1;
+    WCHAR* cmdLineW = new WCHAR[cmdLen];
+    MultiByteToWideChar(CP_UTF8, 0, commandLine, cmdLen, cmdLineW, cmdLen);
+#endif
     // Start the child process.
     if (!CreateProcess(NULL,        // No module name (use command line)
+#if TARGET_UNIX
+                       cmdLineW,    // Command line
+#else
                        commandLine, // Command line
+#endif
                        NULL,        // Process handle not inheritable
                        NULL,        // Thread handle not inheritable
                        TRUE,        // Set handle inheritance to TRUE (required to use STARTF_USESTDHANDLES)
@@ -45,10 +52,17 @@ bool StartProcess(char* commandLine, HANDLE hStdOutput, HANDLE hStdError, HANDLE
     {
         LogError("CreateProcess failed (%d). CommandLine: %s", GetLastError(), commandLine);
         *hProcess = INVALID_HANDLE_VALUE;
+#if TARGET_UNIX
+        delete[] cmdLineW;
+#endif
         return false;
     }
 
     *hProcess = pi.hProcess;
+
+#if TARGET_UNIX
+    delete[] cmdLineW;
+#endif
     return true;
 }
 
@@ -196,6 +210,7 @@ void ProcessChildStdOut(const CommandLine::Options& o,
                         int*                        jitted,
                         int*                        failed,
                         int*                        excluded,
+                        int*                        missing,
                         int*                        diffs,
                         bool*                       usageError)
 {
@@ -239,13 +254,13 @@ void ProcessChildStdOut(const CommandLine::Options& o,
         }
         else if (strncmp(buff, g_AllFormatStringFixedPrefix, strlen(g_AllFormatStringFixedPrefix)) == 0)
         {
-            int childLoaded = 0, childJitted = 0, childFailed = 0, childExcluded = 0;
+            int childLoaded = 0, childJitted = 0, childFailed = 0, childExcluded = 0, childMissing = 0;
             if (o.applyDiff)
             {
                 int childDiffs = 0;
                 int converted  = sscanf_s(buff, g_AsmDiffsSummaryFormatString, &childLoaded, &childJitted, &childFailed,
-                                         &childExcluded, &childDiffs);
-                if (converted != 5)
+                                         &childExcluded, &childMissing, &childDiffs);
+                if (converted != 6)
                 {
                     LogError("Couldn't parse status message: \"%s\"", buff);
                     continue;
@@ -255,8 +270,8 @@ void ProcessChildStdOut(const CommandLine::Options& o,
             else
             {
                 int converted =
-                    sscanf_s(buff, g_SummaryFormatString, &childLoaded, &childJitted, &childFailed, &childExcluded);
-                if (converted != 4)
+                    sscanf_s(buff, g_SummaryFormatString, &childLoaded, &childJitted, &childFailed, &childExcluded, &childMissing);
+                if (converted != 5)
                 {
                     LogError("Couldn't parse status message: \"%s\"", buff);
                     continue;
@@ -267,6 +282,7 @@ void ProcessChildStdOut(const CommandLine::Options& o,
             *jitted += childJitted;
             *failed += childFailed;
             *excluded += childExcluded;
+            *missing += childMissing;
         }
     }
 
@@ -382,7 +398,6 @@ char* ConstructChildProcessArgs(const CommandLine::Options& o)
     ADDARG_STRING(o.reproName, "-reproName");
     ADDARG_STRING(o.writeLogFile, "-writeLogFile");
     ADDARG_STRING(o.methodStatsTypes, "-emitMethodStats");
-    ADDARG_STRING(o.reproName, "-reproName");
     ADDARG_STRING(o.hash, "-matchHash");
     ADDARG_STRING(o.targetArchitecture, "-target");
     ADDARG_STRING(o.compileList, "-compile");
@@ -524,6 +539,12 @@ int doParallelSuperPMI(CommandLine::Options& o)
                                       arrDiffMCListPath[i]);
         }
 
+        if (o.failureLimit > 0)
+        {
+            bytesWritten += sprintf_s(cmdLine + bytesWritten, MAX_CMDLINE_SIZE - bytesWritten, " -failureLimit %d",
+                                      o.failureLimit);
+        }
+
         bytesWritten += sprintf_s(cmdLine + bytesWritten, MAX_CMDLINE_SIZE - bytesWritten, " -v ewmin %s", spmiArgs);
 
         SECURITY_ATTRIBUTES sa;
@@ -603,14 +624,14 @@ int doParallelSuperPMI(CommandLine::Options& o)
 
         bool usageError = false; // variable to flag if we hit a usage error in SuperPMI
 
-        int loaded = 0, jitted = 0, failed = 0, excluded = 0, diffs = 0;
+        int loaded = 0, jitted = 0, failed = 0, excluded = 0, missing = 0, diffs = 0;
 
         // Read the stderr files and log them as errors
         // Read the stdout files and parse them for counts and log any MISSING or ISSUE errors
         for (int i = 0; i < o.workerCount; i++)
         {
             ProcessChildStdErr(arrStdErrorPath[i]);
-            ProcessChildStdOut(o, arrStdOutputPath[i], &loaded, &jitted, &failed, &excluded, &diffs, &usageError);
+            ProcessChildStdOut(o, arrStdOutputPath[i], &loaded, &jitted, &failed, &excluded, &missing, &diffs, &usageError);
             if (usageError)
                 break;
         }
@@ -631,11 +652,11 @@ int doParallelSuperPMI(CommandLine::Options& o)
         {
             if (o.applyDiff)
             {
-                LogInfo(g_AsmDiffsSummaryFormatString, loaded, jitted, failed, excluded, diffs);
+                LogInfo(g_AsmDiffsSummaryFormatString, loaded, jitted, failed, excluded, missing, diffs);
             }
             else
             {
-                LogInfo(g_SummaryFormatString, loaded, jitted, failed, excluded);
+                LogInfo(g_SummaryFormatString, loaded, jitted, failed, excluded, missing);
             }
         }
 

@@ -240,6 +240,7 @@ namespace System.Reflection.Emit
                     assemblyName,
                     AssemblyBuilderAccess.Run,
                     ref stackMark,
+                    null,
                     null);
 
                 // this always gets the internal module.
@@ -346,7 +347,7 @@ namespace System.Reflection.Emit
                 // Compile the method since accessibility checks are done as part of compilation.
                 GetMethodDescriptor();
                 IRuntimeMethodInfo? methodHandle = m_methodHandle;
-                System.Runtime.CompilerServices.RuntimeHelpers._CompileMethod(methodHandle != null ? methodHandle.Value : RuntimeMethodHandleInternal.EmptyHandle);
+                System.Runtime.CompilerServices.RuntimeHelpers.CompileMethod(methodHandle != null ? methodHandle.Value : RuntimeMethodHandleInternal.EmptyHandle);
                 GC.KeepAlive(methodHandle);
             }
 
@@ -363,7 +364,7 @@ namespace System.Reflection.Emit
                 // Compile the method since accessibility checks are done as part of compilation
                 GetMethodDescriptor();
                 IRuntimeMethodInfo? methodHandle = m_methodHandle;
-                System.Runtime.CompilerServices.RuntimeHelpers._CompileMethod(methodHandle != null ? methodHandle.Value : RuntimeMethodHandleInternal.EmptyHandle);
+                System.Runtime.CompilerServices.RuntimeHelpers.CompileMethod(methodHandle != null ? methodHandle.Value : RuntimeMethodHandleInternal.EmptyHandle);
                 GC.KeepAlive(methodHandle);
             }
 
@@ -457,19 +458,20 @@ namespace System.Reflection.Emit
 
             // if we are here we passed all the previous checks. Time to look at the arguments
             bool wrapExceptions = (invokeAttr & BindingFlags.DoNotWrapExceptions) == 0;
-            object retValue;
-            if (actualCount > 0)
+
+            StackAllocedArguments stackArgs = default;
+            Span<object?> arguments = default;
+            if (actualCount != 0)
             {
-                object[] arguments = CheckArguments(parameters!, binder, invokeAttr, culture, sig);
-                retValue = RuntimeMethodHandle.InvokeMethod(null, arguments, sig, false, wrapExceptions);
-                // copy out. This should be made only if ByRef are present.
-                for (int index = 0; index < arguments.Length; index++)
-                    parameters![index] = arguments[index];
+                arguments = CheckArguments(ref stackArgs, parameters, binder, invokeAttr, culture, sig);
             }
-            else
-            {
-                retValue = RuntimeMethodHandle.InvokeMethod(null, null, sig, false, wrapExceptions);
-            }
+
+            object? retValue = RuntimeMethodHandle.InvokeMethod(null, arguments, sig, false, wrapExceptions);
+
+            // copy out. This should be made only if ByRef are present.
+            // n.b. cannot use Span<T>.CopyTo, as parameters.GetType() might not actually be typeof(object[])
+            for (int index = 0; index < arguments.Length; index++)
+                parameters![index] = arguments[index];
 
             GC.KeepAlive(this);
             return retValue;

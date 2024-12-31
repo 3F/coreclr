@@ -50,7 +50,7 @@ ReturnKind GCInfo::getReturnKind()
         case TYP_STRUCT:
         {
             CORINFO_CLASS_HANDLE structType = compiler->info.compMethodInfo->args.retTypeClass;
-            var_types            retType    = compiler->getReturnTypeForStruct(structType);
+            var_types            retType    = compiler->getReturnTypeForStruct(structType, compiler->info.compCallConv);
 
             switch (retType)
             {
@@ -127,9 +127,8 @@ ReturnKind GCInfo::getReturnKind()
 void GCInfo::gcMarkFilterVarsPinned()
 {
     assert(compiler->ehAnyFunclets());
-    const EHblkDsc* endHBtab = &(compiler->compHndBBtab[compiler->compHndBBtabCount]);
 
-    for (EHblkDsc* HBtab = compiler->compHndBBtab; HBtab < endHBtab; HBtab++)
+    for (EHblkDsc* const HBtab : EHClauses(compiler))
     {
         if (HBtab->HasFilter())
         {
@@ -1597,7 +1596,7 @@ size_t GCInfo::gcInfoBlockHdrSave(
     if (compiler->getNeedsGSSecurityCookie())
     {
         assert(compiler->lvaGSSecurityCookie != BAD_VAR_NUM);
-        int stkOffs            = compiler->lvaTable[compiler->lvaGSSecurityCookie].lvStkOffs;
+        int stkOffs            = compiler->lvaTable[compiler->lvaGSSecurityCookie].GetStackOffset();
         header->gsCookieOffset = compiler->isFramePointerUsed() ? -stkOffs : stkOffs;
         assert(header->gsCookieOffset != INVALID_GS_COOKIE_OFFSET);
     }
@@ -1623,6 +1622,13 @@ size_t GCInfo::gcInfoBlockHdrSave(
 #endif
 
     header->revPInvokeOffset = INVALID_REV_PINVOKE_OFFSET;
+    if (compiler->opts.IsReversePInvoke())
+    {
+        assert(compiler->lvaReversePInvokeFrameVar != BAD_VAR_NUM);
+        int stkOffs              = compiler->lvaTable[compiler->lvaReversePInvokeFrameVar].GetStackOffset();
+        header->revPInvokeOffset = compiler->isFramePointerUsed() ? -stkOffs : stkOffs;
+        assert(header->revPInvokeOffset != INVALID_REV_PINVOKE_OFFSET);
+    }
 
     assert((compiler->compArgSize & 0x3) == 0);
 
@@ -1724,6 +1730,15 @@ size_t GCInfo::gcInfoBlockHdrSave(
             size += sz;
             dest += (sz & mask);
         }
+    }
+
+    if (header->revPInvokeOffset != INVALID_REV_PINVOKE_OFFSET)
+    {
+        assert(mask == 0 || state.revPInvokeOffset == HAS_REV_PINVOKE_FRAME_OFFSET);
+        unsigned offset = header->revPInvokeOffset;
+        unsigned sz     = encodeUnsigned(mask ? dest : NULL, offset);
+        size += sz;
+        dest += (sz & mask);
     }
 
     if (header->epilogCount)
@@ -2144,7 +2159,7 @@ size_t GCInfo::gcMakeRegPtrTable(BYTE* dest, int mask, const InfoHdr& header, un
 
     /* Start computing the total size of the table */
 
-    BOOL emitArgTabOffset = (header.varPtrTableSize != 0 || header.untrackedCnt > SET_UNTRACKED_MAX);
+    bool emitArgTabOffset = (header.varPtrTableSize != 0 || header.untrackedCnt > SET_UNTRACKED_MAX);
     if (mask != 0 && emitArgTabOffset)
     {
         assert(*pArgTabOffset <= MAX_UNSIGNED_SIZE_T);
@@ -2198,7 +2213,7 @@ size_t GCInfo::gcMakeRegPtrTable(BYTE* dest, int mask, const InfoHdr& header, un
                     continue;
                 }
 
-                int offset = varDsc->lvStkOffs;
+                int offset = varDsc->GetStackOffset();
 #if DOUBLE_ALIGN
                 // For genDoubleAlign(), locals are addressed relative to ESP and
                 // arguments are addressed relative to EBP.
@@ -2247,7 +2262,7 @@ size_t GCInfo::gcMakeRegPtrTable(BYTE* dest, int mask, const InfoHdr& header, un
                         continue;
                     }
 
-                    unsigned offset = varDsc->lvStkOffs + i * TARGET_POINTER_SIZE;
+                    unsigned offset = varDsc->GetStackOffset() + i * TARGET_POINTER_SIZE;
 #if DOUBLE_ALIGN
                     // For genDoubleAlign(), locals are addressed relative to ESP and
                     // arguments are addressed relative to EBP.
@@ -2352,7 +2367,7 @@ size_t GCInfo::gcMakeRegPtrTable(BYTE* dest, int mask, const InfoHdr& header, un
 
             assert(compiler->lvaTable[compiler->info.compThisArg].TypeGet() == TYP_REF);
 
-            unsigned varOffs = compiler->lvaTable[compiler->info.compThisArg].lvStkOffs;
+            unsigned varOffs = compiler->lvaTable[compiler->info.compThisArg].GetStackOffset();
 
             /* For negative stack offsets we must reset the low bits,
                 * take abs and then set them back */
@@ -3588,7 +3603,7 @@ const bool verifyGCTables = false;
  *  Dump the info block header.
  */
 
-unsigned GCInfo::gcInfoBlockHdrDump(const BYTE* table, InfoHdr* header, unsigned* methodSize)
+size_t GCInfo::gcInfoBlockHdrDump(const BYTE* table, InfoHdr* header, unsigned* methodSize)
 {
     GCDump gcDump(GCINFO_VERSION);
 
@@ -3600,7 +3615,7 @@ unsigned GCInfo::gcInfoBlockHdrDump(const BYTE* table, InfoHdr* header, unsigned
 
 /*****************************************************************************/
 
-unsigned GCInfo::gcDumpPtrTable(const BYTE* table, const InfoHdr& header, unsigned methodSize)
+size_t GCInfo::gcDumpPtrTable(const BYTE* table, const InfoHdr& header, unsigned methodSize)
 {
     printf("Pointer table:\n");
 
@@ -3664,8 +3679,8 @@ public:
         GcSlotId newSlotId = m_gcInfoEncoder->GetStackSlotId(spOffset, flags, spBase);
         if (m_doLogging)
         {
-            printf("Stack slot id for offset %d (0x%x) (%s) %s= %d.\n", spOffset, spOffset,
-                   JitGcStackSlotBaseNames[spBase], GcSlotFlagsNames[flags & 7], newSlotId);
+            printf("Stack slot id for offset %d (%s0x%x) (%s) %s= %d.\n", spOffset, spOffset < 0 ? "-" : "",
+                   abs(spOffset), JitGcStackSlotBaseNames[spBase], GcSlotFlagsNames[flags & 7], newSlotId);
         }
         return newSlotId;
     }
@@ -3891,19 +3906,22 @@ void GCInfo::gcInfoBlockHdrSave(GcInfoEncoder* gcInfoEncoder, unsigned methodSiz
                 assert(false);
         }
 
-        int offset = 0;
+        const int offset = compiler->lvaToCallerSPRelativeOffset(compiler->lvaCachedGenericContextArgOffset(),
+                                                                 compiler->isFramePointerUsed());
 
+#ifdef DEBUG
         if (compiler->opts.IsOSR())
         {
-            PatchpointInfo* ppInfo = compiler->info.compPatchpointInfo;
-            offset                 = ppInfo->GenericContextArgOffset();
-            assert(offset != -1);
+            // Sanity check the offset vs saved patchpoint info.
+            //
+            // PP info has FP relative offset, to get to caller SP we need to
+            // subtract off 2 register slots (saved FP, saved RA).
+            //
+            const PatchpointInfo* const ppInfo    = compiler->info.compPatchpointInfo;
+            const int                   osrOffset = ppInfo->GenericContextArgOffset() - 2 * REGSIZE_BYTES;
+            assert(offset == osrOffset);
         }
-        else
-        {
-            offset = compiler->lvaToCallerSPRelativeOffset(compiler->lvaCachedGenericContextArgOffset(),
-                                                           compiler->isFramePointerUsed());
-        }
+#endif
 
         gcInfoEncoderWithLog->SetGenericsInstContextStackSlot(offset, ctxtParamType);
     }
@@ -3913,19 +3931,33 @@ void GCInfo::gcInfoBlockHdrSave(GcInfoEncoder* gcInfoEncoder, unsigned methodSiz
     {
         assert(compiler->info.compThisArg != BAD_VAR_NUM);
 
-        int offset = 0;
-
+        // OSR can report the root method's frame slot, if that method reported context.
+        // If not, the OSR frame will have saved the needed context.
+        //
+        bool useRootFrameSlot = true;
         if (compiler->opts.IsOSR())
         {
-            PatchpointInfo* ppInfo = compiler->info.compPatchpointInfo;
-            offset                 = ppInfo->GenericContextArgOffset();
-            assert(offset != -1);
+            const PatchpointInfo* const ppInfo = compiler->info.compPatchpointInfo;
+
+            useRootFrameSlot = ppInfo->HasKeptAliveThis();
         }
-        else
+
+        const int offset = compiler->lvaToCallerSPRelativeOffset(compiler->lvaCachedGenericContextArgOffset(),
+                                                                 compiler->isFramePointerUsed(), useRootFrameSlot);
+
+#ifdef DEBUG
+        if (compiler->opts.IsOSR() && useRootFrameSlot)
         {
-            offset = compiler->lvaToCallerSPRelativeOffset(compiler->lvaCachedGenericContextArgOffset(),
-                                                           compiler->isFramePointerUsed());
+            // Sanity check the offset vs saved patchpoint info.
+            //
+            // PP info has FP relative offset, to get to caller SP we need to
+            // subtract off 2 register slots (saved FP, saved RA).
+            //
+            const PatchpointInfo* const ppInfo    = compiler->info.compPatchpointInfo;
+            const int                   osrOffset = ppInfo->KeptAliveThisOffset() - 2 * REGSIZE_BYTES;
+            assert(offset == osrOffset);
         }
+#endif
 
         gcInfoEncoderWithLog->SetGenericsInstContextStackSlot(offset, GENERIC_CONTEXTPARAM_THIS);
     }
@@ -3935,22 +3967,7 @@ void GCInfo::gcInfoBlockHdrSave(GcInfoEncoder* gcInfoEncoder, unsigned methodSiz
         assert(compiler->lvaGSSecurityCookie != BAD_VAR_NUM);
 
         // The lv offset is FP-relative, and the using code expects caller-sp relative, so translate.
-        int offset = compiler->lvaGetCallerSPRelativeOffset(compiler->lvaGSSecurityCookie);
-
-        if (compiler->opts.IsOSR())
-        {
-            // The offset computed above already includes the OSR frame adjustment, plus the
-            // pop of the "pseudo return address" from the OSR frame.
-            //
-            // To get to caller-SP, we need to subtract off the original frame size and the
-            // pushed RA and RBP for that frame. But ppInfo's FpToSpDelta also accounts for the
-            // pseudo RA between the original method frame and the OSR frame. So the net adjustment
-            // is simply FpToSpDelta plus one register.
-            PatchpointInfo* ppInfo     = compiler->info.compPatchpointInfo;
-            int             adjustment = ppInfo->FpToSpDelta() + REGSIZE_BYTES;
-            offset -= adjustment;
-            JITDUMP("OSR cookie adjustment %d, final caller-SP offset %d\n", adjustment, offset);
-        }
+        const int offset = compiler->lvaGetCallerSPRelativeOffset(compiler->lvaGSSecurityCookie);
 
         // The code offset ranges assume that the GS Cookie slot is initialized in the prolog, and is valid
         // through the remainder of the method.  We will not query for the GS Cookie while we're in an epilog,
@@ -4078,10 +4095,6 @@ void GCInfo::gcMakeRegPtrTable(
      **************************************************************************
      */
 
-    unsigned count = 0;
-
-    int lastoffset = 0;
-
     /* Count&Write untracked locals and non-enregistered args */
 
     unsigned   varNum;
@@ -4169,18 +4182,19 @@ void GCInfo::gcMakeRegPtrTable(
                 // No need to hash/lookup untracked GC refs; just grab a new Slot Id.
                 if (mode == MAKE_REG_PTR_MODE_ASSIGN_SLOTS)
                 {
-                    gcInfoEncoderWithLog->GetStackSlotId(varDsc->lvStkOffs, flags, stackSlotBase);
+                    gcInfoEncoderWithLog->GetStackSlotId(varDsc->GetStackOffset(), flags, stackSlotBase);
                 }
             }
             else
             {
-                StackSlotIdKey sskey(varDsc->lvStkOffs, (stackSlotBase == GC_FRAMEREG_REL), flags);
+                StackSlotIdKey sskey(varDsc->GetStackOffset(), (stackSlotBase == GC_FRAMEREG_REL), flags);
                 GcSlotId       varSlotId;
                 if (mode == MAKE_REG_PTR_MODE_ASSIGN_SLOTS)
                 {
                     if (!m_stackSlotMap->Lookup(sskey, &varSlotId))
                     {
-                        varSlotId = gcInfoEncoderWithLog->GetStackSlotId(varDsc->lvStkOffs, flags, stackSlotBase);
+                        varSlotId =
+                            gcInfoEncoderWithLog->GetStackSlotId(varDsc->GetStackOffset(), flags, stackSlotBase);
                         m_stackSlotMap->Set(sskey, varSlotId);
                     }
                 }
@@ -4201,7 +4215,7 @@ void GCInfo::gcMakeRegPtrTable(
                     continue;
                 }
 
-                int offset = varDsc->lvStkOffs + i * TARGET_POINTER_SIZE;
+                int offset = varDsc->GetStackOffset() + i * TARGET_POINTER_SIZE;
 #if DOUBLE_ALIGN
                 // For genDoubleAlign(), locals are addressed relative to ESP and
                 // arguments are addressed relative to EBP.
@@ -4307,8 +4321,6 @@ void GCInfo::gcMakeRegPtrTable(
 
         for (regPtrDsc* genRegPtrTemp = gcRegPtrList; genRegPtrTemp != nullptr; genRegPtrTemp = genRegPtrTemp->rpdNext)
         {
-            int nextOffset = genRegPtrTemp->rpdOffs;
-
             if (genRegPtrTemp->rpdArg)
             {
                 if (genRegPtrTemp->rpdArgTypeGet() == rpdARG_KILL)
@@ -4648,7 +4660,7 @@ void GCInfo::gcInfoRecordGCRegStateChange(GcInfoEncoder* gcInfoEncoder,
         }
         else
         {
-            BOOL b = m_regSlotMap->Lookup(rskey, &regSlotId);
+            bool b = m_regSlotMap->Lookup(rskey, &regSlotId);
             assert(b); // Should have been added in the first pass.
             gcInfoEncoderWithLog->SetSlotState(instrOffset, regSlotId, newState);
         }
@@ -4748,7 +4760,7 @@ void GCInfo::gcMakeVarPtrTable(GcInfoEncoder* gcInfoEncoder, MakeRegPtrMode mode
         }
         else
         {
-            BOOL b = m_stackSlotMap->Lookup(sskey, &varSlotId);
+            bool b = m_stackSlotMap->Lookup(sskey, &varSlotId);
             assert(b); // Should have been added in the first pass.
             // Live from the beginning to the end.
             gcInfoEncoderWithLog->SetSlotState(begOffs, varSlotId, GC_SLOT_LIVE);
@@ -4770,7 +4782,7 @@ void GCInfo::gcInfoRecordGCStackArgLive(GcInfoEncoder* gcInfoEncoder, MakeRegPtr
 
     GCENCODER_WITH_LOGGING(gcInfoEncoderWithLog, gcInfoEncoder);
 
-    StackSlotIdKey sskey(genStackPtr->rpdPtrArg, FALSE,
+    StackSlotIdKey sskey(genStackPtr->rpdPtrArg, false,
                          GcSlotFlags(genStackPtr->rpdGCtypeGet() == GCT_BYREF ? GC_SLOT_INTERIOR : GC_SLOT_BASE));
     GcSlotId varSlotId;
     if (mode == MAKE_REG_PTR_MODE_ASSIGN_SLOTS)
@@ -4783,7 +4795,7 @@ void GCInfo::gcInfoRecordGCStackArgLive(GcInfoEncoder* gcInfoEncoder, MakeRegPtr
     }
     else
     {
-        BOOL b = m_stackSlotMap->Lookup(sskey, &varSlotId);
+        bool b = m_stackSlotMap->Lookup(sskey, &varSlotId);
         assert(b); // Should have been added in the first pass.
         // Live until the call.
         gcInfoEncoderWithLog->SetSlotState(genStackPtr->rpdOffs, varSlotId, GC_SLOT_LIVE);
@@ -4818,10 +4830,10 @@ void GCInfo::gcInfoRecordGCStackArgsDead(GcInfoEncoder* gcInfoEncoder,
         assert(genRegPtrTemp->rpdGCtypeGet() != GCT_NONE);
         assert(genRegPtrTemp->rpdArgTypeGet() == rpdARG_PUSH);
 
-        StackSlotIdKey sskey(genRegPtrTemp->rpdPtrArg, FALSE,
+        StackSlotIdKey sskey(genRegPtrTemp->rpdPtrArg, false,
                              genRegPtrTemp->rpdGCtypeGet() == GCT_BYREF ? GC_SLOT_INTERIOR : GC_SLOT_BASE);
         GcSlotId varSlotId;
-        BOOL     b = m_stackSlotMap->Lookup(sskey, &varSlotId);
+        bool     b = m_stackSlotMap->Lookup(sskey, &varSlotId);
         assert(b); // Should have been added in the first pass.
         // Live until the call.
         gcInfoEncoderWithLog->SetSlotState(instrOffset, varSlotId, GC_SLOT_DEAD);

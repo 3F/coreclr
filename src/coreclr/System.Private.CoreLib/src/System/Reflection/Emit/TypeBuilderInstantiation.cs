@@ -106,6 +106,11 @@ namespace System.Reflection.Emit
         public override string? FullName => m_strFullQualName ??= TypeNameBuilder.ToString(this, TypeNameBuilder.Format.FullName);
         public override string? Namespace => m_type.Namespace;
         public override string? AssemblyQualifiedName => TypeNameBuilder.ToString(this, TypeNameBuilder.Format.AssemblyQualifiedName);
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2055:UnrecognizedReflectionPattern",
+            Justification = "The entire TypeBuilderInstantiation is serving the MakeGenericType implementation. " +
+                            "Currently this is not supported by linker. Once it is supported the outercall (Type.MakeGenericType)" +
+                            "will validate that the types fullfill the necessary requirements of annotations on type parameters." +
+                            "As such the actual internals of the implementation are not interesting.")]
         private Type Substitute(Type[] substitutes)
         {
             Type[] inst = GetGenericArguments();
@@ -173,7 +178,13 @@ namespace System.Reflection.Emit
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.NonPublicFields)]
         public override FieldInfo[] GetFields(BindingFlags bindingAttr) { throw new NotSupportedException(); }
 
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
+        [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2063:UnrecognizedReflectionPattern",
+            Justification = "Linker doesn't recognize always throwing method. https://github.com/mono/linker/issues/2025")]
         public override Type GetInterface(string name, bool ignoreCase) { throw new NotSupportedException(); }
+
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
         public override Type[] GetInterfaces() { throw new NotSupportedException(); }
 
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicEvents | DynamicallyAccessedMemberTypes.NonPublicEvents)]
@@ -194,15 +205,15 @@ namespace System.Reflection.Emit
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicNestedTypes | DynamicallyAccessedMemberTypes.NonPublicNestedTypes)]
         public override Type GetNestedType(string name, BindingFlags bindingAttr) { throw new NotSupportedException(); }
 
-        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
+        [DynamicallyAccessedMembers(GetAllMembers)]
         public override MemberInfo[] GetMember(string name, MemberTypes type, BindingFlags bindingAttr) { throw new NotSupportedException(); }
 
-        public override InterfaceMapping GetInterfaceMap(Type interfaceType) { throw new NotSupportedException(); }
+        public override InterfaceMapping GetInterfaceMap([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type interfaceType) { throw new NotSupportedException(); }
 
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicEvents | DynamicallyAccessedMemberTypes.NonPublicEvents)]
         public override EventInfo[] GetEvents(BindingFlags bindingAttr) { throw new NotSupportedException(); }
 
-        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
+        [DynamicallyAccessedMembers(GetAllMembers)]
         public override MemberInfo[] GetMembers(BindingFlags bindingAttr) { throw new NotSupportedException(); }
 
         protected override TypeAttributes GetAttributeFlagsImpl() { return m_type.Attributes; }
@@ -240,6 +251,8 @@ namespace System.Reflection.Emit
         }
         public override MethodBase? DeclaringMethod => null;
         public override Type GetGenericTypeDefinition() { return m_type; }
+
+        [RequiresUnreferencedCode("If some of the generic arguments are annotated (either with DynamicallyAccessedMembersAttribute, or generic constraints), trimming can't validate that the requirements of those annotations are met.")]
         public override Type MakeGenericType(params Type[] inst) { throw new InvalidOperationException(SR.Format(SR.Arg_NotGenericTypeDefinition, this)); }
         public override bool IsAssignableFrom([NotNullWhen(true)] Type? c) { throw new NotSupportedException(); }
 

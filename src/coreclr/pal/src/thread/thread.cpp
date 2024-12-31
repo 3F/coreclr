@@ -91,6 +91,11 @@ typedef cpuset_t cpu_set_t;
 
 using namespace CorUnix;
 
+#ifdef __APPLE__
+#define MAX_THREAD_NAME_SIZE 63
+#else
+#define MAX_THREAD_NAME_SIZE 15
+#endif
 
 /* ------------------- Definitions ------------------------------*/
 
@@ -539,7 +544,6 @@ CorUnix::InternalCreateThread(
 
     pthread_t pthread;
     pthread_attr_t pthreadAttr;
-    size_t pthreadStackSize;
 #if PTHREAD_CREATE_MODIFIES_ERRNO
     int storedErrno;
 #endif  // PTHREAD_CREATE_MODIFIES_ERRNO
@@ -855,7 +859,7 @@ ExitThread(
     pthread_exit(NULL);
 
     ASSERT("pthread_exit should not return!\n");
-    for (;;);
+    while (true);
 }
 
 /*++
@@ -1251,6 +1255,9 @@ InternalSetThreadPriorityExit:
     return palError;
 }
 
+#define SECS_TO_NS 1000000000 /* 10^9 */
+#define USECS_TO_NS 1000 /* 10^3 */
+
 BOOL
 CorUnix::GetThreadTimesInternal(
     IN HANDLE hThread,
@@ -1259,8 +1266,6 @@ CorUnix::GetThreadTimesInternal(
 {
     __int64 calcTime;
     BOOL retval = FALSE;
-    const __int64 SECS_TO_NS = 1000000000; /* 10^9 */
-    const __int64 USECS_TO_NS = 1000;      /* 10^3 */
 
 #if HAVE_MACH_THREADS
     thread_basic_info resUsage;
@@ -1622,13 +1627,14 @@ CorUnix::InternalSetThreadDescription(
     PAL_ERROR palError = NO_ERROR;
     CPalThread *pTargetThread = NULL;
     IPalObject *pobjThread = NULL;
-    int error;
+    int error = 0;
+    int maxNameSize = 0;
     int nameSize;
     char *nameBuf = NULL;
 
 // The exact API of pthread_setname_np varies very wildly depending on OS.
-// For now, only Linux is implemented.
-#if defined(__linux__)
+// For now, only Linux and macOS are implemented.
+#if defined(__linux__) || defined(__APPLE__)
 
     palError = InternalGetThreadDataFromHandle(
         pThread,
@@ -1675,13 +1681,24 @@ CorUnix::InternalSetThreadDescription(
     }
 
     // Null terminate early.
-    // pthread_setname_np only accepts up to 16 chars.
-    if (nameSize > 15)
+    // pthread_setname_np only accepts up to 16 chars on Linux and
+    // 64 chars on macOS.
+    if (nameSize > MAX_THREAD_NAME_SIZE)
     {
-        nameBuf[15] = '\0';
+        nameBuf[MAX_THREAD_NAME_SIZE] = '\0';
     }
-
+    
+    #if defined(__linux__)
     error = pthread_setname_np(pTargetThread->GetPThreadSelf(), nameBuf);
+    #endif
+
+    #if defined(__APPLE__)
+    // on macOS, pthread_setname_np only works for the calling thread.
+    if (PlatformGetCurrentThreadId() == pTargetThread->GetThreadId()) 
+    {
+        error = pthread_setname_np(nameBuf);
+    }
+    #endif
 
     if (error != 0)
     {
@@ -1704,7 +1721,7 @@ InternalSetThreadDescriptionExit:
         PAL_free(nameBuf);
     }
 
-#endif // defined(__linux__)
+#endif //defined(__linux__) || defined(__APPLE__)
 
     return palError;
 }
@@ -2600,6 +2617,7 @@ CPalThread::FreeSignalAlternateStack()
         // ss_size is >= MINSIGSTKSZ even in this case.
         ss.ss_size = MINSIGSTKSZ;
         ss.ss_flags = SS_DISABLE;
+        ss.ss_sp = NULL;
         int st = sigaltstack(&ss, &oss);
         if ((st == 0) && (oss.ss_flags != SS_DISABLE))
         {

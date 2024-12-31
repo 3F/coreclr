@@ -83,12 +83,6 @@ public:
     // Marshals a delegate to a unmanaged callback.
     static LPVOID ConvertToCallback(OBJECTREF pDelegate);
 
-#if defined(TARGET_X86)
-    // Marshals a managed method to an unmanaged callback.
-    // This is only used on x86. See usage for further details.
-    static PCODE ConvertToUnmanagedCallback(MethodDesc* pMD);
-#endif // defined(TARGET_X86)
-
     // Marshals an unmanaged callback to Delegate
     static OBJECTREF ConvertToDelegate(LPVOID pCallback, MethodTable* pMT);
 
@@ -134,17 +128,17 @@ public:
     static MethodDesc* FindDelegateInvokeMethod(MethodTable *pMT);
     static BOOL IsDelegateInvokeMethod(MethodDesc *pMD);
 
-    static BOOL IsMethodDescCompatible(TypeHandle   thFirstArg,
+    static bool IsMethodDescCompatible(TypeHandle   thFirstArg,
                                        TypeHandle   thExactMethodType,
                                        MethodDesc  *pTargetMethod,
                                        TypeHandle   thDelegate,
                                        MethodDesc  *pInvokeMethod,
                                        int          flags,
-                                       BOOL        *pfIsOpenDelegate);
+                                       bool        *pfIsOpenDelegate);
     static MethodDesc* GetDelegateCtor(TypeHandle delegateType, MethodDesc *pTargetMethod, DelegateCtorArgs *pCtorData);
     //@GENERICSVER: new (suitable for generics)
     // Method to do static validation of delegate .ctor
-    static BOOL ValidateCtor(TypeHandle objHnd, TypeHandle ftnParentHnd, MethodDesc *pFtn, TypeHandle dlgtHnd, BOOL *pfIsOpenDelegate);
+    static bool ValidateCtor(TypeHandle objHnd, TypeHandle ftnParentHnd, MethodDesc *pFtn, TypeHandle dlgtHnd, bool *pfIsOpenDelegate);
 
 private:
     static void BindToMethod(DELEGATEREF   *pRefThis,
@@ -208,7 +202,7 @@ struct ShuffleEntry
 
     union {
         UINT16    dstofs;           //if srcofs != SENTINEL
-        UINT16    stacksizedelta;   //if dstofs == SENTINEL, difference in stack size between virtual and static sigs
+        UINT16    stacksizedelta;   //if srcofs == SENTINEL, difference in stack size between virtual and static sigs
     };
 };
 

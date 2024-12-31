@@ -641,7 +641,7 @@ void VirtualCallStubManager::Init(BaseDomain *pDomain, LoaderAllocator *pLoaderA
                               dwTotalReserveMemSize);
         }
 
-        initReservedMem = ClrVirtualAllocExecutable (dwTotalReserveMemSize, MEM_RESERVE, PAGE_NOACCESS);
+        initReservedMem = (BYTE*)ExecutableAllocator::Instance()->Reserve(dwTotalReserveMemSize);
 
         m_initialReservedMemForHeaps = (BYTE *) initReservedMem;
 
@@ -1209,8 +1209,9 @@ VTableCallHolder* VirtualCallStubManager::GenerateVTableCallStub(DWORD slot)
 
     //allocate from the requisite heap and copy the template over it.
     VTableCallHolder * pHolder = (VTableCallHolder*)(void*)vtable_heap->AllocAlignedMem(VTableCallHolder::GetHolderSize(slot), CODE_SIZE_ALIGN);
+    ExecutableWriterHolder<VTableCallHolder> vtableWriterHolder(pHolder, sizeof(VTableCallHolder));
+    vtableWriterHolder.GetRW()->Initialize(slot);
 
-    pHolder->Initialize(slot);
     ClrFlushInstructionCache(pHolder->stub(), pHolder->stub()->size());
 
     AddToCollectibleVSDRangeList(pHolder);
@@ -1334,6 +1335,14 @@ extern "C" PCODE STDCALL StubDispatchFixupWorker(TransitionBlock * pTransitionBl
 
     pTarget = pMgr->ResolveWorker(&callSite, protectedObj, token, VirtualCallStubManager::SK_LOOKUP);
     _ASSERTE(pTarget != NULL);
+
+#if _DEBUG
+    if (pSDFrame->GetGCRefMap() != NULL)
+    {
+        GCX_PREEMP();
+        _ASSERTE(CheckGCRefMapEqual(pSDFrame->GetGCRefMap(), pSDFrame->GetFunction(), true));
+    }
+#endif // _DEBUG
 
     // Ready to return
 
@@ -1651,6 +1660,14 @@ PCODE VSD_ResolveWorker(TransitionBlock * pTransitionBlock,
 #endif
 
     target = pMgr->ResolveWorker(&callSite, protectedObj, representativeToken, stubKind);
+
+#if _DEBUG
+    if (pSDFrame->GetGCRefMap() != NULL)
+    {
+        GCX_PREEMP();
+        _ASSERTE(CheckGCRefMapEqual(pSDFrame->GetGCRefMap(), pSDFrame->GetFunction(), true));
+    }
+#endif // _DEBUG
 
     GCPROTECT_END();
 
@@ -2749,7 +2766,8 @@ DispatchHolder *VirtualCallStubManager::GenerateDispatchStub(PCODE            ad
     }
 #endif
 
-    holder->Initialize(addrOfCode,
+    ExecutableWriterHolder<DispatchHolder> dispatchWriterHolder(holder, dispatchHolderSize);
+    dispatchWriterHolder.GetRW()->Initialize(holder, addrOfCode,
                        addrOfFail,
                        (size_t)pMTExpected
 #ifdef TARGET_AMD64
@@ -2811,10 +2829,11 @@ DispatchHolder *VirtualCallStubManager::GenerateDispatchStubLong(PCODE          
     } CONTRACT_END;
 
     //allocate from the requisite heap and copy the template over it.
-    DispatchHolder * holder = (DispatchHolder*) (void*)
-        dispatch_heap->AllocAlignedMem(DispatchHolder::GetHolderSize(DispatchStub::e_TYPE_LONG), CODE_SIZE_ALIGN);
+    size_t dispatchHolderSize = DispatchHolder::GetHolderSize(DispatchStub::e_TYPE_LONG);
+    DispatchHolder * holder = (DispatchHolder*) (void*)dispatch_heap->AllocAlignedMem(dispatchHolderSize, CODE_SIZE_ALIGN);
+    ExecutableWriterHolder<DispatchHolder> dispatchWriterHolder(holder, dispatchHolderSize);
 
-    holder->Initialize(addrOfCode,
+    dispatchWriterHolder.GetRW()->Initialize(holder, addrOfCode,
                        addrOfFail,
                        (size_t)pMTExpected,
                        DispatchStub::e_TYPE_LONG);
@@ -2922,8 +2941,10 @@ ResolveHolder *VirtualCallStubManager::GenerateResolveStub(PCODE            addr
     //allocate from the requisite heap and copy the templates for each piece over it.
     ResolveHolder * holder = (ResolveHolder*) (void*)
         resolve_heap->AllocAlignedMem(sizeof(ResolveHolder), CODE_SIZE_ALIGN);
+    ExecutableWriterHolder<ResolveHolder> resolveWriterHolder(holder, sizeof(ResolveHolder));
 
-    holder->Initialize(addrOfResolver, addrOfPatcher,
+    resolveWriterHolder.GetRW()->Initialize(holder,
+                       addrOfResolver, addrOfPatcher,
                        dispatchToken, DispatchCache::HashToken(dispatchToken),
                        g_resolveCache->GetCacheBaseAddr(), counterAddr
 #if defined(TARGET_X86) && !defined(UNIX_X86_ABI)
@@ -2962,8 +2983,9 @@ LookupHolder *VirtualCallStubManager::GenerateLookupStub(PCODE addrOfResolver, s
 
     //allocate from the requisite heap and copy the template over it.
     LookupHolder * holder     = (LookupHolder*) (void*) lookup_heap->AllocAlignedMem(sizeof(LookupHolder), CODE_SIZE_ALIGN);
+    ExecutableWriterHolder<LookupHolder> lookupWriterHolder(holder, sizeof(LookupHolder));
 
-    holder->Initialize(addrOfResolver, dispatchToken);
+    lookupWriterHolder.GetRW()->Initialize(holder, addrOfResolver, dispatchToken);
     ClrFlushInstructionCache(holder->stub(), holder->stub()->size());
 
     AddToCollectibleVSDRangeList(holder);
@@ -3987,8 +4009,7 @@ VirtualCallStubManager *VirtualCallStubManagerManager::FindVirtualCallStubManage
 
     // Check the current and shared domains.
     {
-        Thread *pThread = GetThread();
-
+        Thread *pThread = GetThreadNULLOk();
         if (pThread != NULL)
         {
             // Check the current domain

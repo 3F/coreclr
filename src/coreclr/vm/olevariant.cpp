@@ -329,20 +329,24 @@ VARTYPE OleVariant::GetVarTypeForTypeHandle(TypeHandle type)
 #endif
 
 #ifdef FEATURE_COMINTEROP
-    if (CoreLibBinder::IsClass(pMT, CLASS__DISPATCH_WRAPPER))
-        return VT_DISPATCH;
-    if (CoreLibBinder::IsClass(pMT, CLASS__UNKNOWN_WRAPPER))
-        return VT_UNKNOWN;
-    if (CoreLibBinder::IsClass(pMT, CLASS__ERROR_WRAPPER))
-        return VT_ERROR;
-    if (CoreLibBinder::IsClass(pMT, CLASS__CURRENCY_WRAPPER))
-        return VT_CY;
-    if (CoreLibBinder::IsClass(pMT, CLASS__BSTR_WRAPPER))
-        return VT_BSTR;
+    // The wrapper types are only available when built-in COM is supported.
+    if (g_pConfig->IsBuiltInCOMSupported())
+    {
+        if (CoreLibBinder::IsClass(pMT, CLASS__DISPATCH_WRAPPER))
+            return VT_DISPATCH;
+        if (CoreLibBinder::IsClass(pMT, CLASS__UNKNOWN_WRAPPER))
+            return VT_UNKNOWN;
+        if (CoreLibBinder::IsClass(pMT, CLASS__ERROR_WRAPPER))
+            return VT_ERROR;
+        if (CoreLibBinder::IsClass(pMT, CLASS__CURRENCY_WRAPPER))
+            return VT_CY;
+        if (CoreLibBinder::IsClass(pMT, CLASS__BSTR_WRAPPER))
+            return VT_BSTR;
 
-    // VariantWrappers cannot be stored in VARIANT's.
-    if (CoreLibBinder::IsClass(pMT, CLASS__VARIANT_WRAPPER))
-        COMPlusThrow(kArgumentException, IDS_EE_COM_UNSUPPORTED_SIG);
+        // VariantWrappers cannot be stored in VARIANT's.
+        if (CoreLibBinder::IsClass(pMT, CLASS__VARIANT_WRAPPER))
+            COMPlusThrow(kArgumentException, IDS_EE_COM_UNSUPPORTED_SIG);
+    }
 #endif // FEATURE_COMINTEROP
 
     if (pMT->IsEnum())
@@ -2604,29 +2608,9 @@ void OleVariant::MarshalRecordVariantOleToCom(VARIANT *pOleVariant,
         LPVOID pvRecord = V_RECORD(pOleVariant);
         if (pvRecord)
         {
-            // Go to the registry to find the value class associated
-            // with the record's guid.
-            GUID guid;
-            {
-                GCX_PREEMP();
-                IfFailThrow(pRecInfo->GetGuid(&guid));
-            }
-            MethodTable *pValueClass = GetValueTypeForGUID(guid);
-            if (!pValueClass)
-                COMPlusThrow(kArgumentException, IDS_EE_CANNOT_MAP_TO_MANAGED_VC);
-
-            // Now that we have the value class, allocate an instance of the
-            // boxed value class and copy the contents of the record into it.
-            BoxedValueClass = AllocateObject(pValueClass);
-
-            MethodDesc* pStructMarshalStub;
-            {
-                GCX_PREEMP();
-
-                pStructMarshalStub = NDirect::CreateStructMarshalILStub(pValueClass);
-            }
-
-            MarshalStructViaILStub(pStructMarshalStub, BoxedValueClass->GetData(), pvRecord, StructMarshalStubs::MarshalOperation::Unmarshal);
+            // This value type should have been registered through
+            // a TLB. CoreCLR doesn't support dynamic type mapping.
+            COMPlusThrow(kArgumentException, IDS_EE_CANNOT_MAP_TO_MANAGED_VC);
         }
 
         pComVariant->SetObjRef(BoxedValueClass);
@@ -4730,7 +4714,21 @@ void OleVariant::ConvertValueClassToVariant(OBJECTREF *pBoxedValueClass, VARIANT
 
     // Retrieve the ITypeInfo for the value class.
     MethodTable *pValueClassMT = (*pBoxedValueClass)->GetMethodTable();
-    IfFailThrow(GetITypeInfoForEEClass(pValueClassMT, &pTypeInfo, true /* bClassInfo */));
+    hr = GetITypeInfoForEEClass(pValueClassMT, &pTypeInfo, true /* bClassInfo */);
+    if (FAILED(hr))
+    {
+        if (hr == TLBX_E_LIBNOTREGISTERED)
+        {
+            // Indicate that conversion of the class to variant without a registered type lib is not supported
+            StackSString className;
+            pValueClassMT->_GetFullyQualifiedNameForClass(className);
+            COMPlusThrow(kNotSupportedException, IDS_EE_CLASS_TO_VARIANT_TLB_NOT_REG, className.GetUnicode());
+        }
+        else
+        {
+            COMPlusThrowHR(hr);
+        }
+    }
 
     // Convert the ITypeInfo to an IRecordInfo.
     hr = GetRecordInfoFromTypeInfo(pTypeInfo, &V_RECORDINFO(pRecHolder));
@@ -4853,7 +4851,7 @@ void OleVariant::TransposeArrayData(BYTE *pDestData, BYTE *pSrcData, SIZE_T dwNu
     }
 }
 
-BOOL OleVariant::IsArrayOfWrappers(BASEARRAYREF *pArray, BOOL *pbOfInterfaceWrappers)
+BOOL OleVariant::IsArrayOfWrappers(_In_ BASEARRAYREF *pArray, _Out_opt_ BOOL *pbOfInterfaceWrappers)
 {
     CONTRACTL
     {
@@ -4863,6 +4861,11 @@ BOOL OleVariant::IsArrayOfWrappers(BASEARRAYREF *pArray, BOOL *pbOfInterfaceWrap
     }
     CONTRACTL_END;
 
+    if (!g_pConfig->IsBuiltInCOMSupported())
+    {
+        return FALSE;
+    }
+
     TypeHandle hndElemType = (*pArray)->GetArrayElementTypeHandle();
 
     if (!hndElemType.IsTypeDesc())
@@ -4870,7 +4873,10 @@ BOOL OleVariant::IsArrayOfWrappers(BASEARRAYREF *pArray, BOOL *pbOfInterfaceWrap
         if (hndElemType == TypeHandle(CoreLibBinder::GetClass(CLASS__DISPATCH_WRAPPER)) ||
             hndElemType == TypeHandle(CoreLibBinder::GetClass(CLASS__UNKNOWN_WRAPPER)))
         {
-            *pbOfInterfaceWrappers = TRUE;
+            if (pbOfInterfaceWrappers)
+            {
+                *pbOfInterfaceWrappers = TRUE;
+            }
             return TRUE;
         }
 
@@ -4878,12 +4884,17 @@ BOOL OleVariant::IsArrayOfWrappers(BASEARRAYREF *pArray, BOOL *pbOfInterfaceWrap
             hndElemType == TypeHandle(CoreLibBinder::GetClass(CLASS__CURRENCY_WRAPPER)) ||
             hndElemType == TypeHandle(CoreLibBinder::GetClass(CLASS__BSTR_WRAPPER)))
         {
-            *pbOfInterfaceWrappers = FALSE;
+            if (pbOfInterfaceWrappers)
+            {
+                *pbOfInterfaceWrappers = FALSE;
+            }
             return TRUE;
         }
     }
 
-    *pbOfInterfaceWrappers = FALSE;
+    if (pbOfInterfaceWrappers)
+        *pbOfInterfaceWrappers = FALSE;
+
     return FALSE;
 }
 
@@ -4895,6 +4906,7 @@ BASEARRAYREF OleVariant::ExtractWrappedObjectsFromArray(BASEARRAYREF *pArray)
         GC_TRIGGERS;
         MODE_COOPERATIVE;
         PRECONDITION(CheckPointer(pArray));
+        PRECONDITION(IsArrayOfWrappers(pArray, NULL));
     }
     CONTRACTL_END;
 
@@ -5028,6 +5040,7 @@ TypeHandle OleVariant::GetWrappedArrayElementType(BASEARRAYREF *pArray)
         GC_TRIGGERS;
         MODE_COOPERATIVE;
         PRECONDITION(CheckPointer(pArray));
+        PRECONDITION(IsArrayOfWrappers(pArray, NULL));
     }
     CONTRACTL_END;
 
@@ -5073,8 +5086,7 @@ TypeHandle OleVariant::GetArrayElementTypeWrapperAware(BASEARRAYREF *pArray)
     }
     CONTRACTL_END;
 
-    BOOL bArrayOfInterfaceWrappers;
-    if (IsArrayOfWrappers(pArray, &bArrayOfInterfaceWrappers))
+    if (IsArrayOfWrappers(pArray, nullptr))
     {
         return GetWrappedArrayElementType(pArray);
     }
@@ -5096,21 +5108,9 @@ TypeHandle OleVariant::GetElementTypeForRecordSafeArray(SAFEARRAY* pSafeArray)
     }
     CONTRACTL_END;
 
-    HRESULT hr = S_OK;
-
-    GUID guid;
-    {
-        GCX_PREEMP();
-
-        SafeComHolder<IRecordInfo> pRecInfo;
-        IfFailThrow(SafeArrayGetRecordInfo(pSafeArray, &pRecInfo));
-        IfFailThrow(pRecInfo->GetGuid(&guid));
-    }
-    MethodTable *pValueClass = GetValueTypeForGUID(guid);
-    if (!pValueClass)
-        COMPlusThrow(kArgumentException, IDS_EE_CANNOT_MAP_TO_MANAGED_VC);
-
-    return TypeHandle(pValueClass);
+    // CoreCLR doesn't support dynamic type mapping.
+    COMPlusThrow(kArgumentException, IDS_EE_CANNOT_MAP_TO_MANAGED_VC);
+    return TypeHandle(); // Unreachable
 }
 #endif //FEATURE_COMINTEROP
 

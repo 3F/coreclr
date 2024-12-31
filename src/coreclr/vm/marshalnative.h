@@ -16,29 +16,11 @@
 
 #define MAX_UTF8_CHAR_SIZE 3
 
-//!!! Must be kept in sync with ArrayWithOffset class layout.
-struct ArrayWithOffsetData
-{
-    BASEARRAYREF    m_Array;
-    INT32           m_cbOffset;
-    INT32           m_cbCount;
-};
-
-
-#ifdef FEATURE_COMINTEROP
-enum ComMemberType
-{
-    CMT_Method              = 0,
-    CMT_PropGet             = 1,
-    CMT_PropSet             = 2
-};
-#endif // FEATURE_COMINTEROP
-
 class MarshalNative
 {
 public:
-    static INT32 QCALLTYPE NumParamBytes(MethodDesc * pMD);
     static VOID QCALLTYPE Prelink(MethodDesc * pMD);
+    static BOOL QCALLTYPE IsBuiltInComSupported();
 
     //====================================================================
     // These methods convert between an HR and and a managed exception.
@@ -49,8 +31,8 @@ public:
     static FCDECL2(UINT32, SizeOfClass, ReflectClassBaseObject* refClass, CLR_BOOL throwIfNotMarshalable);
 
     static FCDECL1(UINT32, OffsetOfHelper, ReflectFieldObject* pFieldUNSAFE);
-    static FCDECL0(int, GetLastWin32Error);
-    static FCDECL1(void, SetLastWin32Error, int error);
+    static FCDECL0(int, GetLastPInvokeError);
+    static FCDECL1(void, SetLastPInvokeError, int error);
 
     static FCDECL3(VOID, StructureToPtr, Object* pObjUNSAFE, LPVOID ptr, CLR_BOOL fDeleteOld);
     static FCDECL3(VOID, PtrToStructureHelper, LPVOID ptr, Object* pObjIn, CLR_BOOL allowValueClasses);
@@ -67,29 +49,27 @@ public:
     static FCDECL2(Object*, GetDelegateForFunctionPointerInternal, LPVOID FPtr, ReflectClassBaseObject* refTypeUNSAFE);
     static FCDECL1(LPVOID, GetFunctionPointerForDelegateInternal, Object* refDelegateUNSAFE);
 
+#ifdef _DEBUG
+    using IsInCooperativeGCMode_fn = BOOL(STDMETHODCALLTYPE*)(void);
+    static IsInCooperativeGCMode_fn QCALLTYPE GetIsInCooperativeGCModeFunctionPointer();
+#endif
+
 #ifdef FEATURE_COMINTEROP
     //====================================================================
     // return the IUnknown* for an Object
     //====================================================================
-    static FCDECL2(IUnknown*, GetIUnknownForObjectNative, Object* orefUNSAFE, CLR_BOOL fOnlyInContext);
-
-    //====================================================================
-    // return the raw IUnknown* for a COM Object not related to current
-    // context
-    // Does not AddRef the returned pointer
-    //====================================================================
-    static FCDECL1(IUnknown*, GetRawIUnknownForComObjectNoAddRef, Object* orefUNSAFE);
+    static FCDECL1(IUnknown*, GetIUnknownForObjectNative, Object* orefUNSAFE);
 
     //====================================================================
     // return the IDispatch* for an Object
     //====================================================================
-    static FCDECL2(IDispatch*, GetIDispatchForObjectNative, Object* orefUNSAFE, CLR_BOOL fOnlyInContext);
+    static FCDECL1(IDispatch*, GetIDispatchForObjectNative, Object* orefUNSAFE);
 
     //====================================================================
     // return the IUnknown* representing the interface for the Object
     // Object o should support Type T
     //====================================================================
-    static FCDECL4(IUnknown*, GetComInterfaceForObjectNative, Object* orefUNSAFE, ReflectClassBaseObject* refClassUNSAFE, CLR_BOOL fOnlyInContext, CLR_BOOL bEnableCustomizedQueryInterface);
+    static FCDECL3(IUnknown*, GetComInterfaceForObjectNative, Object* orefUNSAFE, ReflectClassBaseObject* refClassUNSAFE, CLR_BOOL bEnableCustomizedQueryInterface);
 
     //====================================================================
     // return an Object for IUnknown
@@ -100,11 +80,6 @@ public:
     // return a unique cacheless Object for IUnknown
     //====================================================================
     static FCDECL1(Object*, GetUniqueObjectForIUnknownNative, IUnknown* pUnk);
-
-    //====================================================================
-    // return a unique cacheless Object for IUnknown
-    //====================================================================
-    static FCDECL1(Object*, GetUniqueObjectForIUnknownWithoutUnboxing, IUnknown* pUnk);
 
     //====================================================================
     // return an Object for IUnknown, using the Type T,
@@ -126,12 +101,7 @@ public:
     //====================================================================
     // Create an object and aggregate it, then return the inner unknown.
     //====================================================================
-    static FCDECL2(IUnknown*, CreateAggregatedObject, IUnknown* pOuter, Object* refObjUNSAFE);
-
-    //====================================================================
-    // check if the object is classic COM component
-    //====================================================================
-    static FCDECL1(FC_BOOL_RET, IsComObject, Object* objUNSAFE);
+    static FCDECL2(IUnknown*, CreateAggregatedObjectNative, IUnknown* pOuter, Object* refObjUNSAFE);
 
     //====================================================================
     // free the COM component and zombie this object
@@ -154,23 +124,9 @@ public:
     //====================================================================
     // These methods convert OLE variants to and from objects.
     //====================================================================
-    static FCDECL2(void, GetNativeVariantForObject, Object* ObjUNSAFE, LPVOID pDestNativeVariant);
-    static FCDECL1(Object*, GetObjectForNativeVariant, LPVOID pSrcNativeVariant);
-    static FCDECL2(Object*, GetObjectsForNativeVariants, VARIANT* aSrcNativeVariant, int cVars);
-
-    //====================================================================
-    // Methods to retrieve information from TypeLibs and TypeInfos.
-    //====================================================================
-    static FCDECL2(void, DoGetTypeLibGuid, GUID * result, Object* refTlbUNSAFE);
-    static FCDECL1(LCID, GetTypeLibLcid, Object* refTlbUNSAFE);
-    static FCDECL3(void, GetTypeLibVersion, Object* refTlbUNSAFE, int *pMajor, int *pMinor);
-    static FCDECL2(void, DoGetTypeInfoGuid, GUID * result, Object* refTypeInfoUNSAFE);
-
-    //====================================================================
-    // Given a assembly, return the TLBID that will be generated for the
-    // typelib exported from the assembly.
-    //====================================================================
-    static FCDECL2(void, DoGetTypeLibGuidForAssembly, GUID * result, AssemblyBaseObject* refAsmUNSAFE);
+    static FCDECL2(void, GetNativeVariantForObjectNative, Object* ObjUNSAFE, LPVOID pDestNativeVariant);
+    static FCDECL1(Object*, GetObjectForNativeVariantNative, LPVOID pSrcNativeVariant);
+    static FCDECL2(Object*, GetObjectsForNativeVariantsNative, VARIANT* aSrcNativeVariant, int cVars);
 
     //====================================================================
     // These methods are used to map COM slots to method info's.
@@ -178,12 +134,15 @@ public:
     static FCDECL1(int, GetStartComSlot, ReflectClassBaseObject* tUNSAFE);
     static FCDECL1(int, GetEndComSlot, ReflectClassBaseObject* tUNSAFE);
 
-    static FCDECL1(Object*, WrapIUnknownWithComObject, IUnknown* pUnk);
-
     static FCDECL2(void, ChangeWrapperHandleStrength, Object* orefUNSAFE, CLR_BOOL fIsWeak);
+
+    //====================================================================
+    // Create type for given CLSID.
+    //====================================================================
+    static void QCALLTYPE GetTypeFromCLSID(REFCLSID clsid, PCWSTR wszServer, QCall::ObjectHandleOnStack retType);
+
 private:
     static int GetComSlotInfo(MethodTable *pMT, MethodTable **ppDefItfMT);
-    static BOOL IsObjectInContext(OBJECTREF *pObj);
 #endif // FEATURE_COMINTEROP
 };
 

@@ -28,6 +28,12 @@
 #undef min
 #undef max
 
+#if __has_cpp_attribute(fallthrough)
+#define FALLTHROUGH [[fallthrough]]
+#else
+#define FALLTHROUGH
+#endif
+
 #include <algorithm>
 
 #if HAVE_SYS_TIME_H
@@ -60,6 +66,24 @@
 #include <mach/vm_param.h>
 #include <mach/mach_port.h>
 #include <mach/mach_host.h>
+
+#include <mach/task.h>
+#include <mach/vm_map.h>
+extern "C"
+{
+#  include <mach/thread_state.h>
+}
+
+#define CHECK_MACH(_msg, machret) do {                                      \
+        if (machret != KERN_SUCCESS)                                        \
+        {                                                                   \
+            char _szError[1024];                                            \
+            snprintf(_szError, _countof(_szError), "%s: %u: %s", __FUNCTION__, __LINE__, _msg);  \
+            mach_error(_szError, machret);                                  \
+            abort();                                                        \
+        }                                                                   \
+    } while (false)
+
 #endif // __APPLE__
 
 #ifdef __linux__
@@ -144,9 +168,6 @@ FOR_ALL_NUMA_FUNCTIONS
 // The cached total number of CPUs that can be used in the OS.
 static uint32_t g_totalCpuCount = 0;
 
-// The cached number of CPUs available for the current process.
-static uint32_t g_currentProcessCpuCount = 0;
-
 //
 // Helper membarrier function
 //
@@ -168,6 +189,24 @@ enum membarrier_cmd
     MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE  = (1 << 6)
 };
 
+bool CanFlushUsingMembarrier()
+{
+    // Starting with Linux kernel 4.14, process memory barriers can be generated
+    // using MEMBARRIER_CMD_PRIVATE_EXPEDITED.
+
+    int mask = membarrier(MEMBARRIER_CMD_QUERY, 0);
+
+    if (mask >= 0 &&
+        mask & MEMBARRIER_CMD_PRIVATE_EXPEDITED &&
+        // Register intent to use the private expedited command.
+        membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0) == 0)
+    {
+        return true;
+    }
+
+    return false;
+}
+
 //
 // Tracks if the OS supports FlushProcessWriteBuffers using membarrier
 //
@@ -181,7 +220,6 @@ static pthread_mutex_t g_flushProcessWriteBuffersMutex;
 
 size_t GetRestrictedPhysicalMemoryLimit();
 bool GetPhysicalMemoryUsed(size_t* val);
-bool GetCpuLimit(uint32_t* val);
 
 static size_t g_RestrictedPhysicalMemoryLimit = 0;
 
@@ -258,10 +296,14 @@ void NUMASupportInitialize()
         return;
     }
 
-    g_numaHandle = dlopen("libnuma.so", RTLD_LAZY);
+    g_numaHandle = dlopen("libnuma.so.1", RTLD_LAZY);
     if (g_numaHandle == 0)
     {
-        g_numaHandle = dlopen("libnuma.so.1", RTLD_LAZY);
+        g_numaHandle = dlopen("libnuma.so.1.0.0", RTLD_LAZY);
+        if (g_numaHandle == 0)
+        {
+            g_numaHandle = dlopen("libnuma.so", RTLD_LAZY);
+        }
     }
     if (g_numaHandle != 0)
     {
@@ -324,16 +366,11 @@ bool GCToOSInterface::Initialize()
 
     assert(s_flushUsingMemBarrier == 0);
 
-    // Starting with Linux kernel 4.14, process memory barriers can be generated
-    // using MEMBARRIER_CMD_PRIVATE_EXPEDITED.
-    int mask = membarrier(MEMBARRIER_CMD_QUERY, 0);
-    if (mask >= 0 &&
-        mask & MEMBARRIER_CMD_PRIVATE_EXPEDITED &&
-        // Register intent to use the private expedited command.
-        membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0) == 0)
+    if (CanFlushUsingMembarrier())
     {
         s_flushUsingMemBarrier = TRUE;
     }
+#ifndef TARGET_OSX
     else
     {
         assert(g_helperPage == 0);
@@ -365,20 +402,11 @@ bool GCToOSInterface::Initialize()
             return false;
         }
     }
-
-#if HAVE_MACH_ABSOLUTE_TIME
-    kern_return_t machRet;
-    if ((machRet = mach_timebase_info(&g_TimebaseInfo)) != KERN_SUCCESS)
-    {
-        return false;
-    }
-#endif // HAVE_MACH_ABSOLUTE_TIME
+#endif // !TARGET_OSX
 
     InitializeCGroup();
 
 #if HAVE_SCHED_GETAFFINITY
-
-    g_currentProcessCpuCount = 0;
 
     cpu_set_t cpuSet;
     int st = sched_getaffinity(getpid(), sizeof(cpu_set_t), &cpuSet);
@@ -389,7 +417,6 @@ bool GCToOSInterface::Initialize()
         {
             if (CPU_ISSET(i, &cpuSet))
             {
-                g_currentProcessCpuCount++;
                 g_processAffinitySet.Add(i);
             }
         }
@@ -403,20 +430,12 @@ bool GCToOSInterface::Initialize()
 
 #else // HAVE_SCHED_GETAFFINITY
 
-    g_currentProcessCpuCount = g_totalCpuCount;
-
     for (size_t i = 0; i < g_totalCpuCount; i++)
     {
         g_processAffinitySet.Add(i);
     }
 
 #endif // HAVE_SCHED_GETAFFINITY
-
-    uint32_t cpuLimit;
-    if (GetCpuLimit(&cpuLimit) && cpuLimit < g_currentProcessCpuCount)
-    {
-        g_currentProcessCpuCount = cpuLimit;
-    }
 
     NUMASupportInitialize();
 
@@ -502,7 +521,7 @@ void GCToOSInterface::FlushProcessWriteBuffers()
         int status = membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
         assert(status == 0 && "Failed to flush using membarrier");
     }
-    else
+    else if (g_helperPage != 0)
     {
         int status = pthread_mutex_lock(&g_flushProcessWriteBuffersMutex);
         assert(status == 0 && "Failed to lock the flushProcessWriteBuffersMutex lock");
@@ -523,18 +542,39 @@ void GCToOSInterface::FlushProcessWriteBuffers()
         status = pthread_mutex_unlock(&g_flushProcessWriteBuffersMutex);
         assert(status == 0 && "Failed to unlock the flushProcessWriteBuffersMutex lock");
     }
+#ifdef TARGET_OSX
+    else
+    {
+        mach_msg_type_number_t cThreads;
+        thread_act_t *pThreads;
+        kern_return_t machret = task_threads(mach_task_self(), &pThreads, &cThreads);
+        CHECK_MACH("task_threads()", machret);
+
+        uintptr_t sp;
+        uintptr_t registerValues[128];
+
+        // Iterate through each of the threads in the list.
+        for (mach_msg_type_number_t i = 0; i < cThreads; i++)
+        {
+            // Request the threads pointer values to force the thread to emit a memory barrier
+            size_t registers = 128;
+            machret = thread_get_register_pointer_values(pThreads[i], &sp, &registers, registerValues);
+            if (machret == KERN_INSUFFICIENT_BUFFER_SIZE)
+            {
+                CHECK_MACH("thread_get_register_pointer_values()", machret);
+            }
+        }
+        // Deallocate the thread list now we're done with it.
+        machret = vm_deallocate(mach_task_self(), (vm_address_t)pThreads, cThreads * sizeof(thread_act_t));
+        CHECK_MACH("vm_deallocate()", machret);
+    }
+#endif // TARGET_OSX
 }
 
 // Break into a debugger. Uses a compiler intrinsic if one is available,
 // otherwise raises a SIGTRAP.
 void GCToOSInterface::DebugBreak()
 {
-    // __has_builtin is only defined by clang. GCC doesn't have a debug
-    // trap intrinsic anyway.
-#ifndef __has_builtin
- #define __has_builtin(x) 0
-#endif // __has_builtin
-
 #if __has_builtin(__builtin_debugtrap)
     __builtin_debugtrap();
 #else
@@ -800,8 +840,10 @@ bool ReadMemoryValueFromFile(const char* filename, uint64_t* val)
     {
     case 'g':
     case 'G': multiplier = 1024;
+              FALLTHROUGH;
     case 'm':
     case 'M': multiplier = multiplier * 1024;
+              FALLTHROUGH;
     case 'k':
     case 'K': multiplier = multiplier * 1024;
     }
@@ -834,14 +876,14 @@ static size_t GetLogicalProcessorCacheSizeFromOS()
     cacheSize = std::max(cacheSize, ( size_t) sysconf(_SC_LEVEL4_CACHE_SIZE));
 #endif
 
-#if defined(TARGET_LINUX) && !defined(HOST_ARM)
+#if defined(TARGET_LINUX) && !defined(HOST_ARM) && !defined(HOST_X86)
     if (cacheSize == 0)
     {
         //
-        // Fallback to retrieve cachesize via /sys/.. if sysconf was not available 
-        // for the platform. Currently musl and arm64 should be only cases to use  
+        // Fallback to retrieve cachesize via /sys/.. if sysconf was not available
+        // for the platform. Currently musl and arm64 should be only cases to use
         // this method to determine cache size.
-        // 
+        //
         size_t size;
 
         if (ReadMemoryValueFromFile("/sys/devices/system/cpu/cpu0/cache/index0/size", &size))
@@ -857,7 +899,7 @@ static size_t GetLogicalProcessorCacheSizeFromOS()
     }
 #endif
 
-#if defined(HOST_ARM64)
+#if defined(HOST_ARM64) && !defined(TARGET_OSX)
     if (cacheSize == 0)
     {
         // It is currently expected to be missing cache size info
@@ -1053,14 +1095,6 @@ const AffinitySet* GCToOSInterface::SetGCThreadsAffinitySet(uintptr_t configAffi
     }
 
     return &g_processAffinitySet;
-}
-
-// Get number of processors assigned to the current process
-// Return:
-//  The number of processors
-uint32_t GCToOSInterface::GetCurrentProcessCpuCount()
-{
-    return g_currentProcessCpuCount;
 }
 
 // Return the size of the user-mode portion of the virtual address space of this process.
@@ -1425,10 +1459,24 @@ bool GCToOSInterface::ParseGCHeapAffinitizeRangesEntry(const char** config_strin
 }
 
 // Initialize the critical section
-void CLRCriticalSection::Initialize()
+bool CLRCriticalSection::Initialize()
 {
-    int st = pthread_mutex_init(&m_cs.mutex, NULL);
-    assert(st == 0);
+    pthread_mutexattr_t mutexAttributes;
+    int st = pthread_mutexattr_init(&mutexAttributes);
+    if (st != 0)
+    {
+        return false;
+    }
+
+    st = pthread_mutexattr_settype(&mutexAttributes, PTHREAD_MUTEX_RECURSIVE);
+    if (st == 0)
+    {
+        st = pthread_mutex_init(&m_cs.mutex, &mutexAttributes);
+    }
+
+    pthread_mutexattr_destroy(&mutexAttributes);
+
+    return (st == 0);
 }
 
 // Destroy the critical section

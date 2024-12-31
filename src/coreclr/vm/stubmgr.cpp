@@ -1186,34 +1186,7 @@ BOOL StubLinkStubManager::DoTraceStub(PCODE stubStartAddress,
     // methods in place.</TODO>
     //
     TADDR pRealAddr = 0;
-    if (stub->IsIntercept())
-    {
-        InterceptStub *is = dac_cast<PTR_InterceptStub>(stub);
-
-        if (*is->GetInterceptedStub() == NULL)
-        {
-            pRealAddr = *is->GetRealAddr();
-            LOG((LF_CORDB, LL_INFO10000, "StubLinkStubManager::DoTraceStub"
-                " Intercept stub, no following stub, real addr:0x%x\n",
-                pRealAddr));
-        }
-        else
-        {
-            stub = *is->GetInterceptedStub();
-
-            pRealAddr = stub->GetEntryPoint();
-
-            LOG((LF_CORDB, LL_INFO10000,
-                 "StubLinkStubManager::DoTraceStub: intercepted "
-                 "stub=0x%08x, ep=0x%08x\n",
-                 stub, stub->GetEntryPoint()));
-        }
-        _ASSERTE( pRealAddr );
-
-        // !!! will push a frame???
-        return TraceStub(pRealAddr, trace);
-    }
-    else if (stub->IsMulticastDelegate())
+    if (stub->IsMulticastDelegate())
     {
         LOG((LF_CORDB, LL_INFO10000,
              "StubLinkStubManager(MCDel)::DoTraceStub: stubStartAddress=0x%08x\n",
@@ -1478,7 +1451,7 @@ BOOL RangeSectionStubManager::DoTraceStub(PCODE stubStartAddress, TraceDestinati
             }
         }
 
-        __fallthrough;
+        FALLTHROUGH;
 #endif
 
     case STUB_CODE_BLOCK_METHOD_CALL_THUNK:

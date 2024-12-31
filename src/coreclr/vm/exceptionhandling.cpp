@@ -15,6 +15,7 @@
 #include "eventtrace.h"
 #include "virtualcallstub.h"
 #include "utilcode.h"
+#include "interoplibinterface.h"
 
 #if defined(TARGET_X86)
 #define USE_CURRENT_CONTEXT_IN_FILTER
@@ -975,7 +976,7 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
             BOOL fExternalException;
 
             fExternalException = (!ExecutionManager::IsManagedCode(ip) &&
-                                  !IsIPInModule(g_hThisInst, ip));
+                                  !IsIPInModule(GetClrModuleBase(), ip));
 
             if (fExternalException)
             {
@@ -1188,9 +1189,13 @@ ProcessCLRException(IN     PEXCEPTION_RECORD   pExceptionRecord
             RestoreSOToleranceState();
 #endif
 
-            ExceptionTracker::ResumeExecution(pContextRecord,
-                                              NULL
-                                              );
+#ifdef TARGET_AMD64
+            // OSes older than Win8 have a bug where RtlUnwindEx passes meaningless ContextFlags to the personality routine in
+            // some cases.
+            pContextRecord->ContextFlags |= CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT;
+#endif
+
+            ExceptionTracker::ResumeExecution(pContextRecord);
             UNREACHABLE();
         }
     }
@@ -1202,14 +1207,22 @@ lExit: ;
 
     if ((ExceptionContinueSearch == returnDisposition))
     {
-#ifdef USE_GC_INFO_DECODER
         if (dwExceptionFlags & EXCEPTION_UNWINDING)
         {
             EECodeInfo codeInfo(pDispatcherContext->ControlPc);
             if (codeInfo.IsValid())
             {
+                bool invalidRevPInvoke;
+#ifdef USE_GC_INFO_DECODER
                 GcInfoDecoder gcInfoDecoder(codeInfo.GetGCInfoToken(), DECODE_REVERSE_PINVOKE_VAR);
-                if (gcInfoDecoder.GetReversePInvokeFrameStackSlot() != NO_REVERSE_PINVOKE_FRAME)
+                invalidRevPInvoke = gcInfoDecoder.GetReversePInvokeFrameStackSlot() != NO_REVERSE_PINVOKE_FRAME;
+#else // USE_GC_INFO_DECODER
+                hdrInfo gcHdrInfo;
+                DecodeGCHdrInfo(codeInfo.GetGCInfoToken(), 0, &gcHdrInfo);
+                invalidRevPInvoke = gcHdrInfo.revPInvokeOffset != INVALID_REV_PINVOKE_OFFSET;
+#endif // USE_GC_INFO_DECODER
+
+                if (invalidRevPInvoke)
                 {
                     // Exception is being propagated from a method marked UnmanagedCallersOnlyAttribute into its native caller.
                     // The explicit frame chain needs to be unwound at this boundary.
@@ -1218,7 +1231,6 @@ lExit: ;
                 }
             }
         }
-#endif // USE_GC_INFO_DECODER
 
         GCX_PREEMP_NO_DTOR();
     }
@@ -1621,10 +1633,10 @@ void CheckForRudeAbort(Thread* pThread, bool fIsFirstPass)
     if (fIsFirstPass && pThread->IsRudeAbort())
     {
         GCX_COOP();
-        OBJECTREF rudeAbortThrowable = CLRException::GetPreallocatedRudeThreadAbortException();
-        if (pThread->GetThrowable() != rudeAbortThrowable)
+        OBJECTREF throwable = pThread->GetThrowable();
+        if (throwable == NULL || !IsExceptionOfType(kThreadAbortException, &throwable))
         {
-            pThread->SafeSetThrowables(rudeAbortThrowable);
+            pThread->SafeSetThrowables(CLRException::GetBestThreadAbortException());
         }
 
         if (!pThread->IsRudeAbortInitiated())
@@ -2033,7 +2045,7 @@ void ExceptionTracker::DebugLogTrackerRanges(__in_z const char *pszTag)
     }
     CONTRACTL_END;
 
-    Thread*             pThread     = GetThread();
+    Thread*             pThread     = GetThreadNULLOk();
     ExceptionTracker*   pTracker    = pThread ? pThread->GetExceptionState()->m_pCurrentTracker : NULL;
 
     int i = 0;
@@ -2418,8 +2430,6 @@ CLRUnwindStatus ExceptionTracker::ProcessManagedCallFrame(
         pMD->m_pszDebugMethodName, pMD->m_pszDebugClassName));
 
     Thread *pThread = GetThread();
-    _ASSERTE (pThread);
-
     INDEBUG( DumpClauses(pcfThisFrame->GetJitManager(), pcfThisFrame->GetMethodToken(), uMethodStartPC, uControlPC) );
 
     bool fIsILStub = pMD->IsILStub();
@@ -3391,7 +3401,7 @@ void ExceptionTracker::PopTrackers(
 
     // Only call into PopTrackers if we have a managed thread and we have an exception progress.
     // Otherwise, the call below (to PopTrackers) is a noop. If this ever changes, then this short-circuit needs to be fixed.
-    Thread *pCurThread = GetThread();
+    Thread *pCurThread = GetThreadNULLOk();
     if ((pCurThread != NULL) && (pCurThread->GetExceptionState()->IsExceptionInProgress()))
     {
         // Refer to the comment around ExceptionTracker::HasFrameBeenUnwoundByAnyActiveException
@@ -3471,7 +3481,7 @@ void ExceptionTracker::PopTrackers(
     }
     CONTRACTL_END;
 
-    Thread*             pThread     = GetThread();
+    Thread*             pThread     = GetThreadNULLOk();
     ExceptionTracker*   pTracker    = (pThread ? pThread->GetExceptionState()->m_pCurrentTracker : NULL);
 
     // NOTE:
@@ -3926,10 +3936,7 @@ void ExceptionTracker::ResetLimitFrame()
 
 //
 // static
-void ExceptionTracker::ResumeExecution(
-    CONTEXT*            pContextRecord,
-    EXCEPTION_RECORD*   pExceptionRecord
-    )
+void ExceptionTracker::ResumeExecution(CONTEXT* pContextRecord)
 {
     //
     // This method never returns, so it will leave its
@@ -3948,7 +3955,7 @@ void ExceptionTracker::ResumeExecution(
     EH_LOG((LL_INFO100, "resuming execution at 0x%p\n", GetIP(pContextRecord)));
     EH_LOG((LL_INFO100, "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"));
 
-    RtlRestoreContext(pContextRecord, pExceptionRecord);
+    ClrRestoreNonvolatileContext(pContextRecord);
 
     UNREACHABLE();
     //
@@ -4015,7 +4022,7 @@ BOOL ExceptionTracker::NotifyDebuggerOfStub(Thread* pThread, StackFrame sf, Fram
 
     if (g_EnableSIS)
     {
-        _ASSERTE(GetThread() == pThread);
+        _ASSERTE(GetThreadNULLOk() == pThread);
 
         GCX_COOP();
 
@@ -4177,7 +4184,7 @@ inline bool ExceptionTracker::IsValid()
 
     EX_TRY
     {
-        Thread* pThisThread = GetThread();
+        Thread* pThisThread = GetThreadNULLOk();
         if (m_pThread == pThisThread)
         {
             fRetVal = true;
@@ -4212,7 +4219,7 @@ BOOL ExceptionTracker::ThrowableIsValid()
 UINT_PTR ExceptionTracker::DebugComputeNestingLevel()
 {
     UINT_PTR uNestingLevel = 0;
-    Thread* pThread = GetThread();
+    Thread* pThread = GetThreadNULLOk();
 
     if (pThread)
     {
@@ -4297,6 +4304,60 @@ static void DoEHLog(
 #endif // _DEBUG
 
 #ifdef TARGET_UNIX
+
+//---------------------------------------------------------------------------------------
+//
+// Function to update the current context for exception propagation.
+//
+// Arguments:
+//      exception       - the PAL_SEHException representing the propagating exception.
+//      currentContext  - the current context to update.
+//
+static VOID UpdateContextForPropagationCallback(
+    PAL_SEHException& ex,
+    CONTEXT* startContext)
+{
+    _ASSERTE(ex.ManagedToNativeExceptionCallback != NULL);
+
+#ifdef TARGET_AMD64
+
+    // Don't restore the stack pointer to exact same context. Leave the
+    // return IP on the stack to let the unwinder work if the callback throws
+    // an exception as opposed to failing fast.
+    startContext->Rsp -= sizeof(void*);
+
+    // Pass the context for the callback as the first argument.
+    startContext->Rdi = (DWORD64)ex.ManagedToNativeExceptionCallbackContext;
+
+#elif defined(TARGET_ARM64)
+
+    // Reset the linked return register to the current function to let the
+    // unwinder work if the callback throws an exception as opposed to failing fast.
+    startContext->Lr = GetIP(startContext);
+
+    // Pass the context for the callback as the first argument.
+    startContext->X0 = (DWORD64)ex.ManagedToNativeExceptionCallbackContext;
+
+#elif defined(TARGET_ARM)
+
+    // Reset the linked return register to the current function to let the
+    // unwinder work if the callback throws an exception as opposed to failing fast.
+    startContext->Lr = GetIP(startContext);
+
+    // Pass the context for the callback as the first argument.
+    startContext->R0 = (DWORD)ex.ManagedToNativeExceptionCallbackContext;
+
+#else
+
+    EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(
+        COR_E_FAILFAST,
+        W("Managed exception propagation not supported for platform."));
+
+#endif
+
+    // The last thing to do is set the supplied callback function.
+    SetIP(startContext, (PCODE)ex.ManagedToNativeExceptionCallback);
+}
 
 //---------------------------------------------------------------------------------------
 //
@@ -4426,13 +4487,28 @@ VOID UnwindManagedExceptionPass2(PAL_SEHException& ex, CONTEXT* unwindStartConte
                 // We also need to reset the scanned stack range since the scanned frames will be
                 // obsolete after the unwind of the native frames completes.
                 ExceptionTracker* pTracker = GetThread()->GetExceptionState()->GetCurrentExceptionTracker();
-                pTracker->CleanupBeforeNativeFramesUnwind();
+
+                // The tracker will only be non-null in the case when we handle the managed exception in
+                // the runtime native code.
+                if (pTracker != NULL)
+                    pTracker->CleanupBeforeNativeFramesUnwind();
             }
 
-            // Now we need to unwind the native frames until we reach managed frames again or the exception is
-            // handled in the native code.
-            STRESS_LOG2(LF_EH, LL_INFO100, "Unwinding native frames starting at IP = %p, SP = %p \n", controlPc, sp);
-            PAL_ThrowExceptionFromContext(currentFrameContext, &ex);
+            if (ex.HasPropagateExceptionCallback())
+            {
+                // A propagation callback was supplied.
+                STRESS_LOG3(LF_EH, LL_INFO100, "Deferring exception propagation to Callback = %p, IP = %p, SP = %p \n", ex.ManagedToNativeExceptionCallback, controlPc, sp);
+
+                UpdateContextForPropagationCallback(ex, currentFrameContext);
+                ExceptionTracker::ResumeExecution(currentFrameContext);
+            }
+            else
+            {
+                // Now we need to unwind the native frames until we reach managed frames again or the exception is
+                // handled in the native code.
+                STRESS_LOG2(LF_EH, LL_INFO100, "Unwinding native frames starting at IP = %p, SP = %p \n", controlPc, sp);
+                PAL_ThrowExceptionFromContext(currentFrameContext, &ex);
+            }
             UNREACHABLE();
         }
 
@@ -4441,6 +4517,8 @@ VOID UnwindManagedExceptionPass2(PAL_SEHException& ex, CONTEXT* unwindStartConte
     _ASSERTE(!"UnwindManagedExceptionPass2: Unwinding failed. Reached the end of the stack");
     EEPOLICY_HANDLE_FATAL_ERROR(COR_E_EXECUTIONENGINE);
 }
+
+extern void* g_hostingApiReturnAddress;
 
 //---------------------------------------------------------------------------------------
 //
@@ -4557,21 +4635,56 @@ VOID DECLSPEC_NORETURN UnwindManagedExceptionPass1(PAL_SEHException& ex, CONTEXT
             controlPc = Thread::VirtualUnwindLeafCallFrame(frameContext);
         }
 
+        bool invalidRevPInvoke;
 #ifdef USE_GC_INFO_DECODER
         GcInfoDecoder gcInfoDecoder(codeInfo.GetGCInfoToken(), DECODE_REVERSE_PINVOKE_VAR);
+        invalidRevPInvoke = gcInfoDecoder.GetReversePInvokeFrameStackSlot() != NO_REVERSE_PINVOKE_FRAME;
+#else // USE_GC_INFO_DECODER
+        hdrInfo gcHdrInfo;
+        DecodeGCHdrInfo(codeInfo.GetGCInfoToken(), 0, &gcHdrInfo);
+        invalidRevPInvoke = gcHdrInfo.revPInvokeOffset != INVALID_REV_PINVOKE_OFFSET;
+#endif // USE_GC_INFO_DECODER
 
-        if (gcInfoDecoder.GetReversePInvokeFrameStackSlot() != NO_REVERSE_PINVOKE_FRAME)
+        if (invalidRevPInvoke)
         {
-            // Propagating exception from a method marked by UnmanagedCallersOnly attribute is prohibited on Unix
-            if (!GetThread()->HasThreadStateNC(Thread::TSNC_ProcessedUnhandledException))
+            ExceptionTracker* pTracker = GetThread()->GetExceptionState()->GetCurrentExceptionTracker();
+
+            void* callbackCxt = NULL;
+            Interop::ManagedToNativeExceptionCallback callback = Interop::GetPropagatingExceptionCallback(
+                &codeInfo,
+                pTracker->GetThrowableAsHandle(),
+                &callbackCxt);
+
+            // If a callback doesn't exist we immediately crash.
+            if (callback == NULL)
             {
-                LONG disposition = InternalUnhandledExceptionFilter_Worker(&ex.ExceptionPointers);
-                _ASSERTE(disposition == EXCEPTION_CONTINUE_SEARCH);
+                // Propagating exception from a method marked by UnmanagedCallersOnly attribute is prohibited on Unix
+                if (!GetThread()->HasThreadStateNC(Thread::TSNC_ProcessedUnhandledException))
+                {
+                    LONG disposition = InternalUnhandledExceptionFilter_Worker(&ex.ExceptionPointers);
+                    _ASSERTE(disposition == EXCEPTION_CONTINUE_SEARCH);
+                }
+                CrashDumpAndTerminateProcess(1);
             }
-            CrashDumpAndTerminateProcess(1);
+            else
+            {
+                ex.SetPropagateExceptionCallback(callback, callbackCxt);
+                _ASSERTE(ex.HasPropagateExceptionCallback());
+
+                BOOL success = PAL_VirtualUnwind(frameContext, NULL);
+                if (!success)
+                {
+                    _ASSERTE(!"UnwindManagedExceptionPass1: PAL_VirtualUnwind failed for propagate exception scenario");
+                    EEPOLICY_HANDLE_FATAL_ERROR(COR_E_EXECUTIONENGINE);
+                }
+
+                UINT_PTR sp = GetSP(frameContext);
+                ex.TargetFrameSp = sp;
+                UnwindManagedExceptionPass2(ex, &unwindStartContext);
+            }
+
             UNREACHABLE();
         }
-#endif // USE_GC_INFO_DECODER
 
         // Check whether we are crossing managed-to-native boundary
         while (!ExecutionManager::IsManagedCode(controlPc))
@@ -4582,14 +4695,12 @@ VOID DECLSPEC_NORETURN UnwindManagedExceptionPass1(PAL_SEHException& ex, CONTEXT
                 break;
             }
 
-#ifdef FEATURE_WRITEBARRIER_COPY
             if (IsIPInWriteBarrierCodeCopy(controlPc))
             {
                 // Pretend we were executing the barrier function at its original location so that the unwinder can unwind the frame
                 controlPc = AdjustWriteBarrierIP(controlPc);
                 SetIP(frameContext, controlPc);
             }
-#endif // FEATURE_WRITEBARRIER_COPY
 
             UINT_PTR sp = GetSP(frameContext);
 
@@ -4604,7 +4715,8 @@ VOID DECLSPEC_NORETURN UnwindManagedExceptionPass1(PAL_SEHException& ex, CONTEXT
 
             STRESS_LOG2(LF_EH, LL_INFO100, "Processing exception at native frame: IP = %p, SP = %p \n", controlPc, sp);
 
-            if (controlPc == 0)
+            // Consider the exception unhandled if the unwinding cannot proceed further or if it went past the coreclr_initialize or coreclr_execute_assembly
+            if ((controlPc == 0) || (controlPc == (UINT_PTR)g_hostingApiReturnAddress))
             {
                 if (!GetThread()->HasThreadStateNC(Thread::TSNC_ProcessedUnhandledException))
                 {
@@ -4707,8 +4819,6 @@ VOID DECLSPEC_NORETURN DispatchManagedException(PAL_SEHException& ex, bool isHar
     {
         // Get the thread and the thread exception state - they must exist at this point
         Thread *pCurThread = GetThread();
-        _ASSERTE(pCurThread != NULL);
-
         ThreadExceptionState * pCurTES = pCurThread->GetExceptionState();
         _ASSERTE(pCurTES != NULL);
     }
@@ -5046,7 +5156,7 @@ bool IsDivByZeroAnIntegerOverflow(PCONTEXT pContext)
 
 BOOL IsSafeToCallExecutionManager()
 {
-    Thread *pThread = GetThread();
+    Thread *pThread = GetThreadNULLOk();
 
     // It is safe to call the ExecutionManager::IsManagedCode only if the current thread is in
     // the cooperative mode. Otherwise ExecutionManager::IsManagedCode could deadlock if
@@ -5064,13 +5174,11 @@ BOOL IsSafeToHandleHardwareException(PCONTEXT contextRecord, PEXCEPTION_RECORD e
 {
     PCODE controlPc = GetIP(contextRecord);
 
-#ifdef FEATURE_WRITEBARRIER_COPY
     if (IsIPInWriteBarrierCodeCopy(controlPc))
     {
         // Pretend we were executing the barrier function at its original location
         controlPc = AdjustWriteBarrierIP(controlPc);
     }
-#endif // FEATURE_WRITEBARRIER_COPY
 
     return g_fEEStarted && (
         exceptionRecord->ExceptionCode == STATUS_BREAKPOINT ||
@@ -5149,14 +5257,12 @@ BOOL HandleHardwareException(PAL_SEHException* ex)
         {
             GCX_COOP();     // Must be cooperative to modify frame chain.
 
-#ifdef FEATURE_WRITEBARRIER_COPY
             if (IsIPInWriteBarrierCodeCopy(controlPc))
             {
                 // Pretend we were executing the barrier function at its original location so that the unwinder can unwind the frame
                 controlPc = AdjustWriteBarrierIP(controlPc);
                 SetIP(ex->GetContextRecord(), controlPc);
             }
-#endif // FEATURE_WRITEBARRIER_COPY
 
             if (IsIPInMarkedJitHelper(controlPc))
             {
@@ -5180,14 +5286,14 @@ BOOL HandleHardwareException(PAL_SEHException* ex)
     else
     {
         // This is a breakpoint or single step stop, we report it to the debugger.
-        Thread *pThread = GetThread();
+        Thread *pThread = GetThreadNULLOk();
         if (pThread != NULL && g_pDebugInterface != NULL)
         {
-            // On ARM and ARM64 Linux exception point to the break instruction.
+#if (defined(TARGET_ARM) || defined(TARGET_ARM64))
+            // On ARM and ARM64 exception point to the break instruction.
             // See https://static.docs.arm.com/ddi0487/db/DDI0487D_b_armv8_arm.pdf#page=6916&zoom=100,0,152
             // at aarch64/exceptions/debug/AArch64.SoftwareBreakpoint
             // However, the rest of the code expects that it points to an instruction after the break.
-#if defined(__linux__) && (defined(TARGET_ARM) || defined(TARGET_ARM64))
             if (ex->GetExceptionRecord()->ExceptionCode == STATUS_BREAKPOINT)
             {
                 SetIP(ex->GetContextRecord(), GetIP(ex->GetContextRecord()) + CORDbg_BREAK_INSTRUCTION_SIZE);
@@ -5782,7 +5888,7 @@ UMThunkUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionRecord
                                IN OUT PDISPATCHER_CONTEXT pDispatcherContext
                               )
 {
-    Thread* pThread = GetThread();
+    Thread* pThread = GetThreadNULLOk();
     if (pThread == NULL) {
         return ExceptionContinueSearch;
     }
@@ -5854,7 +5960,7 @@ NOT_BIT64_ARG(IN     ULONG               MemoryStackFp),
     //
     // We check for thread object since this function is the personality routine of the UMThunk
     // and we can landup here even when thread creation (within the thunk) fails.
-    if (GetThread() != NULL)
+    if (GetThreadNULLOk() != NULL)
     {
         SetReversePInvokeEscapingUnhandledExceptionStatus(IS_UNWINDING(pExceptionRecord->ExceptionFlags),
             MemoryStackFp
@@ -5885,8 +5991,6 @@ CallDescrWorkerUnwindFrameChainHandler(IN     PEXCEPTION_RECORD   pExceptionReco
 {
 
     Thread* pThread = GetThread();
-    _ASSERTE(pThread);
-
     if (pExceptionRecord->ExceptionCode == STATUS_STACK_OVERFLOW)
     {
         if (IS_UNWINDING(pExceptionRecord->ExceptionFlags))
@@ -6711,11 +6815,11 @@ StackFrame ExceptionTracker::FindParentStackFrameHelper(CrawlFrame* pCF,
             fIsCallerInVM = !ExecutionManager::IsManagedCode(callerIP);
 #else
 #if defined(DACCESS_COMPILE)
-            HMODULE_TGT hEE = DacGlobalBase();
+            PTR_VOID eeBase = DacGlobalBase();
 #else  // !DACCESS_COMPILE
-            HMODULE_TGT hEE = g_hThisInst;
+            PTR_VOID eeBase = GetClrModuleBase();
 #endif // !DACCESS_COMPILE
-            fIsCallerInVM = IsIPInModule(hEE, callerIP);
+            fIsCallerInVM = IsIPInModule(eeBase, callerIP);
 #endif // TARGET_UNIX
 
             if (!fIsCallerInVM)

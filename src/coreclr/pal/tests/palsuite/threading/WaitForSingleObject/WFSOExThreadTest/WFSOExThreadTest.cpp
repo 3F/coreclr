@@ -20,14 +20,15 @@ const int ChildThreadWaitTime = 4000;
 const int InterruptTime = 2000; 
 const DWORD AcceptableDelta = 300;
 
-void RunTest(BOOL AlertThread);
-VOID PALAPI APCFunc(ULONG_PTR dwParam);
-DWORD PALAPI WaiterProc(LPVOID lpParameter);
-void WorkerThread(void);
+void RunTest_WFSOExThreadTest(BOOL AlertThread);
+VOID PALAPI APCFunc_WFSOExThreadTest(ULONG_PTR dwParam);
+DWORD PALAPI WaiterProc_WFSOExThreadTest(LPVOID lpParameter);
+void WorkerThread_WFSOExThreadTest(void);
 
-int ThreadWaitDelta;
+int ThreadWaitDelta_WFSOExThreadTest;
+static volatile bool s_preWaitTimestampRecorded = false;
 
-int __cdecl main( int argc, char **argv ) 
+PALTEST(threading_WaitForSingleObject_WFSOExThreadTest_paltest_waitforsingleobject_wfsoexthreadtest, "threading/WaitForSingleObject/WFSOExThreadTest/paltest_waitforsingleobject_wfsoexthreadtest")
 {
     if (0 != (PAL_Initialize(argc, argv)))
     {
@@ -48,12 +49,12 @@ int __cdecl main( int argc, char **argv )
      * it, if it's in an alertable state.
      */
 
-    RunTest(TRUE);
-    if (abs(ThreadWaitDelta - InterruptTime) > AcceptableDelta)
+    RunTest_WFSOExThreadTest(TRUE);
+    if (abs(ThreadWaitDelta_WFSOExThreadTest - InterruptTime) > AcceptableDelta)
     {
         Fail("Expected thread to wait for %d ms (and get interrupted).\n"
             "Thread waited for %d ms! (Acceptable delta: %d)\n", 
-            InterruptTime, ThreadWaitDelta, AcceptableDelta);
+            InterruptTime, ThreadWaitDelta_WFSOExThreadTest, AcceptableDelta);
     }
 
 
@@ -61,12 +62,12 @@ int __cdecl main( int argc, char **argv )
      * Check that Queueing an APC in the middle of a wait does NOT interrupt 
      * it, if it is not in an alertable state.
      */
-    RunTest(FALSE);
-    if (abs(ThreadWaitDelta - ChildThreadWaitTime) > AcceptableDelta)
+    RunTest_WFSOExThreadTest(FALSE);
+    if (abs(ThreadWaitDelta_WFSOExThreadTest - ChildThreadWaitTime) > AcceptableDelta)
     {
         Fail("Expected thread to wait for %d ms (and not be interrupted).\n"
             "Thread waited for %d ms! (Acceptable delta: %d)\n", 
-            ChildThreadWaitTime, ThreadWaitDelta, AcceptableDelta);
+            ChildThreadWaitTime, ThreadWaitDelta_WFSOExThreadTest, AcceptableDelta);
     }
 
 
@@ -74,16 +75,17 @@ int __cdecl main( int argc, char **argv )
     return PASS;
 }
 
-void RunTest(BOOL AlertThread)
+void RunTest_WFSOExThreadTest(BOOL AlertThread)
 {
     HANDLE hThread = 0;
     DWORD dwThreadId = 0;
     int ret;
 
-   //Create thread  
-   hThread = CreateThread( NULL, 
+    //Create thread  
+    s_preWaitTimestampRecorded = false;
+    hThread = CreateThread( NULL,
                             0, 
-                            (LPTHREAD_START_ROUTINE)WaiterProc,
+                            (LPTHREAD_START_ROUTINE)WaiterProc_WFSOExThreadTest,
                             (LPVOID) AlertThread,
                             0,
                             &dwThreadId);
@@ -94,9 +96,16 @@ void RunTest(BOOL AlertThread)
             "GetLastError returned %d\n", GetLastError());
     }
 
+    // Wait for the pre-wait timestamp to be recorded on the other thread before sleeping, since the sleep duration here will be
+    // compared against the sleep/wait duration on the other thread
+    while (!s_preWaitTimestampRecorded)
+    {
+        Sleep(0);
+    }
+
     Sleep(InterruptTime);
 
-    ret = QueueUserAPC(APCFunc, hThread, 0);
+    ret = QueueUserAPC(APCFunc_WFSOExThreadTest, hThread, 0);
     if (ret == 0)
     {
         Fail("QueueUserAPC failed! GetLastError returned %d\n", 
@@ -119,12 +128,12 @@ void RunTest(BOOL AlertThread)
 }
 
 /* Function doesn't do anything, just needed to interrupt the wait*/
-VOID PALAPI APCFunc(ULONG_PTR dwParam)
+VOID PALAPI APCFunc_WFSOExThreadTest(ULONG_PTR dwParam)
 {    
 }
 
 /* Entry Point for child thread. */
-DWORD PALAPI WaiterProc(LPVOID lpParameter)
+DWORD PALAPI WaiterProc_WFSOExThreadTest(LPVOID lpParameter)
 {
     HANDLE hWaitThread;
     UINT64 OldTimeStamp;
@@ -141,7 +150,7 @@ satisfying any threads that were waiting on the object.
 /* Create a thread that does not return immediately to maintain a non signaled test*/
 	hWaitThread = CreateThread( NULL, 
                             0, 
-                            (LPTHREAD_START_ROUTINE)WorkerThread,
+                            (LPTHREAD_START_ROUTINE)WorkerThread_WFSOExThreadTest,
                             NULL,
                             0,
                             &dwThreadId);
@@ -161,6 +170,7 @@ satisfying any threads that were waiting on the object.
     }
 
     OldTimeStamp = GetHighPrecisionTimeStamp(performanceFrequency);
+    s_preWaitTimestampRecorded = true;
 
     ret = WaitForSingleObjectEx(	hWaitThread, 
 								ChildThreadWaitTime, 
@@ -180,7 +190,7 @@ satisfying any threads that were waiting on the object.
             "Expected return of WAIT_TIMEOUT, got %d.\n", ret);
     }
 
-    ThreadWaitDelta = NewTimeStamp - OldTimeStamp;
+    ThreadWaitDelta_WFSOExThreadTest = NewTimeStamp - OldTimeStamp;
 
     ret = CloseHandle(hWaitThread);
     if (!ret)
@@ -193,7 +203,7 @@ satisfying any threads that were waiting on the object.
 }
 
 
-void WorkerThread(void)
+void WorkerThread_WFSOExThreadTest(void)
 {
 	
 	//Make the worker thread sleep to test WFSOEx Functionality

@@ -456,6 +456,7 @@ void LeftSideResourceCleanupList::SweepNeuterLeftSideResources(CordbProcess * pP
 /* ------------------------------------------------------------------------- *
  * CordbBase class
  * ------------------------------------------------------------------------- */
+extern void* GetClrModuleBase();
 
 // Do any initialization necessary for both CorPublish and CorDebug
 // This includes enabling logging and adding the SEDebug priv.
@@ -479,20 +480,16 @@ void CordbCommonBase::InitializeCommon()
         // StressLog will turn on stress logging for the entire runtime.
         // RSStressLog is only used here and only effects just the RS.
         fStressLog =
-            (REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::UNSUPPORTED_StressLog, fStressLog) != 0) ||
+            (CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_StressLog, fStressLog) != 0) ||
             (CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_RSStressLog) != 0);
 
         if (fStressLog == true)
         {
-            unsigned facilities = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_LogFacility, LF_ALL);
-            unsigned level = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::EXTERNAL_LogLevel, LL_INFO1000);
-            unsigned bytesPerThread = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::UNSUPPORTED_StressLogSize, STRESSLOG_CHUNK_SIZE * 2);
-            unsigned totalBytes = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::UNSUPPORTED_TotalStressLogSize, STRESSLOG_CHUNK_SIZE * 1024);
-#ifndef TARGET_UNIX
-            StressLog::Initialize(facilities, level, bytesPerThread, totalBytes, GetModuleInst());
-#else
-            StressLog::Initialize(facilities, level, bytesPerThread, totalBytes, NULL);
-#endif
+            unsigned facilities = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_LogFacility, LF_ALL);
+            unsigned level = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_LogLevel, LL_INFO1000);
+            unsigned bytesPerThread = CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_StressLogSize, STRESSLOG_CHUNK_SIZE * 2);
+            unsigned totalBytes = CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_TotalStressLogSize, STRESSLOG_CHUNK_SIZE * 1024);
+            StressLog::Initialize(facilities, level, bytesPerThread, totalBytes, GetClrModuleBase());
         }
     }
 
@@ -959,16 +956,17 @@ namespace
  * Cordb class
  * ------------------------------------------------------------------------- */
 Cordb::Cordb(CorDebugInterfaceVersion iDebuggerVersion)
-  : Cordb(iDebuggerVersion, ProcessDescriptor::CreateUninitialized())
+  : Cordb(iDebuggerVersion, ProcessDescriptor::CreateUninitialized(), NULL)
 {
 }
 
-Cordb::Cordb(CorDebugInterfaceVersion iDebuggerVersion, const ProcessDescriptor& pd)
+Cordb::Cordb(CorDebugInterfaceVersion iDebuggerVersion, const ProcessDescriptor& pd, LPCWSTR dacModulePath)
   : CordbBase(NULL, 0, enumCordb),
     m_processes(11),
     m_initialized(false),
     m_debuggerSpecifiedVersion(iDebuggerVersion),
-    m_pd(pd)
+    m_pd(pd),
+    m_dacModulePath(dacModulePath)
 #ifdef FEATURE_CORESYSTEM
     ,
     m_targetCLR(0)
@@ -1426,13 +1424,6 @@ HRESULT Cordb::SetTargetCLR(HMODULE hmodTargetCLR)
 #ifdef FEATURE_CORESYSTEM
     m_targetCLR = hmodTargetCLR;
 #endif
-
-    // @REVIEW: are we happy with this workaround?  It allows us to use the existing
-    // infrastructure for instance name decoration, but it really doesn't fit
-    // the same model because coreclr.dll isn't in this process and hmodTargetCLR
-    // is the debuggee target, not the coreclr.dll to bind utilcode to..
-
-    g_hmodCoreCLR = hmodTargetCLR;
 
     return S_OK;
 }
@@ -2075,7 +2066,7 @@ void Cordb::EnsureCanLaunchOrAttach(BOOL fWin32DebuggingEnabled)
 
 HRESULT Cordb::CreateObjectV1(REFIID id, void **object)
 {
-    return CreateObject(CorDebugVersion_1_0, ProcessDescriptor::UNINITIALIZED_PID, NULL, id, object);
+    return CreateObject(CorDebugVersion_1_0, ProcessDescriptor::UNINITIALIZED_PID, NULL, NULL, id, object);
 }
 
 #if defined(FEATURE_DBGIPC_TRANSPORT_DI)
@@ -2083,13 +2074,13 @@ HRESULT Cordb::CreateObjectV1(REFIID id, void **object)
 // same debug engine version as V2, though this may change in the future.
 HRESULT Cordb::CreateObjectTelesto(REFIID id, void ** pObject)
 {
-    return CreateObject(CorDebugVersion_2_0, ProcessDescriptor::UNINITIALIZED_PID, NULL, id, pObject);
+    return CreateObject(CorDebugVersion_2_0, ProcessDescriptor::UNINITIALIZED_PID, NULL, NULL, id, pObject);
 }
 #endif // FEATURE_DBGIPC_TRANSPORT_DI
 
 // Static
 // Used to create an instance for a ClassFactory (thus an external ref).
-HRESULT Cordb::CreateObject(CorDebugInterfaceVersion iDebuggerVersion, DWORD pid, LPCWSTR lpApplicationGroupId, REFIID id, void **object)
+HRESULT Cordb::CreateObject(CorDebugInterfaceVersion iDebuggerVersion, DWORD pid, LPCWSTR lpApplicationGroupId, LPCWSTR dacModulePath, REFIID id, void **object)
 {
     if (id != IID_IUnknown && id != IID_ICorDebug)
         return (E_NOINTERFACE);
@@ -2121,7 +2112,7 @@ HRESULT Cordb::CreateObject(CorDebugInterfaceVersion iDebuggerVersion, DWORD pid
 
     ProcessDescriptor pd = ProcessDescriptor::Create(pid, applicationGroupId);
 
-    Cordb *db = new (nothrow) Cordb(iDebuggerVersion, pd);
+    Cordb *db = new (nothrow) Cordb(iDebuggerVersion, pd, dacModulePath);
 
     if (db == NULL)
     {

@@ -11,7 +11,11 @@ namespace System
 {
     public static partial class Environment
     {
-        public static int CurrentManagedThreadId => Thread.CurrentThread.ManagedThreadId;
+        public static extern int CurrentManagedThreadId
+        {
+            [MethodImpl(MethodImplOptions.InternalCall)]
+            get;
+        }
 
         // Terminates this process with the given exit code.
         [DllImport(RuntimeHelpers.QCall, CharSet = CharSet.Unicode)]
@@ -85,12 +89,6 @@ namespace System
 
         // Used by VM
         internal static string? GetResourceStringLocal(string key) => SR.GetResourceString(key);
-
-        public static string StackTrace
-        {
-            [MethodImpl(MethodImplOptions.NoInlining)] // Prevent inlining from affecting where the stacktrace starts
-            get => new StackTrace(true).ToString(System.Diagnostics.StackTrace.TraceFormat.Normal);
-        }
 
         /// <summary>Gets the number of milliseconds elapsed since the system started.</summary>
         /// <value>A 32-bit signed integer containing the amount of time in milliseconds that has passed since the last time the computer was started.</value>

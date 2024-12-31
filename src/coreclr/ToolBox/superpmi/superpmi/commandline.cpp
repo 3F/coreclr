@@ -1,7 +1,5 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 //----------------------------------------------------------
 // CommandLine.cpp - tiny very specific command line parser
@@ -102,12 +100,16 @@ void CommandLine::DumpHelp(const char* program)
     printf("     If 'workerCount' is not specified, the number of workers used is\n");
     printf("     the number of processors on the machine.\n");
     printf("\n");
+    printf(" -failureLimit <limit>\n");
+    printf("     For a positive 'limit' number, replay and asm diffs will exit if it sees more than 'limit' failures.\n");
+    printf("     Otherwise, all methods will be compiled.\n");
+    printf("\n");
     printf(" -skipCleanup\n");
     printf("     Skip deletion of temporary files created by child SuperPMI processes with -parallel.\n");
     printf("\n");
     printf(" -target <target>\n");
     printf("     Used by the assembly differences calculator. This specifies the target\n");
-    printf("     architecture for cross-compilation. Currently allowed <target> values: arm, arm64\n");
+    printf("     architecture for cross-compilation. Currently allowed <target> values: x64, x86, arm, arm64\n");
     printf("\n");
     printf(" -coredistools\n");
     printf("     Use disassembly tools from the CoreDisTools library\n");
@@ -473,6 +475,24 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
                     }
                 }
             }
+            else if ((_strnicmp(&argv[i][1], "failureLimit", argLen) == 0))
+            {
+                if (++i >= argc)
+                {
+                    DumpHelp(argv[0]);
+                    return false;
+                }
+
+                o->failureLimit = atoi(argv[i]);
+
+                if (o->failureLimit < 1)
+                {
+                    LogError(
+                        "Incorrect limit specified for -failureLimit. Limit must be > 0.");
+                    DumpHelp(argv[0]);
+                    return false;
+                }
+            }
             else if ((_stricmp(&argv[i][1], "skipCleanup") == 0))
             {
                 o->skipCleanup = true;
@@ -595,23 +615,14 @@ bool CommandLine::Parse(int argc, char* argv[], /* OUT */ Options* o)
     }
     if (o->targetArchitecture != nullptr)
     {
-        const char* errorMessage = nullptr;
-#ifdef TARGET_AMD64
-        if (0 != _stricmp(o->targetArchitecture, "arm64"))
+        if ((0 != _stricmp(o->targetArchitecture, "amd64")) &&
+            (0 != _stricmp(o->targetArchitecture, "x64")) &&
+            (0 != _stricmp(o->targetArchitecture, "x86")) &&
+            (0 != _stricmp(o->targetArchitecture, "arm64")) &&
+            (0 != _stricmp(o->targetArchitecture, "arm")) &&
+            (0 != _stricmp(o->targetArchitecture, "arm32")))
         {
-            errorMessage = "Illegal target architecture specified with -target (only arm64 is supported on x64 host).";
-        }
-#elif defined(TARGET_X86)
-        if (0 != _stricmp(o->targetArchitecture, "arm"))
-        {
-            errorMessage = "Illegal target architecture specified with -target (only arm is supported on x86 host).";
-        }
-#else
-        errorMessage = "-target is unsupported on this platform.";
-#endif
-        if (errorMessage != nullptr)
-        {
-            LogError(errorMessage);
+            LogError("Illegal target architecture specified with -target (use 'x64', 'x86', 'arm64', or 'arm').");
             DumpHelp(argv[0]);
             return false;
         }

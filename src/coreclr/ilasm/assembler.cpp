@@ -1445,7 +1445,6 @@ void Assembler::EmitOpcode(Instr* instr)
                 pLPC->LineEnd = instr->linenum_end;
                 pLPC->ColumnEnd = instr->column_end;
                 pLPC->PC = m_CurPC;
-                pLPC->pWriter = instr->pWriter;
 
                 pLPC->pOwnerDocument = instr->pOwnerDocument;
                 if (0xfeefee == instr->linenum &&
@@ -1606,6 +1605,7 @@ void Assembler::EmitInstrVarByName(Instr* instr, __in __nullterminated char* lab
         case CEE_STARG:
         case CEE_STARG_S:
             nArgVarFlag++;
+            FALLTHROUGH;
         case CEE_LDLOCA:
         case CEE_LDLOCA_S:
         case CEE_LDLOC:
@@ -1827,7 +1827,6 @@ mdToken Assembler::MakeMemberRef(mdToken cr, __in __nullterminated char* pszMemb
                 mr = 0;
             }
         }
-        //if(m_fOBJ)    m_pCurMethod->m_TRDList.PUSH(new TokenRelocDescr(m_CurPC,mr));
         delete [] pszMemberName;
         delete sig;
     }
@@ -2096,7 +2095,6 @@ void Assembler::EmitInstrStringLiteral(Instr* instr, BinStr* literal, BOOL Conve
     else
     {
         EmitOpcode(instr);
-        if(m_fOBJ)  m_pCurMethod->m_TRDList.PUSH(new TokenRelocDescr(m_CurPC,tk));
 
         EmitBytes((BYTE *)&tk,sizeof(mdToken));
     }
@@ -2120,7 +2118,6 @@ void Assembler::EmitInstrSig(Instr* instr, BinStr* sig)
     else
     {
         EmitOpcode(instr);
-        if(m_fOBJ)  m_pCurMethod->m_TRDList.PUSH(new TokenRelocDescr(m_CurPC,MetadataToken));
         EmitBytes((BYTE *)&MetadataToken, sizeof(mdSignature));
     }
     delete sig;
@@ -2414,51 +2411,11 @@ void Assembler::SetSourceFileName(__in __nullterminated char* szName)
             }
             if(m_fGeneratePDB)
             {
-                if (IsPortablePdb())
+                if (FAILED(m_pPortablePdbWriter->DefineDocument(szName, &m_guidLang)))
                 {
-                    if (FAILED(m_pPortablePdbWriter->DefineDocument(szName, &m_guidLang)))
-                    {
-                        report->error("Failed to define a document: '%s'", szName);
-                    }
-                    delete[] szName;
+                    report->error("Failed to define a document: '%s'", szName);
                 }
-                else
-                {
-                    DocWriter* pDW;
-                    unsigned i = 0;
-                    while ((pDW = m_DocWriterList.PEEK(i++)) != NULL)
-                    {
-                        if (!strcmp(szName, pDW->Name)) break;
-                    }
-                    if (pDW)
-                    {
-                        m_pSymDocument = pDW->pWriter;
-                        delete[] szName;
-                    }
-                    else if (m_pSymWriter)
-                    {
-                        HRESULT hr;
-                        WszMultiByteToWideChar(g_uCodePage, 0, szName, -1, wzUniBuf, dwUniBuf);
-                        if (FAILED(hr = m_pSymWriter->DefineDocument(wzUniBuf, &m_guidLang,
-                            &m_guidLangVendor, &m_guidDoc, &m_pSymDocument)))
-                        {
-                            m_pSymDocument = NULL;
-                            report->error("Failed to define a document writer");
-                        }
-                        if ((pDW = new DocWriter()) != NULL)
-                        {
-                            pDW->Name = szName;
-                            pDW->pWriter = m_pSymDocument;
-                            m_DocWriterList.PUSH(pDW);
-                        }
-                        else
-                        {
-                            report->error("Out of memory");
-                            delete[] szName;
-                        }
-                    }
-                    else delete[] szName;
-                }
+                delete[] szName;
             }
             else delete [] szName;
         }
@@ -2495,22 +2452,20 @@ HRESULT Assembler::SavePdbFile()
     HRESULT hr = S_OK;
     mdMethodDef entryPoint;
 
-    if (m_pdbFormat == PORTABLE)
-    {
-        if (FAILED(hr = (m_pPortablePdbWriter == NULL ? E_FAIL : S_OK))) goto exit;
-        if (FAILED(hr = (m_pPortablePdbWriter->GetEmitter() == NULL ? E_FAIL : S_OK))) goto exit;
-        if (FAILED(hr = m_pCeeFileGen->GetEntryPoint(m_pCeeFile, &entryPoint))) goto exit;
-        if (FAILED(hr = m_pPortablePdbWriter->BuildPdbStream(m_pEmitter, entryPoint))) goto exit;
-        if (FAILED(hr = m_pPortablePdbWriter->GetEmitter()->Save(m_wzPdbFileName, NULL))) goto exit;
-    }
+    if (FAILED(hr = (m_pPortablePdbWriter == NULL ? E_FAIL : S_OK))) goto exit;
+    if (FAILED(hr = (m_pPortablePdbWriter->GetEmitter() == NULL ? E_FAIL : S_OK))) goto exit;
+    if (FAILED(hr = m_pCeeFileGen->GetEntryPoint(m_pCeeFile, &entryPoint))) goto exit;
+    if (FAILED(hr = m_pPortablePdbWriter->BuildPdbStream(m_pEmitter, entryPoint))) goto exit;
+    if (FAILED(hr = m_pPortablePdbWriter->GetEmitter()->Save(m_wzPdbFileName, NULL))) goto exit;
+
 exit:
     return hr;
 }
-BOOL Assembler::IsPortablePdb()
-{
-    return (m_pdbFormat == PORTABLE) && (m_pPortablePdbWriter != NULL);
-}
 
+// This method is called after we have parsed the generic type parameters for either
+// a generic class or a generic method.  It calls CheckAddGenericParamConstraint on
+// each generic parameter constraint that was recorded.
+//
 void Assembler::RecordTypeConstraints(GenericParamConstraintList* pGPCList, int numTyPars, TyParDescr* tyPars)
 {
     if (numTyPars > 0)
@@ -2527,13 +2482,18 @@ void Assembler::RecordTypeConstraints(GenericParamConstraintList* pGPCList, int 
                 for (int j = 0; j < numConstraints; j++)
                 {
                     mdToken tkTypeConstraint = ptk[j];
-                    CheckAddGenericParamConstraint(pGPCList, i, tkTypeConstraint);
+
+                    // pass false for isParamDirective, these constraints are from the class or method definition
+                    //
+                    CheckAddGenericParamConstraint(pGPCList, i, tkTypeConstraint, false);
                 }
             }
         }
     }
 }
 
+// AddGenericParamConstraint is called when we have a .param constraint directive after a class definition
+// 
 void Assembler::AddGenericParamConstraint(int index, char * pStrGenericParam, mdToken tkTypeConstraint)
 {
     if (!m_pCurClass)
@@ -2569,13 +2529,20 @@ void Assembler::AddGenericParamConstraint(int index, char * pStrGenericParam, md
             return;
         }
     }
-    bool newlyAdded = CheckAddGenericParamConstraint(&m_pCurClass->m_GPCList, index, tkTypeConstraint);
+
+    // pass true for isParamDirective, we are parsing a .param directive for a class here
+    //
+    CheckAddGenericParamConstraint(&m_pCurClass->m_GPCList, index, tkTypeConstraint, true);
 }
 
-// returns true if we create a new GenericParamConstraintDescriptor
-// reurns false if we return an already existing GenericParamConstraintDescriptor
+// CheckAddGenericParamConstraint is called when we have to handle a generic parameter constraint
+// When parsing a generic class/method definition isParamDirective is false - we have a generic type constaint
+// for this case we do not setup m_pCustomDescrList as a .custom after a generic class/method definition is
+// for the class/method
+// When isParamDirective is true, we have a .param constraint directive and we will setup m_pCustomDescrList
+// and any subsequent .custom is for the generic parameter constrant
 //
-bool Assembler::CheckAddGenericParamConstraint(GenericParamConstraintList* pGPCList, int index, mdToken tkTypeConstraint)
+void Assembler::CheckAddGenericParamConstraint(GenericParamConstraintList* pGPCList, int index, mdToken tkTypeConstraint, bool isParamDirective)
 {
     _ASSERTE(tkTypeConstraint != 0);
     _ASSERTE(index >= 0);
@@ -2602,18 +2569,30 @@ bool Assembler::CheckAddGenericParamConstraint(GenericParamConstraintList* pGPCL
 
     if (match)
     {
-        m_pCustomDescrList = pGPC->CAList();
-        return false;
+        // Found an existing generic parameter constraint
+        //
+        if (isParamDirective)
+        {
+            // Setup the custom descr list so that we can record
+            // custom attributes on this generic param contraint
+            //
+            m_pCustomDescrList = pGPC->CAList();
+        }
     }
     else
     {
-        // not found add it to our list
+        // not found - add it to our pGPCList
         //
         GenericParamConstraintDescriptor* pNewGPCDescr = new GenericParamConstraintDescriptor();
         pNewGPCDescr->Init(index, tkTypeConstraint);
         pGPCList->PUSH(pNewGPCDescr);
-        m_pCustomDescrList = pNewGPCDescr->CAList();
-        return true;
+        if (isParamDirective)
+        {
+            // Setup the custom descr list so that we can record
+            // custom attributes on this generic param contraint
+            //
+            m_pCustomDescrList = pNewGPCDescr->CAList();
+        }
     }
 }
 
@@ -2711,18 +2690,24 @@ void Assembler::EmitGenericParamConstraints(int numTyPars, TyParDescr* pTyPars, 
 
         if (currParamNumConstraints > 0)
         {
-            mdGenericParam tkGenericParam = pTyPars[paramIndex].Token();
-            ULONG currNumConstraints      = (ULONG) nConstraintsArr[paramIndex];
-            mdToken* currConstraintArr    = pConstraintsArr[paramIndex];
+            mdGenericParam tkGenericParam     = pTyPars[paramIndex].Token();
+            DWORD          paramAttrs         = pTyPars[paramIndex].Attrs();
+            ULONG          currNumConstraints = (ULONG) nConstraintsArr[paramIndex];
+            mdToken*       currConstraintArr  = pConstraintsArr[paramIndex];
             mdGenericParamConstraint* currGPConstraintArr = pGPConstraintsArr[paramIndex];
 
             // call SetGenericParamProps for each generic parameter that has a non-zero count of constraints
             // to record each generic parameters tyupe constraints.
             //
+            // Pass the paramAttrs, these contain values in CorGenericParamAttr such as:
+            //    gpReferenceTypeConstraint        = 0x0004,  // type argument must be a reference type
+            //    gpNotNullableValueTypeConstraint = 0x0008,  // type argument must be a value type but not Nullable
+            //    gpDefaultConstructorConstraint   = 0x0010,  // type argument must have a public default constructor
+            //
             // This Metadata operation will also create a new GenericParamConstraint token
             // for each of the generic parameters type constraints.
             //
-            if (FAILED(m_pEmitter->SetGenericParamProps(tkGenericParam, 0, NULL, 0, currConstraintArr)))
+            if (FAILED(m_pEmitter->SetGenericParamProps(tkGenericParam, paramAttrs, NULL, 0, currConstraintArr)))
             {
                 report->error("Failed in SetGenericParamProp");
             }

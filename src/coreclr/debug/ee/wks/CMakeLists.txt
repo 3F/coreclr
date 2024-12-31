@@ -10,7 +10,6 @@ if (CLR_CMAKE_TARGET_WIN32)
   if(CLR_CMAKE_HOST_ARCH_ARM OR CLR_CMAKE_HOST_ARCH_ARM64)
 
     preprocess_files(ASM_FILE ${ASM_FILE})
-
     if (CMAKE_GENERATOR MATCHES "Visual Studio")
       compile_asm(TARGET cordbee_wks_obj ASM_FILES ${ASM_FILE} OUTPUT_OBJECTS ASM_OBJECTS)
     endif()
@@ -33,15 +32,11 @@ if (CLR_CMAKE_TARGET_WIN32)
 
 else ()
 
-  if(CLR_CMAKE_HOST_ARCH_AMD64 OR CLR_CMAKE_HOST_ARCH_ARM OR CLR_CMAKE_HOST_ARCH_ARM64 OR CLR_CMAKE_HOST_ARCH_I386)
-    add_library_clr(cordbee_wks_obj OBJECT ${CORDBEE_SOURCES_WKS} ../${ARCH_SOURCES_DIR}/dbghelpers.S)
-  else()
-    message(FATAL_ERROR "Unknown platform")
-  endif()
+  add_library_clr(cordbee_wks_obj OBJECT ${CORDBEE_SOURCES_WKS} ../${ARCH_SOURCES_DIR}/dbghelpers.S)
 
 endif (CLR_CMAKE_TARGET_WIN32)
 
-target_precompile_header(TARGET cordbee_wks_obj HEADER stdafx.h)
+target_precompile_headers(cordbee_wks_obj PRIVATE [["stdafx.h"]])
 add_dependencies(cordbee_wks_obj eventing_headers)
 add_library(cordbee_wks INTERFACE)
 target_sources(cordbee_wks INTERFACE $<TARGET_OBJECTS:cordbee_wks_obj>)

@@ -385,7 +385,7 @@ void emitter::emitInsSanityCheck(instrDesc* id)
         case IF_DI_2D: // DI_2D   X........Nrrrrrr ssssssnnnnnddddd      Rd Rn    imr, imms   (N,r,s)
             assert(isValidGeneralDatasize(id->idOpSize()));
             assert(isGeneralRegister(id->idReg1()));
-            assert(isGeneralRegister(id->idReg2()));
+            assert(isGeneralRegisterOrZR(id->idReg2()));
             assert(isValidImmNRS(emitGetInsSC(id), id->idOpSize()));
             break;
 
@@ -913,6 +913,12 @@ void emitter::emitInsSanityCheck(instrDesc* id)
         case IF_SN_0A: // SN_0A   ................ ................
         case IF_SI_0A: // SI_0A   ...........iiiii iiiiiiiiiii.....               imm16
         case IF_SI_0B: // SI_0B   ................ ....bbbb........               imm4 - barrier
+            break;
+
+        case IF_SR_1A: // SR_1A   ................ ...........ttttt      Rt       (dc zva)
+            datasize = id->idOpSize();
+            assert(isGeneralRegister(id->idReg1()));
+            assert(datasize == EA_8BYTE);
             break;
 
         default:
@@ -3683,6 +3689,14 @@ void emitter::emitIns_R(instruction ins, emitAttr attr, regNumber reg)
             fmt = IF_BR_1A;
             break;
 
+        case INS_dczva:
+            assert(isGeneralRegister(reg));
+            assert(attr == EA_8BYTE);
+            id = emitNewInstrSmall(attr);
+            id->idReg1(reg);
+            fmt = IF_SR_1A;
+            break;
+
         default:
             unreached();
     }
@@ -3701,7 +3715,11 @@ void emitter::emitIns_R(instruction ins, emitAttr attr, regNumber reg)
  *  Add an instruction referencing a register and a constant.
  */
 
-void emitter::emitIns_R_I(instruction ins, emitAttr attr, regNumber reg, ssize_t imm, insOpts opt /* = INS_OPTS_NONE */)
+void emitter::emitIns_R_I(instruction ins,
+                          emitAttr    attr,
+                          regNumber   reg,
+                          ssize_t     imm,
+                          insOpts opt /* = INS_OPTS_NONE */ DEBUGARG(GenTreeFlags gtFlags))
 {
     emitAttr  size      = EA_SIZE(attr);
     emitAttr  elemsize  = EA_UNKNOWN;
@@ -3951,6 +3969,7 @@ void emitter::emitIns_R_I(instruction ins, emitAttr attr, regNumber reg, ssize_t
     id->idInsOpt(opt);
 
     id->idReg1(reg);
+    INDEBUG(id->idDebugOnlyInfo()->idFlags = gtFlags);
 
     dispIns(id);
     appendToCurIG(id);
@@ -4045,14 +4064,22 @@ void emitter::emitIns_R_F(
     appendToCurIG(id);
 }
 
-/*****************************************************************************
- *
- *  Add an instruction referencing two registers
- */
-
-void emitter::emitIns_R_R(
-    instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, insOpts opt /* = INS_OPTS_NONE */)
+//------------------------------------------------------------------------
+// emitIns_Mov: Emits a move instruction
+//
+// Arguments:
+//    ins       -- The instruction being emitted
+//    attr      -- The emit attribute
+//    dstReg    -- The destination register
+//    srcReg    -- The source register
+//    canSkip   -- true if the move can be elided when dstReg == srcReg, otherwise false
+//    insOpts   -- The instruction options
+//
+void emitter::emitIns_Mov(
+    instruction ins, emitAttr attr, regNumber dstReg, regNumber srcReg, bool canSkip, insOpts opt /* = INS_OPTS_NONE */)
 {
+    assert(IsMovInstruction(ins));
+
     emitAttr  size     = EA_SIZE(attr);
     emitAttr  elemsize = EA_UNKNOWN;
     insFormat fmt      = IF_NONE;
@@ -4061,53 +4088,170 @@ void emitter::emitIns_R_R(
     switch (ins)
     {
         case INS_mov:
+        {
             assert(insOptsNone(opt));
 
-            // Is the mov even necessary?
-            if (emitComp->opts.OptimizationEnabled() && IsRedundantMov(ins, size, reg1, reg2))
+            if (IsRedundantMov(ins, size, dstReg, srcReg, canSkip))
             {
+                // These instructions have no side effect and can be skipped
                 return;
             }
 
             // Check for the 'mov' aliases for the vector registers
-            if (isVectorRegister(reg1))
+            if (isVectorRegister(dstReg))
             {
-                if (isVectorRegister(reg2) && isValidVectorDatasize(size))
+                if (isVectorRegister(srcReg) && isValidVectorDatasize(size))
                 {
-                    return emitIns_R_R_R(INS_mov, size, reg1, reg2, reg2);
+                    return emitIns_R_R_R(INS_mov, size, dstReg, srcReg, srcReg);
                 }
                 else
                 {
-                    return emitIns_R_R_I(INS_mov, size, reg1, reg2, 0);
+                    return emitIns_R_R_I(INS_mov, size, dstReg, srcReg, 0);
                 }
             }
             else
             {
-                if (isVectorRegister(reg2))
+                if (isVectorRegister(srcReg))
                 {
-                    assert(isGeneralRegister(reg1));
-                    return emitIns_R_R_I(INS_mov, size, reg1, reg2, 0);
+                    assert(isGeneralRegister(dstReg));
+                    return emitIns_R_R_I(INS_mov, size, dstReg, srcReg, 0);
                 }
             }
 
             // Is this a MOV to/from SP instruction?
-            if ((reg1 == REG_SP) || (reg2 == REG_SP))
+            if ((dstReg == REG_SP) || (srcReg == REG_SP))
             {
-                assert(isGeneralRegisterOrSP(reg1));
-                assert(isGeneralRegisterOrSP(reg2));
-                reg1 = encodingSPtoZR(reg1);
-                reg2 = encodingSPtoZR(reg2);
-                fmt  = IF_DR_2G;
+                assert(isGeneralRegisterOrSP(dstReg));
+                assert(isGeneralRegisterOrSP(srcReg));
+                dstReg = encodingSPtoZR(dstReg);
+                srcReg = encodingSPtoZR(srcReg);
+                fmt    = IF_DR_2G;
             }
             else
             {
                 assert(insOptsNone(opt));
-                assert(isGeneralRegister(reg1));
-                assert(isGeneralRegisterOrZR(reg2));
+                assert(isGeneralRegister(dstReg));
+                assert(isGeneralRegisterOrZR(srcReg));
                 fmt = IF_DR_2E;
             }
             break;
+        }
 
+        case INS_sxtw:
+        {
+            assert(size == EA_8BYTE);
+            FALLTHROUGH;
+        }
+
+        case INS_sxtb:
+        case INS_sxth:
+        case INS_uxtb:
+        case INS_uxth:
+        {
+            if (canSkip && (dstReg == srcReg))
+            {
+                // There are scenarios such as in genCallInstruction where the sign/zero extension should be elided
+                return;
+            }
+
+            assert(insOptsNone(opt));
+            assert(isValidGeneralDatasize(size));
+            assert(isGeneralRegister(dstReg));
+            assert(isGeneralRegister(srcReg));
+            fmt = IF_DR_2H;
+            break;
+        }
+
+        case INS_fmov:
+        {
+            assert(isValidVectorElemsizeFloat(size));
+
+            if (canSkip && (dstReg == srcReg))
+            {
+                // These instructions have no side effect and can be skipped
+                return;
+            }
+
+            if (isVectorRegister(dstReg))
+            {
+                if (isVectorRegister(srcReg))
+                {
+                    assert(insOptsNone(opt));
+                    fmt = IF_DV_2G;
+                }
+                else
+                {
+                    assert(isGeneralRegister(srcReg));
+
+                    // if the optional conversion specifier is not present we calculate it
+                    if (opt == INS_OPTS_NONE)
+                    {
+                        opt = (size == EA_4BYTE) ? INS_OPTS_4BYTE_TO_S : INS_OPTS_8BYTE_TO_D;
+                    }
+                    assert(insOptsConvertIntToFloat(opt));
+
+                    fmt = IF_DV_2I;
+                }
+            }
+            else
+            {
+                assert(isGeneralRegister(dstReg));
+                assert(isVectorRegister(srcReg));
+
+                // if the optional conversion specifier is not present we calculate it
+                if (opt == INS_OPTS_NONE)
+                {
+                    opt = (size == EA_4BYTE) ? INS_OPTS_S_TO_4BYTE : INS_OPTS_D_TO_8BYTE;
+                }
+                assert(insOptsConvertFloatToInt(opt));
+
+                fmt = IF_DV_2H;
+            }
+            break;
+        }
+
+        default:
+        {
+            unreached();
+        }
+    }
+
+    assert(fmt != IF_NONE);
+
+    instrDesc* id = emitNewInstrSmall(attr);
+
+    id->idIns(ins);
+    id->idInsFmt(fmt);
+    id->idInsOpt(opt);
+
+    id->idReg1(dstReg);
+    id->idReg2(srcReg);
+
+    dispIns(id);
+    appendToCurIG(id);
+}
+
+/*****************************************************************************
+ *
+ *  Add an instruction referencing two registers
+ */
+
+void emitter::emitIns_R_R(
+    instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, insOpts opt /* = INS_OPTS_NONE */)
+{
+    if (IsMovInstruction(ins))
+    {
+        assert(!"Please use emitIns_Mov() to correctly handle move elision");
+        emitIns_Mov(ins, attr, reg1, reg2, /* canSkip */ false, opt);
+    }
+
+    emitAttr  size     = EA_SIZE(attr);
+    emitAttr  elemsize = EA_UNKNOWN;
+    insFormat fmt      = IF_NONE;
+
+    /* Figure out the encoding format of the instruction */
+    switch (ins)
+    {
         case INS_dup:
             // Vector operation
             assert(insOptsAnyArrangement(opt));
@@ -4173,28 +4317,13 @@ void emitter::emitIns_R_R(
                 }
                 break;
             }
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_negs:
             assert(insOptsNone(opt));
             assert(isGeneralRegister(reg1));
             assert(isGeneralRegisterOrZR(reg2));
             fmt = IF_DR_2E;
-            break;
-
-        case INS_sxtw:
-            assert(size == EA_8BYTE);
-            __fallthrough;
-
-        case INS_sxtb:
-        case INS_sxth:
-        case INS_uxtb:
-        case INS_uxth:
-            assert(insOptsNone(opt));
-            assert(isValidGeneralDatasize(size));
-            assert(isGeneralRegister(reg1));
-            assert(isGeneralRegister(reg2));
-            fmt = IF_DR_2H;
             break;
 
         case INS_sxtl:
@@ -4236,7 +4365,7 @@ void emitter::emitIns_R_R(
                 break;
             }
 
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_rev:
             assert(insOptsNone(opt));
@@ -4291,7 +4420,7 @@ void emitter::emitIns_R_R(
                 fmt = IF_DV_2L;
                 break;
             }
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_xtn:
             // Vector operation
@@ -4321,7 +4450,7 @@ void emitter::emitIns_R_R(
         case INS_stlr:
             assert(isValidGeneralDatasize(size));
 
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ldarb:
         case INS_ldaxrb:
@@ -4376,52 +4505,6 @@ void emitter::emitIns_R_R(
         case INS_staddl:
             emitIns_R_R_R(INS_ldaddl, attr, reg1, REG_ZR, reg2);
             return;
-
-        case INS_fmov:
-            assert(isValidVectorElemsizeFloat(size));
-
-            // Is the mov even necessary?
-            if (reg1 == reg2)
-            {
-                return;
-            }
-
-            if (isVectorRegister(reg1))
-            {
-                if (isVectorRegister(reg2))
-                {
-                    assert(insOptsNone(opt));
-                    fmt = IF_DV_2G;
-                }
-                else
-                {
-                    assert(isGeneralRegister(reg2));
-
-                    // if the optional conversion specifier is not present we calculate it
-                    if (opt == INS_OPTS_NONE)
-                    {
-                        opt = (size == EA_4BYTE) ? INS_OPTS_4BYTE_TO_S : INS_OPTS_8BYTE_TO_D;
-                    }
-                    assert(insOptsConvertIntToFloat(opt));
-
-                    fmt = IF_DV_2I;
-                }
-            }
-            else
-            {
-                assert(isGeneralRegister(reg1));
-                assert(isVectorRegister(reg2));
-
-                // if the optional conversion specifier is not present we calculate it
-                if (opt == INS_OPTS_NONE)
-                {
-                    opt = (size == EA_4BYTE) ? INS_OPTS_S_TO_4BYTE : INS_OPTS_D_TO_8BYTE;
-                }
-                assert(insOptsConvertFloatToInt(opt));
-
-                fmt = IF_DV_2H;
-            }
-            break;
 
         case INS_fcmp:
         case INS_fcmpe:
@@ -4716,7 +4799,7 @@ void emitter::emitIns_R_R(
         case INS_st3:
         case INS_st4:
             assert(opt != INS_OPTS_1D); // .1D format only permitted with LD1 & ST1
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ld1:
         case INS_ld1_2regs:
@@ -4835,7 +4918,7 @@ void emitter::emitIns_R_I_I(
 
         case INS_mov:
             ins = INS_movz; // INS_mov with LSL is an alias for INS_movz LSL
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_movk:
         case INS_movn:
@@ -5086,7 +5169,7 @@ void emitter::emitIns_R_R_I(
         case INS_sxtl:
         case INS_uxtl:
             assert(imm == 0);
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_rshrn:
         case INS_shrn:
@@ -5108,7 +5191,7 @@ void emitter::emitIns_R_R_I(
         case INS_sxtl2:
         case INS_uxtl2:
             assert(imm == 0);
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_rshrn2:
         case INS_shrn2:
@@ -5265,7 +5348,7 @@ void emitter::emitIns_R_R_I(
                     break;
                 }
             }
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ins: // (MOV from general)
             assert(insOptsNone(opt));
@@ -5412,7 +5495,7 @@ void emitter::emitIns_R_R_I(
         case INS_st3:
         case INS_st4:
             assert(opt != INS_OPTS_1D); // .1D format only permitted with LD1 & ST1
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ld1:
         case INS_ld1_2regs:
@@ -5538,6 +5621,15 @@ void emitter::emitIns_R_R_I(
                 assert(!"Instruction cannot be encoded: IF_LS_2B");
             }
         }
+
+        // Is the ldr/str even necessary?
+        // For volatile load/store, there will be memory barrier instruction before/after the load/store
+        // and in such case, IsRedundantLdStr() returns false, because the method just checks for load/store
+        // pair next to each other.
+        if (emitComp->opts.OptimizationEnabled() && IsRedundantLdStr(ins, reg1, reg2, imm, size, fmt))
+        {
+            return;
+        }
     }
     else if (isAddSub)
     {
@@ -5557,11 +5649,7 @@ void emitter::emitIns_R_R_I(
             // Is it just a mov?
             if (imm == 0)
             {
-                // Is the mov even necessary?
-                if (reg1 != reg2)
-                {
-                    emitIns_R_R(INS_mov, attr, reg1, reg2);
-                }
+                emitIns_Mov(INS_mov, attr, reg1, reg2, /* canSkip */ true);
                 return;
             }
 
@@ -5695,7 +5783,7 @@ void emitter::emitIns_R_R_R(
                 break;
             }
             // Base instruction
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_lsl:
         case INS_lsr:
@@ -5758,7 +5846,7 @@ void emitter::emitIns_R_R_R(
                 break;
             }
             // Base instruction
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_adds:
         case INS_subs:
@@ -5936,7 +6024,7 @@ void emitter::emitIns_R_R_R(
                 fmt = IF_DV_3C;
                 break;
             }
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ands:
         case INS_bics:
@@ -6082,6 +6170,8 @@ void emitter::emitIns_R_R_R(
         case INS_ldadda:
         case INS_ldaddal:
         case INS_ldaddl:
+        case INS_ldclral:
+        case INS_ldsetal:
         case INS_swpb:
         case INS_swpab:
         case INS_swpalb:
@@ -6127,7 +6217,7 @@ void emitter::emitIns_R_R_R(
         case INS_st3:
         case INS_st4:
             assert(opt != INS_OPTS_1D); // .1D format only permitted with LD1 & ST1
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ld1:
         case INS_ld1_2regs:
@@ -6475,7 +6565,7 @@ void emitter::emitIns_R_R_R_I(instruction ins,
         case INS_ldnp:
         case INS_stnp:
             assert(insOptsNone(opt)); // Can't use Pre/Post index on these two instructions
-            __fallthrough;
+            FALLTHROUGH;
 
         case INS_ldp:
         case INS_stp:
@@ -6932,7 +7022,7 @@ void emitter::emitIns_R_R_I_I(
         case INS_sbfm:
         case INS_ubfm:
             assert(isGeneralRegister(reg1));
-            assert(isGeneralRegister(reg2));
+            assert((ins == INS_bfm) ? isGeneralRegisterOrZR(reg2) : isGeneralRegister(reg2));
             assert(isValidImmShift(imm1, size));
             assert(isValidImmShift(imm2, size));
             assert(insOptsNone(opt));
@@ -7525,6 +7615,12 @@ void emitter::emitIns_R_S(instruction ins, emitAttr attr, regNumber reg1, int va
         }
     }
 
+    // Is the ldr/str even necessary?
+    if (emitComp->opts.OptimizationEnabled() && IsRedundantLdStr(ins, reg1, reg2, imm, size, fmt))
+    {
+        return;
+    }
+
     assert(fmt != IF_NONE);
 
     instrDesc* id = emitNewInstrCns(attr, imm);
@@ -7748,6 +7844,12 @@ void emitter::emitIns_S_R(instruction ins, emitAttr attr, regNumber reg1, int va
         regNumber rsvdReg = codeGen->rsGetRsvdReg();
         codeGen->instGen_Set_Reg_To_Imm(EA_PTRSIZE, rsvdReg, imm);
         fmt = IF_LS_3A;
+    }
+
+    // Is the ldr/str even necessary?
+    if (emitComp->opts.OptimizationEnabled() && IsRedundantLdStr(ins, reg1, reg2, imm, size, fmt))
+    {
+        return;
     }
 
     assert(fmt != IF_NONE);
@@ -8001,7 +8103,7 @@ void emitter::emitIns_R_AR(instruction ins, emitAttr attr, regNumber ireg, regNu
 void emitter::emitIns_R_AI(instruction ins,
                            emitAttr    attr,
                            regNumber   ireg,
-                           ssize_t addr DEBUGARG(size_t targetHandle) DEBUGARG(unsigned gtFlags))
+                           ssize_t addr DEBUGARG(size_t targetHandle) DEBUGARG(GenTreeFlags gtFlags))
 {
     assert(EA_IS_RELOC(attr));
     emitAttr      size    = EA_SIZE(attr);
@@ -8131,7 +8233,7 @@ void emitter::emitSetShortJump(instrDescJmp* id)
 
 void emitter::emitIns_R_L(instruction ins, emitAttr attr, BasicBlock* dst, regNumber reg)
 {
-    assert(dst->bbFlags & BBF_JMP_TARGET);
+    assert(dst->bbFlags & BBF_HAS_LABEL);
 
     insFormat fmt = IF_NONE;
 
@@ -8201,7 +8303,7 @@ void emitter::emitIns_J_R(instruction ins, emitAttr attr, BasicBlock* dst, regNu
     assert((ins == INS_cbz) || (ins == INS_cbnz));
 
     assert(dst != nullptr);
-    assert((dst->bbFlags & BBF_JMP_TARGET) != 0);
+    assert((dst->bbFlags & BBF_HAS_LABEL) != 0);
 
     insFormat fmt = IF_LARGEJMP;
 
@@ -8239,7 +8341,7 @@ void emitter::emitIns_J_R_I(instruction ins, emitAttr attr, BasicBlock* dst, reg
     assert((ins == INS_tbz) || (ins == INS_tbnz));
 
     assert(dst != nullptr);
-    assert((dst->bbFlags & BBF_JMP_TARGET) != 0);
+    assert((dst->bbFlags & BBF_HAS_LABEL) != 0);
     assert((EA_SIZE(attr) == EA_4BYTE) || (EA_SIZE(attr) == EA_8BYTE));
     assert(imm < ((EA_SIZE(attr) == EA_4BYTE) ? 32 : 64));
 
@@ -8281,7 +8383,7 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, int instrCount)
 
     if (dst != nullptr)
     {
-        assert(dst->bbFlags & BBF_JMP_TARGET);
+        assert(dst->bbFlags & BBF_HAS_LABEL);
     }
     else
     {
@@ -10137,6 +10239,14 @@ unsigned emitter::emitOutputCall(insGroup* ig, BYTE* dst, instrDesc* id, code_t 
 
     emitUpdateLiveGCvars(GCvars, dst);
 
+#ifdef DEBUG
+    // Output any delta in GC variable info, corresponding to the before-call GC var updates done above.
+    if (EMIT_GC_VERBOSE || emitComp->opts.disasmWithGC)
+    {
+        emitDispGCVarDelta();
+    }
+#endif // DEBUG
+
     // Now output the call instruction and update the 'dst' pointer
     //
     unsigned outputInstrSize = emitOutput_Instr(dst, code);
@@ -10205,10 +10315,11 @@ unsigned emitter::emitOutputCall(insGroup* ig, BYTE* dst, instrDesc* id, code_t 
  *  Emit a 32-bit Arm64 instruction
  */
 
-/*static*/ unsigned emitter::emitOutput_Instr(BYTE* dst, code_t code)
+unsigned emitter::emitOutput_Instr(BYTE* dst, code_t code)
 {
     assert(sizeof(code_t) == 4);
-    *((code_t*)dst) = code;
+    BYTE* dstRW       = dst + writeableOffset;
+    *((code_t*)dstRW) = code;
 
     return sizeof(code_t);
 }
@@ -11343,6 +11454,13 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
             dst += emitOutput_Instr(dst, code);
             break;
 
+        case IF_SR_1A: // SR_1A   ................ ...........ttttt      Rt       (dc zva)
+            assert(insOptsNone(id->idInsOpt()));
+            code = emitInsCode(ins, fmt);
+            code |= insEncodeReg_Rt(id->idReg1()); // ttttt
+            dst += emitOutput_Instr(dst, code);
+            break;
+
         default:
             assert(!"Unexpected format");
             break;
@@ -11389,7 +11507,7 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
         int      adr = emitComp->lvaFrameAddress(varNum, &FPbased);
         if (id->idGCref() != GCT_NONE)
         {
-            emitGCvarLiveUpd(adr + ofs, varNum, id->idGCref(), dst);
+            emitGCvarLiveUpd(adr + ofs, varNum, id->idGCref(), dst DEBUG_ARG(varNum));
         }
         else
         {
@@ -11406,14 +11524,14 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
                 vt              = tmpDsc->tdTempType();
             }
             if (vt == TYP_REF || vt == TYP_BYREF)
-                emitGCvarDeadUpd(adr + ofs, dst);
+                emitGCvarDeadUpd(adr + ofs, dst DEBUG_ARG(varNum));
         }
         if (emitInsWritesToLclVarStackLocPair(id))
         {
             unsigned ofs2 = ofs + TARGET_POINTER_SIZE;
             if (id->idGCrefReg2() != GCT_NONE)
             {
-                emitGCvarLiveUpd(adr + ofs2, varNum, id->idGCrefReg2(), dst);
+                emitGCvarLiveUpd(adr + ofs2, varNum, id->idGCrefReg2(), dst DEBUG_ARG(varNum));
             }
             else
             {
@@ -11430,7 +11548,7 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
                     vt              = tmpDsc->tdTempType();
                 }
                 if (vt == TYP_REF || vt == TYP_BYREF)
-                    emitGCvarDeadUpd(adr + ofs2, dst);
+                    emitGCvarDeadUpd(adr + ofs2, dst DEBUG_ARG(varNum));
             }
         }
     }
@@ -11441,7 +11559,7 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
     size_t expected = emitSizeOfInsDsc(id);
     assert(sz == expected);
 
-    if (emitComp->opts.disAsm || emitComp->opts.dspEmit || emitComp->verbose)
+    if (emitComp->opts.disAsm || emitComp->verbose)
     {
         emitDispIns(id, false, dspOffs, true, emitCurCodeOffs(odst), *dp, (dst - *dp), ig);
     }
@@ -11454,6 +11572,12 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
         {
             assert(!"JitBreakEmitOutputInstr reached");
         }
+    }
+
+    // Output any delta in GC info.
+    if (EMIT_GC_VERBOSE || emitComp->opts.disasmWithGC)
+    {
+        emitDispGCInfoDelta();
     }
 #endif
 
@@ -12080,8 +12204,14 @@ void emitter::emitDispIns(
     if (pCode == NULL)
         sz = 0;
 
-    if (!emitComp->opts.dspEmit && !isNew && !asmfm && sz)
+    if (!isNew && !asmfm && sz)
+    {
         doffs = true;
+    }
+
+    /* Display the instruction address */
+
+    emitDispInsAddr(pCode);
 
     /* Display the instruction offset */
 
@@ -12132,7 +12262,6 @@ void emitter::emitDispIns(
         ssize_t      index2;
         unsigned     registerListSize;
         const char*  targetName;
-        const WCHAR* stringLiteral;
 
         case IF_BI_0A: // BI_0A   ......iiiiiiiiii iiiiiiiiiiiiiiii               simm26:00
         case IF_BI_0B: // BI_0B   ......iiiiiiiiii iiiiiiiiiii.....               simm19:00
@@ -12161,7 +12290,7 @@ void emitter::emitDispIns(
             }
             else if (id->idIsBound())
             {
-                printf("G_M%03u_IG%02u", emitComp->compMethodID, id->idAddr()->iiaIGlabel->igNum);
+                emitPrintLabel(id->idAddr()->iiaIGlabel);
             }
             else
             {
@@ -12199,7 +12328,7 @@ void emitter::emitDispIns(
             emitDispReg(id->idReg1(), size, true);
             if (id->idIsBound())
             {
-                printf("G_M%03u_IG%02u", emitComp->compMethodID, id->idAddr()->iiaIGlabel->igNum);
+                emitPrintLabel(id->idAddr()->iiaIGlabel);
             }
             else
             {
@@ -12213,7 +12342,7 @@ void emitter::emitDispIns(
             emitDispImm(emitGetInsSC(id), true);
             if (id->idIsBound())
             {
-                printf("G_M%03u_IG%02u", emitComp->compMethodID, id->idAddr()->iiaIGlabel->igNum);
+                emitPrintLabel(id->idAddr()->iiaIGlabel);
             }
             else
             {
@@ -12238,9 +12367,8 @@ void emitter::emitDispIns(
         case IF_LARGEADR:
             assert(insOptsNone(id->idInsOpt()));
             emitDispReg(id->idReg1(), size, true);
-            imm           = emitGetInsSC(id);
-            targetName    = nullptr;
-            stringLiteral = nullptr;
+            imm        = emitGetInsSC(id);
+            targetName = nullptr;
 
             /* Is this actually a reference to a data section? */
             if (fmt == IF_LARGEADR)
@@ -12273,8 +12401,7 @@ void emitter::emitDispIns(
                 {
                     printf("HIGH RELOC ");
                     emitDispImm((ssize_t)id->idAddr()->iiaAddr, false);
-                    size_t   targetHandle = id->idDebugOnlyInfo()->idMemCookie;
-                    unsigned idFlags      = id->idDebugOnlyInfo()->idFlags & GTF_ICON_HDL_MASK;
+                    size_t targetHandle = id->idDebugOnlyInfo()->idMemCookie;
 
                     if (targetHandle == THT_IntializeArrayIntrinsics)
                     {
@@ -12288,41 +12415,10 @@ void emitter::emitDispIns(
                     {
                         targetName = "SetGlobalSecurityCookie";
                     }
-                    else if ((idFlags == GTF_ICON_STR_HDL) || (idFlags == GTF_ICON_PSTR_HDL))
-                    {
-                        stringLiteral = emitComp->eeGetCPString(targetHandle);
-                        // Note that eGetCPString isn't currently implemented on Linux/ARM
-                        // and instead always returns nullptr. However, use it here, so in
-                        // future, once it is is implemented, no changes will be needed here.
-                        if (stringLiteral == nullptr)
-                        {
-                            targetName = "String handle";
-                        }
-                    }
-                    else if ((idFlags == GTF_ICON_FIELD_HDL) || (idFlags == GTF_ICON_STATIC_HDL))
-                    {
-                        targetName = emitComp->eeGetFieldName((CORINFO_FIELD_HANDLE)targetHandle);
-                    }
-                    else if ((idFlags == GTF_ICON_METHOD_HDL) || (idFlags == GTF_ICON_FTN_ADDR))
-                    {
-                        targetName = emitComp->eeGetMethodFullName((CORINFO_METHOD_HANDLE)targetHandle);
-                    }
-                    else if (idFlags == GTF_ICON_CLASS_HDL)
-                    {
-                        targetName = emitComp->eeGetClassName((CORINFO_CLASS_HANDLE)targetHandle);
-                    }
-                    else if (idFlags == GTF_ICON_TOKEN_HDL)
-                    {
-                        targetName = "Token handle";
-                    }
-                    else
-                    {
-                        targetName = "Unknown";
-                    }
                 }
                 else if (id->idIsBound())
                 {
-                    printf("G_M%03u_IG%02u", emitComp->compMethodID, id->idAddr()->iiaIGlabel->igNum);
+                    emitPrintLabel(id->idAddr()->iiaIGlabel);
                 }
                 else
                 {
@@ -12334,9 +12430,9 @@ void emitter::emitDispIns(
             {
                 printf("      // [%s]", targetName);
             }
-            else if (stringLiteral != nullptr)
+            else
             {
-                printf("      // [%S]", stringLiteral);
+                emitDispCommentForHandle(id->idDebugOnlyInfo()->idMemCookie, id->idDebugOnlyInfo()->idFlags);
             }
             break;
 
@@ -13236,6 +13332,10 @@ void emitter::emitDispIns(
             emitDispBarrier((insBarrier)emitGetInsSC(id));
             break;
 
+        case IF_SR_1A: // SR_1A   ................ ...........ttttt      Rt       (dc zva)
+            emitDispReg(id->idReg1(), size, false);
+            break;
+
         default:
             printf("unexpected format %s", emitIfName(id->idInsFmt()));
             assert(!"unexpectedFormat");
@@ -13426,6 +13526,20 @@ void emitter::emitInsLoadStoreOp(instruction ins, emitAttr attr, regNumber dataR
     }
     else // addr is not contained, so we evaluate it into a register
     {
+#ifdef DEBUG
+        if (addr->OperIs(GT_LCL_VAR_ADDR, GT_LCL_FLD_ADDR))
+        {
+            // If the local var is a gcref or byref, the local var better be untracked, because we have
+            // no logic here to track local variable lifetime changes, like we do in the contained case
+            // above. E.g., for a `str r0,[r1]` for byref `r1` to local `V01`, we won't store the local
+            // `V01` and so the emitter can't update the GC lifetime for `V01` if this is a variable birth.
+            GenTreeLclVarCommon* varNode = addr->AsLclVarCommon();
+            unsigned             lclNum  = varNode->GetLclNum();
+            LclVarDsc*           varDsc  = emitComp->lvaGetDesc(lclNum);
+            assert(!varDsc->lvTracked);
+        }
+#endif // DEBUG
+
         // Then load/store dataReg from/to [addrReg]
         emitIns_R_R(ins, attr, dataReg, addr->GetRegNum());
     }
@@ -13763,7 +13877,7 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
             }
             // otherwise we should have a br_tail instruction
             assert(ins == INS_br_tail);
-            __fallthrough;
+            FALLTHROUGH;
         case IF_BR_1A: // ret, br
             result.insThroughput = PERFSCORE_THROUGHPUT_1C;
             result.insLatency    = PERFSCORE_LATENCY_1C;
@@ -13879,6 +13993,7 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
                     perfScoreUnhandledInstruction(id, &result);
                     break;
             }
+            break;
 
         // ALU, basic immediate
         case IF_DI_1A: // cmp, cmn
@@ -15308,6 +15423,11 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
             result.insLatency    = PERFSCORE_LATENCY_1C;
             break;
 
+        case IF_SR_1A:
+            result.insThroughput = PERFSCORE_THROUGHPUT_1C;
+            result.insLatency    = PERFSCORE_LATENCY_1C;
+            break;
+
         case IF_DV_2T: // addv, saddlv, smaxv, sminv, uaddlv, umaxv, uminv
             switch (ins)
             {
@@ -15358,6 +15478,34 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
 
 #endif // defined(DEBUG) || defined(LATE_DISASM)
 
+//------------------------------------------------------------------------
+// IsMovInstruction: Determines whether a give instruction is a move instruction
+//
+// Arguments:
+//    ins       -- The instruction being checked
+//
+bool emitter::IsMovInstruction(instruction ins)
+{
+    switch (ins)
+    {
+        case INS_fmov:
+        case INS_mov:
+        case INS_sxtb:
+        case INS_sxth:
+        case INS_sxtw:
+        case INS_uxtb:
+        case INS_uxth:
+        {
+            return true;
+        }
+
+        default:
+        {
+            return false;
+        }
+    }
+}
+
 //----------------------------------------------------------------------------------------
 // IsRedundantMov:
 //    Check if the current `mov` instruction is redundant and can be omitted.
@@ -15383,13 +15531,26 @@ emitter::insExecutionCharacteristics emitter::getInsExecutionCharacteristics(ins
 //    size - Operand size of current instruction
 //    dst  - The current destination
 //    src  - The current source
+// canSkip - The move can be skipped as it doesn't represent special semantics
 //
 // Return Value:
 //    true if previous instruction moved from current dst to src.
 
-bool emitter::IsRedundantMov(instruction ins, emitAttr size, regNumber dst, regNumber src)
+bool emitter::IsRedundantMov(instruction ins, emitAttr size, regNumber dst, regNumber src, bool canSkip)
 {
     assert(ins == INS_mov);
+
+    if (canSkip && (dst == src))
+    {
+        // These elisions used to be explicit even when optimizations were disabled
+        return true;
+    }
+
+    if (!emitComp->opts.OptimizationEnabled())
+    {
+        // The remaining move elisions should only happen if optimizations are enabled
+        return false;
+    }
 
     if (dst == src)
     {
@@ -15420,16 +15581,18 @@ bool emitter::IsRedundantMov(instruction ins, emitAttr size, regNumber dst, regN
         regNumber prevSrc    = emitLastIns->idReg2();
         insFormat lastInsfmt = emitLastIns->idInsFmt();
 
-        if ((prevDst == dst) && (prevSrc == src))
+        // Sometimes emitLastIns can be a mov with single register e.g. "mov reg, #imm". So ensure to
+        // optimize formats that does vector-to-vector or scalar-to-scalar register movs.
+        //
+        const bool isValidLastInsFormats =
+            ((lastInsfmt == IF_DV_3C) || (lastInsfmt == IF_DR_2G) || (lastInsfmt == IF_DR_2E));
+
+        if (isValidLastInsFormats && (prevDst == dst) && (prevSrc == src))
         {
             assert(emitLastIns->idOpSize() == size);
             JITDUMP("\n -- suppressing mov because previous instruction already moved from src to dst register.\n");
             return true;
         }
-
-        // Sometimes emitLastIns can be a mov with single register e.g. "mov reg, #imm". So ensure to
-        // optimize formats that does vector-to-vector or scalar-to-scalar register movs.
-        bool isValidLastInsFormats = ((lastInsfmt == IF_DV_3C) || (lastInsfmt == IF_DR_2G) || (lastInsfmt == IF_DR_2E));
 
         if ((prevDst == src) && (prevSrc == dst) && isValidLastInsFormats)
         {
@@ -15456,6 +15619,96 @@ bool emitter::IsRedundantMov(instruction ins, emitAttr size, regNumber dst, regN
             }
 
             // For mov of other sizes, don't optimize because it has side-effect of clearing the upper bits.
+        }
+    }
+
+    return false;
+}
+
+//----------------------------------------------------------------------------------------
+// IsRedundantLdStr:
+//    For ldr/str pair next to each other, check if the current load or store is needed or is
+//    the value already present as of previous instruction.
+//
+//    ldr x1,  [x2, #56]
+//    str x1,  [x2, #56]   <-- redundant
+//
+//          OR
+//
+//    str x1,  [x2, #56]
+//    ldr x1,  [x2, #56]   <-- redundant
+
+// Arguments:
+//    ins  - The current instruction
+//    dst  - The current destination
+//    src  - The current source
+//    imm  - Immediate offset
+//    size - Operand size
+//    fmt  - Format of instruction
+// Return Value:
+//    true if previous instruction already has desired value in register/memory location.
+
+bool emitter::IsRedundantLdStr(
+    instruction ins, regNumber reg1, regNumber reg2, ssize_t imm, emitAttr size, insFormat fmt)
+{
+    bool isFirstInstrInBlock = (emitCurIGinsCnt == 0) && ((emitCurIG->igFlags & IGF_EXTEND) == 0);
+
+    if (((ins != INS_ldr) && (ins != INS_str)) || (isFirstInstrInBlock) || (emitLastIns == nullptr))
+    {
+        return false;
+    }
+
+    regNumber prevReg1   = emitLastIns->idReg1();
+    regNumber prevReg2   = emitLastIns->idReg2();
+    insFormat lastInsfmt = emitLastIns->idInsFmt();
+    emitAttr  prevSize   = emitLastIns->idOpSize();
+    ssize_t prevImm = emitLastIns->idIsLargeCns() ? ((instrDescCns*)emitLastIns)->idcCnsVal : emitLastIns->idSmallCns();
+
+    // Only optimize if:
+    // 1. "base" or "base plus immediate offset" addressing modes.
+    // 2. Addressing mode matches with previous instruction.
+    // 3. The operand size matches with previous instruction
+    if (((fmt != IF_LS_2A) && (fmt != IF_LS_2B)) || (fmt != lastInsfmt) || (prevSize != size))
+    {
+        return false;
+    }
+
+    if ((ins == INS_ldr) && (emitLastIns->idIns() == INS_str))
+    {
+        // If reg1 is of size less than 8-bytes, then eliminating the 'ldr'
+        // will not zero the upper bits of reg1.
+
+        // Make sure operand size is 8-bytes
+        //  str w0, [x1, #4]
+        //  ldr w0, [x1, #4]  <-- can't eliminate because upper-bits of x0 won't get set.
+        if (size != EA_8BYTE)
+        {
+            return false;
+        }
+
+        if ((prevReg1 == reg1) && (prevReg2 == reg2) && (imm == prevImm))
+        {
+            JITDUMP("\n -- suppressing 'ldr reg%u [reg%u, #%u]' as previous 'str reg%u [reg%u, #%u]' was from same "
+                    "location.\n",
+                    reg1, reg2, imm, prevReg1, prevReg2, prevImm);
+            return true;
+        }
+    }
+    else if ((ins == INS_str) && (emitLastIns->idIns() == INS_ldr))
+    {
+        // Make sure src and dst registers are not same.
+        //  ldr x0, [x0, #4]
+        //  str x0, [x0, #4]  <-- can't eliminate because [x0+3] is not same destination as previous source.
+        // Note, however, that we can not eliminate store in the following sequence
+        //  ldr wzr, [x0, #4]
+        //  str wzr, [x0, #4]
+        // since load operation doesn't (and can't) change the value of its destination register.
+        if ((reg1 != reg2) && (prevReg1 == reg1) && (prevReg2 == reg2) && (imm == prevImm) && (reg1 != REG_ZR))
+        {
+            JITDUMP("\n -- suppressing 'str reg%u [reg%u, #%u]' as previous 'ldr reg%u [reg%u, #%u]' was from same "
+                    "location.\n",
+                    reg1, reg2, imm, prevReg1, prevReg2, prevImm);
+            return true;
         }
     }
 

@@ -84,30 +84,6 @@ static_assert_no_msg(ECallCtor_First + 8 == ECall::CtorSBytePtrStartLengthEncodi
 
 #define NumberOfStringConstructors 9
 
-#ifdef FEATURE_UTF8STRING
-// METHOD__UTF8STRING__CTORF_XXX has to be in same order as ECall::Utf8StringCtorCharXxx
-#define METHOD__UTF8STRING__CTORF_FIRST METHOD__UTF8_STRING__CTORF_READONLYSPANOFBYTE
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 0 == METHOD__UTF8_STRING__CTORF_READONLYSPANOFBYTE);
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 1 == METHOD__UTF8_STRING__CTORF_READONLYSPANOFCHAR);
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 2 == METHOD__UTF8_STRING__CTORF_BYTEARRAY_START_LEN);
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 3 == METHOD__UTF8_STRING__CTORF_BYTEPTR);
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 4 == METHOD__UTF8_STRING__CTORF_CHARARRAY_START_LEN);
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 5 == METHOD__UTF8_STRING__CTORF_CHARPTR);
-static_assert_no_msg(METHOD__UTF8STRING__CTORF_FIRST + 6 == METHOD__UTF8_STRING__CTORF_STRING);
-
-// ECall::Utf8StringCtorCharXxx has to be in same order as METHOD__UTF8STRING__CTORF_XXX
-#define ECallUtf8String_Ctor_First ECall::Utf8StringCtorReadOnlySpanOfByteManaged
-static_assert_no_msg(ECallUtf8String_Ctor_First + 0 == ECall::Utf8StringCtorReadOnlySpanOfByteManaged);
-static_assert_no_msg(ECallUtf8String_Ctor_First + 1 == ECall::Utf8StringCtorReadOnlySpanOfCharManaged);
-static_assert_no_msg(ECallUtf8String_Ctor_First + 2 == ECall::Utf8StringCtorByteArrayStartLengthManaged);
-static_assert_no_msg(ECallUtf8String_Ctor_First + 3 == ECall::Utf8StringCtorBytePtrManaged);
-static_assert_no_msg(ECallUtf8String_Ctor_First + 4 == ECall::Utf8StringCtorCharArrayStartLengthManaged);
-static_assert_no_msg(ECallUtf8String_Ctor_First + 5 == ECall::Utf8StringCtorCharPtrManaged);
-static_assert_no_msg(ECallUtf8String_Ctor_First + 6 == ECall::Utf8StringCtorStringManaged);
-
-#define NumberOfUtf8StringConstructors 7
-#endif // FEATURE_UTF8STRING
-
 void ECall::PopulateManagedStringConstructors()
 {
     STANDARD_VM_CONTRACT;
@@ -125,19 +101,6 @@ void ECall::PopulateManagedStringConstructors()
 
         ECall::DynamicallyAssignFCallImpl(pDest, ECallCtor_First + i);
     }
-
-#ifdef FEATURE_UTF8STRING
-    _ASSERTE(g_pUtf8StringClass != NULL);
-    for (int i = 0; i < NumberOfUtf8StringConstructors; i++)
-    {
-        MethodDesc* pMD = CoreLibBinder::GetMethod((BinderMethodID)(METHOD__UTF8STRING__CTORF_FIRST + i));
-        _ASSERTE(pMD != NULL);
-
-        PCODE pDest = pMD->GetMultiCallableAddrOfCode();
-
-        ECall::DynamicallyAssignFCallImpl(pDest, ECallUtf8String_Ctor_First + i);
-    }
-#endif // FEATURE_UTF8STRING
 
     INDEBUG(fInitialized = true);
 }
@@ -467,11 +430,10 @@ PCODE ECall::GetFCallImpl(MethodDesc * pMD, BOOL * pfSharedOrDynamicFCallImpl /*
     // COM imported classes have special constructors
     if (pMT->IsComObjectType()
 #ifdef FEATURE_COMINTEROP
-        && pMT != g_pBaseCOMObject
+        && (g_pBaseCOMObject == NULL || pMT != g_pBaseCOMObject)
 #endif // FEATURE_COMINTEROP
     )
     {
-#ifdef FEATURE_COMINTEROP
         if (pfSharedOrDynamicFCallImpl)
             *pfSharedOrDynamicFCallImpl = TRUE;
 
@@ -480,9 +442,6 @@ PCODE ECall::GetFCallImpl(MethodDesc * pMD, BOOL * pfSharedOrDynamicFCallImpl /*
 
         // FCComCtor does not need to be in the fcall hashtable since it does not erect frame.
         return GetEEFuncEntryPoint(FCComCtor);
-#else
-        COMPlusThrow(kPlatformNotSupportedException, IDS_EE_ERROR_COM);
-#endif // FEATURE_COMINTEROP
     }
 
     if (!pMD->GetModule()->IsSystem())
@@ -603,9 +562,7 @@ BOOL ECall::IsSharedFCallImpl(PCODE pImpl)
     PCODE pNativeCode = pImpl;
 
     return
-#ifdef FEATURE_COMINTEROP
         (pNativeCode == GetEEFuncEntryPoint(FCComCtor)) ||
-#endif
         (pNativeCode == GetEEFuncEntryPoint(COMDelegate::DelegateConstruct));
 }
 
@@ -651,7 +608,12 @@ BOOL ECall::CheckUnusedECalls(SetSHash<DWORD>& usedIDs)
 }
 
 
-#if defined(FEATURE_COMINTEROP) && !defined(CROSSGEN_COMPILE)
+#if !defined(CROSSGEN_COMPILE)
+// This function is a stub implementation for the constructor of a ComImport class.
+// The actual work to implement COM Activation (and built-in COM support checks) is done as part
+// of the implementation of object allocation. As a result, the constructor itself has no extra
+// work to do once the object has been allocated. As a result, we just provide a dummy implementation
+// here since a constructor has to have an implementation.
 FCIMPL1(VOID, FCComCtor, LPVOID pV)
 {
     FCALL_CONTRACT;
@@ -659,7 +621,7 @@ FCIMPL1(VOID, FCComCtor, LPVOID pV)
     FCUnique(0x34);
 }
 FCIMPLEND
-#endif // FEATURE_COMINTEROP && !CROSSGEN_COMPILE
+#endif // !CROSSGEN_COMPILE
 
 
 
@@ -697,6 +659,13 @@ LPVOID ECall::GetQCallImpl(MethodDesc * pMD)
     if (id == 0)
     {
         id = ECall::GetIDForMethod(pMD);
+
+#ifdef _DEBUG
+        CONSISTENCY_CHECK_MSGF(id != 0,
+            ("%s::%s is not registered in ecall.cpp",
+            pMD->m_pszDebugClassName, pMD->m_pszDebugMethodName));
+#endif
+
         _ASSERTE(id != 0);
 
         // Cache the id

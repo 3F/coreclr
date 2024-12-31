@@ -124,7 +124,7 @@ namespace ILCompiler.DependencyAnalysis
                     _codegenNodeFactory,
                     _codegenNodeFactory.HelperImports,
                     ReadyToRunHelper.DelayLoad_Helper_ObjObj,
-                    new DelegateCtorSignature(ctorKey.Type, targetMethodNode, ctorKey.Method.Token));
+                    new DelegateCtorSignature(ctorKey.Type, targetMethodNode, ctorKey.Method));
             });
 
             _checkTypeLayoutCache = new NodeCache<TypeDesc, ISymbolNode>(key =>
@@ -133,6 +133,11 @@ namespace ILCompiler.DependencyAnalysis
                     _codegenNodeFactory,
                     _codegenNodeFactory.TypeSignature(_verifyTypeAndFieldLayout ? ReadyToRunFixupKind.Verify_TypeLayout: ReadyToRunFixupKind.Check_TypeLayout, key)
                 );
+            });
+
+            _virtualFunctionOverrideCache = new NodeCache<VirtualResolutionFixupSignature, ISymbolNode>(key =>
+            {
+                return new PrecodeHelperImport(_codegenNodeFactory, key);
             });
 
             _genericLookupHelpers = new NodeCache<GenericLookupKey, ISymbolNode>(key =>
@@ -418,7 +423,7 @@ namespace ILCompiler.DependencyAnalysis
 
         public ISymbolNode InterfaceDispatchCell(MethodWithToken method, MethodDesc callingMethod)
         {
-            MethodAndCallSite cellKey = new MethodAndCallSite(method, callingMethod);
+            MethodAndCallSite cellKey = new MethodAndCallSite(method, null);
             return _interfaceDispatchCells.GetOrAdd(cellKey);
         }
 
@@ -439,6 +444,15 @@ namespace ILCompiler.DependencyAnalysis
         public ISymbolNode CheckTypeLayout(TypeDesc type)
         {
             return _checkTypeLayoutCache.GetOrAdd(type);
+        }
+
+        private NodeCache<VirtualResolutionFixupSignature, ISymbolNode> _virtualFunctionOverrideCache;
+
+        public ISymbolNode CheckVirtualFunctionOverride(MethodWithToken declMethod, TypeDesc implType, MethodWithToken implMethod)
+        {
+            return _virtualFunctionOverrideCache.GetOrAdd(_codegenNodeFactory.VirtualResolutionFixupSignature(
+                _verifyTypeAndFieldLayout ? ReadyToRunFixupKind.Verify_VirtualFunctionOverride : ReadyToRunFixupKind.Check_VirtualFunctionOverride,
+                declMethod, implType, implMethod));
         }
 
         struct MethodAndCallSite : IEquatable<MethodAndCallSite>
@@ -499,7 +513,7 @@ namespace ILCompiler.DependencyAnalysis
                 return LookupKind == other.LookupKind &&
                     FixupKind == other.FixupKind &&
                     RuntimeDeterminedTypeHelper.Equals(TypeArgument, other.TypeArgument) &&
-                    RuntimeDeterminedTypeHelper.Equals(MethodArgument?.Method ?? null, other.MethodArgument?.Method ?? null) &&
+                    RuntimeDeterminedTypeHelper.Equals(MethodArgument, other.MethodArgument) &&
                     RuntimeDeterminedTypeHelper.Equals(FieldArgument, other.FieldArgument) &&
                     MethodContext.Equals(other.MethodContext);
             }
@@ -514,7 +528,7 @@ namespace ILCompiler.DependencyAnalysis
                 return unchecked(((int)LookupKind << 24) +
                     (int)FixupKind +
                     (TypeArgument != null ? 31 * RuntimeDeterminedTypeHelper.GetHashCode(TypeArgument) : 0) +
-                    (MethodArgument != null ? 31 * RuntimeDeterminedTypeHelper.GetHashCode(MethodArgument.Method) : 0) +
+                    (MethodArgument != null ? 31 * RuntimeDeterminedTypeHelper.GetHashCode(MethodArgument) : 0) +
                     (FieldArgument != null ? 31 * RuntimeDeterminedTypeHelper.GetHashCode(FieldArgument) : 0) +
                     MethodContext.GetHashCode());
             }

@@ -21,7 +21,7 @@ using namespace CorUnix;
 
 #if HAVE_MACH_EXCEPTIONS
 
-#if defined(HOST_AMD64)
+#if defined(HOST_64BIT)
 #define MACH_EH_TYPE(x) mach_##x
 #else
 #define MACH_EH_TYPE(x) x
@@ -44,7 +44,8 @@ using namespace CorUnix;
 // This macro terminates the process with some useful debug info as above, but for the general failure points
 // that have nothing to do with Mach.
 #define NONPAL_RETAIL_ASSERT(_msg, ...) do {                                    \
-        printf("%s: %u: " _msg "\n", __FUNCTION__, __LINE__, ## __VA_ARGS__);   \
+        fprintf(stdout, "%s: %u: " _msg "\n", __FUNCTION__, __LINE__, ## __VA_ARGS__);   \
+        fflush(stdout);                                                         \
         abort();                                                                \
     } while (false)
 
@@ -67,7 +68,7 @@ using namespace CorUnix;
 
 // Debug-only output with printf-style formatting.
 #define NONPAL_TRACE(_format, ...) do {                                              \
-        if (NONPAL_TRACE_ENABLED) printf("NONPAL_TRACE: " _format, ## __VA_ARGS__);  \
+        if (NONPAL_TRACE_ENABLED) { fprintf(stdout, "NONPAL_TRACE: " _format, ## __VA_ARGS__); fflush(stdout); }  \
     } while (false)
 
 #else // _DEBUG
@@ -87,10 +88,17 @@ struct MachExceptionInfo
     exception_type_t ExceptionType;
     mach_msg_type_number_t SubcodeCount;
     MACH_EH_TYPE(exception_data_type_t) Subcodes[2];
+#if defined(HOST_AMD64)
     x86_thread_state_t ThreadState;
     x86_float_state_t FloatState;
     x86_debug_state_t DebugState;
-
+#elif defined(HOST_ARM64)
+    arm_thread_state64_t ThreadState;
+    arm_neon_state64_t FloatState;
+    arm_debug_state64_t DebugState;
+#else
+#error Unexpected architecture
+#endif
     MachExceptionInfo(mach_port_t thread, MachMessage& message);
     void RestoreState(mach_port_t thread);
 };

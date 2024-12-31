@@ -6,98 +6,10 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
+using System.Runtime.Versioning;
 
 namespace System.Threading
 {
-    internal sealed class ThreadHelper
-    {
-        private Delegate _start;
-        internal CultureInfo? _startCulture;
-        internal CultureInfo? _startUICulture;
-        private object? _startArg;
-        private ExecutionContext? _executionContext;
-
-        internal ThreadHelper(Delegate start)
-        {
-            _start = start;
-        }
-
-        internal void SetExecutionContextHelper(ExecutionContext? ec)
-        {
-            _executionContext = ec;
-        }
-
-        internal static readonly ContextCallback s_threadStartContextCallback = new ContextCallback(ThreadStart_Context);
-
-        private static void ThreadStart_Context(object? state)
-        {
-            Debug.Assert(state is ThreadHelper);
-            ThreadHelper t = (ThreadHelper)state;
-
-            t.InitializeCulture();
-
-            Debug.Assert(t._start is ThreadStart || t._start is ParameterizedThreadStart);
-            if (t._start is ThreadStart threadStart)
-            {
-                threadStart();
-            }
-            else
-            {
-                ((ParameterizedThreadStart)t._start)(t._startArg);
-            }
-        }
-
-        private void InitializeCulture()
-        {
-            if (_startCulture != null)
-            {
-                CultureInfo.CurrentCulture = _startCulture;
-                _startCulture = null;
-            }
-
-            if (_startUICulture != null)
-            {
-                CultureInfo.CurrentUICulture = _startUICulture;
-                _startUICulture = null;
-            }
-        }
-
-        // call back helper
-        internal void ThreadStart(object? obj)
-        {
-            Debug.Assert(_start is ParameterizedThreadStart);
-            _startArg = obj;
-
-            ExecutionContext? context = _executionContext;
-            if (context != null)
-            {
-                ExecutionContext.RunInternal(context, s_threadStartContextCallback, this);
-            }
-            else
-            {
-                InitializeCulture();
-                ((ParameterizedThreadStart)_start)(obj);
-            }
-        }
-
-        // call back helper
-        internal void ThreadStart()
-        {
-            Debug.Assert(_start is ThreadStart);
-
-            ExecutionContext? context = _executionContext;
-            if (context != null)
-            {
-                ExecutionContext.RunInternal(context, s_threadStartContextCallback, this);
-            }
-            else
-            {
-                InitializeCulture();
-                ((ThreadStart)_start)();
-            }
-        }
-    }
-
     internal readonly struct ThreadHandle
     {
         private readonly IntPtr _ptr;
@@ -119,9 +31,7 @@ namespace System.Threading
         internal SynchronizationContext? _synchronizationContext; // maintained separately from ExecutionContext
 
         private string? _name;
-        private Delegate? _delegate; // Delegate
-
-        private object? _threadStartArg;
+        private StartHelper? _startHelper;
 
         /*=========================================================================
         ** The base implementation of Thread is all native.  The following fields
@@ -143,22 +53,16 @@ namespace System.Threading
         private int _managedThreadId; // INT32
 #pragma warning restore CA1823, 169
 
+        // This is used for a quick check on thread pool threads after running a work item to determine if the name, background
+        // state, or priority were changed by the work item, and if so to reset it. Other threads may also change some of those,
+        // but those types of changes may race with the reset anyway, so this field doesn't need to be synchronized.
+        private bool _mayNeedResetForThreadPool;
+
         private Thread() { }
-
-        private void Create(ThreadStart start) =>
-            SetStartHelper((Delegate)start, 0); // 0 will setup Thread with default stackSize
-
-        private void Create(ThreadStart start, int maxStackSize) =>
-            SetStartHelper((Delegate)start, maxStackSize);
-
-        private void Create(ParameterizedThreadStart start) =>
-            SetStartHelper((Delegate)start, 0);
-
-        private void Create(ParameterizedThreadStart start, int maxStackSize) =>
-            SetStartHelper((Delegate)start, maxStackSize);
 
         public extern int ManagedThreadId
         {
+            [Intrinsic]
             [MethodImpl(MethodImplOptions.InternalCall)]
             get;
         }
@@ -177,68 +81,29 @@ namespace System.Threading
             return new ThreadHandle(thread);
         }
 
-        /// <summary>
-        /// Spawns off a new thread which will begin executing at the ThreadStart
-        /// method on the IThreadable interface passed in the constructor. Once the
-        /// thread is dead, it cannot be restarted with another call to Start.
-        /// </summary>
-        public void Start(object? parameter)
+        private unsafe void StartCore()
         {
-            // In the case of a null delegate (second call to start on same thread)
-            // StartInternal method will take care of the error reporting.
-            if (_delegate is ThreadStart)
+            lock (this)
             {
-                // We expect the thread to be setup with a ParameterizedThreadStart if this Start is called.
-                throw new InvalidOperationException(SR.InvalidOperation_ThreadWrongThreadStart);
-            }
-
-            _threadStartArg = parameter;
-            Start();
-        }
-
-        public void Start()
-        {
-#if FEATURE_COMINTEROP_APARTMENT_SUPPORT
-            // Eagerly initialize the COM Apartment state of the thread if we're allowed to.
-            StartupSetApartmentStateInternal();
-#endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
-
-            // Attach current thread's security principal object to the new
-            // thread. Be careful not to bind the current thread to a principal
-            // if it's not already bound.
-            if (_delegate != null)
-            {
-                // If we reach here with a null delegate, something is broken. But we'll let the StartInternal method take care of
-                // reporting an error. Just make sure we don't try to dereference a null delegate.
-                Debug.Assert(_delegate.Target is ThreadHelper);
-                var t = (ThreadHelper)_delegate.Target;
-
-                ExecutionContext? ec = ExecutionContext.Capture();
-                t.SetExecutionContextHelper(ec);
-            }
-
-            StartInternal();
-        }
-
-        private void SetCultureOnUnstartedThreadNoCheck(CultureInfo value, bool uiCulture)
-        {
-            Debug.Assert(_delegate != null);
-            Debug.Assert(_delegate.Target is ThreadHelper);
-
-            var t = (ThreadHelper)(_delegate.Target);
-
-            if (uiCulture)
-            {
-                t._startUICulture = value;
-            }
-            else
-            {
-                t._startCulture = value;
+                fixed (char* pThreadName = _name)
+                {
+                    StartInternal(GetNativeHandle(), _startHelper?._maxStackSize ?? 0, _priority, pThreadName);
+                }
             }
         }
 
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        private extern void StartInternal();
+        [DllImport(RuntimeHelpers.QCall)]
+        private static extern unsafe void StartInternal(ThreadHandle t, int stackSize, int priority, char* pThreadName);
+
+        // Called from the runtime
+        private void StartCallback()
+        {
+            StartHelper? startHelper = _startHelper;
+            Debug.Assert(startHelper != null);
+            _startHelper = null;
+
+            startHelper.Run();
+        }
 
         // Invoked by VM. Helper method to get a logical thread ID for StringBuilder (for
         // correctness) and for FileStream's async code path (for perf, to avoid creating
@@ -254,7 +119,8 @@ namespace System.Threading
         [MethodImpl(MethodImplOptions.InternalCall)]
         private static extern void SleepInternal(int millisecondsTimeout);
 
-        public static void Sleep(int millisecondsTimeout) => SleepInternal(millisecondsTimeout);
+        [DllImport(RuntimeHelpers.QCall)]
+        internal static extern void UninterruptibleSleep0();
 
         /// <summary>
         /// Wait for a length of time proportional to 'iterations'.  Each iteration is should
@@ -277,35 +143,14 @@ namespace System.Threading
         [MethodImpl(MethodImplOptions.InternalCall)]
         private static extern Thread GetCurrentThreadNative();
 
-        private void SetStartHelper(Delegate start, int maxStackSize)
-        {
-            Debug.Assert(maxStackSize >= 0);
-
-            var helper = new ThreadHelper(start);
-            if (start is ThreadStart)
-            {
-                SetStart(new ThreadStart(helper.ThreadStart), maxStackSize);
-            }
-            else
-            {
-                SetStart(new ParameterizedThreadStart(helper.ThreadStart), maxStackSize);
-            }
-        }
-
-        /// <summary>Sets the IThreadable interface for the thread. Assumes that start != null.</summary>
         [MethodImpl(MethodImplOptions.InternalCall)]
-        private extern void SetStart(Delegate start, int maxStackSize);
+        private extern void Initialize();
 
         /// <summary>Clean up the thread when it goes away.</summary>
         ~Thread() => InternalFinalize(); // Delegate to the unmanaged portion.
 
         [MethodImpl(MethodImplOptions.InternalCall)]
         private extern void InternalFinalize();
-
-#if FEATURE_COMINTEROP_APARTMENT_SUPPORT
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        private extern void StartupSetApartmentStateInternal();
-#endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
 
         partial void ThreadNameChanged(string? value)
         {
@@ -314,11 +159,6 @@ namespace System.Threading
 
         [DllImport(RuntimeHelpers.QCall, CharSet = CharSet.Unicode)]
         private static extern void InformThreadNameChange(ThreadHandle t, string? name, int len);
-
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern DeserializationTracker GetThreadDeserializationTracker(ref StackCrawlMark stackMark);
-
-        internal const bool IsThreadStartSupported = true;
 
         /// <summary>Returns true if the thread has been started and is not dead.</summary>
         public extern bool IsAlive
@@ -334,7 +174,14 @@ namespace System.Threading
         public bool IsBackground
         {
             get => IsBackgroundNative();
-            set => SetBackgroundNative(value);
+            set
+            {
+                SetBackgroundNative(value);
+                if (!value)
+                {
+                    _mayNeedResetForThreadPool = true;
+                }
+            }
         }
 
         [MethodImpl(MethodImplOptions.InternalCall)]
@@ -348,13 +195,22 @@ namespace System.Threading
         {
             [MethodImpl(MethodImplOptions.InternalCall)]
             get;
+            [MethodImpl(MethodImplOptions.InternalCall)]
+            internal set;
         }
 
         /// <summary>Returns the priority of the thread.</summary>
         public ThreadPriority Priority
         {
             get => (ThreadPriority)GetPriorityNative();
-            set => SetPriorityNative((int)value);
+            set
+            {
+                SetPriorityNative((int)value);
+                if (value != ThreadPriority.Normal)
+                {
+                    _mayNeedResetForThreadPool = true;
+                }
+            }
         }
 
         [MethodImpl(MethodImplOptions.InternalCall)]
@@ -362,9 +218,6 @@ namespace System.Threading
 
         [MethodImpl(MethodImplOptions.InternalCall)]
         private extern void SetPriorityNative(int priority);
-
-        /// <summary>Returns the operating system identifier for the current thread.</summary>
-        internal static ulong CurrentOSThreadId => GetCurrentOSThreadId();
 
         [DllImport(RuntimeHelpers.QCall)]
         private static extern ulong GetCurrentOSThreadId();
@@ -390,7 +243,7 @@ namespace System.Threading
         /// single-threaded or multi-threaded apartment.
         /// </summary>
 #if FEATURE_COMINTEROP_APARTMENT_SUPPORT
-        private bool TrySetApartmentStateUnchecked(ApartmentState state)
+        private bool SetApartmentStateUnchecked(ApartmentState state, bool throwOnError)
         {
             ApartmentState retState = (ApartmentState)SetApartmentStateNative((int)state);
 
@@ -405,6 +258,12 @@ namespace System.Threading
 
             if (retState != state)
             {
+                if (throwOnError)
+                {
+                    string msg = SR.Format(SR.Thread_ApartmentState_ChangeFailed, retState);
+                    throw new InvalidOperationException(msg);
+                }
+
                 return false;
             }
 
@@ -417,9 +276,19 @@ namespace System.Threading
         [MethodImpl(MethodImplOptions.InternalCall)]
         internal extern int SetApartmentStateNative(int state);
 #else // FEATURE_COMINTEROP_APARTMENT_SUPPORT
-        private bool TrySetApartmentStateUnchecked(ApartmentState state)
+        private static bool SetApartmentStateUnchecked(ApartmentState state, bool throwOnError)
         {
-            return state == ApartmentState.Unknown;
+             if (state != ApartmentState.Unknown)
+             {
+                if (throwOnError)
+                {
+                    throw new PlatformNotSupportedException(SR.PlatformNotSupported_ComInterop);
+                }
+
+                return false;
+             }
+
+             return true;
         }
 #endif // FEATURE_COMINTEROP_APARTMENT_SUPPORT
 
@@ -453,33 +322,14 @@ namespace System.Threading
         [MethodImpl(MethodImplOptions.InternalCall)]
         public extern bool Join(int millisecondsTimeout);
 
-        private static int s_optimalMaxSpinWaitsPerSpinIteration;
-
-        [DllImport(RuntimeHelpers.QCall)]
-        private static extern int GetOptimalMaxSpinWaitsPerSpinIterationInternal();
-
         /// <summary>
         /// Max value to be passed into <see cref="SpinWait(int)"/> for optimal delaying. This value is normalized to be
         /// appropriate for the processor.
         /// </summary>
         internal static int OptimalMaxSpinWaitsPerSpinIteration
         {
-            get
-            {
-                int optimalMaxSpinWaitsPerSpinIteration = s_optimalMaxSpinWaitsPerSpinIteration;
-                return optimalMaxSpinWaitsPerSpinIteration != 0 ? optimalMaxSpinWaitsPerSpinIteration : CalculateOptimalMaxSpinWaitsPerSpinIteration();
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static int CalculateOptimalMaxSpinWaitsPerSpinIteration()
-        {
-            // This is done lazily because the first call to the function below in the process triggers a measurement that
-            // takes a nontrivial amount of time if the measurement has not already been done in the backgorund.
-            // See Thread::InitializeYieldProcessorNormalized(), which describes and calculates this value.
-            s_optimalMaxSpinWaitsPerSpinIteration = GetOptimalMaxSpinWaitsPerSpinIterationInternal();
-            Debug.Assert(s_optimalMaxSpinWaitsPerSpinIteration > 0);
-            return s_optimalMaxSpinWaitsPerSpinIteration;
+            [MethodImpl(MethodImplOptions.InternalCall)]
+            get;
         }
 
         [MethodImpl(MethodImplOptions.InternalCall)]
@@ -500,10 +350,23 @@ namespace System.Threading
         // we will record that in a readonly static so that it could become a JIT constant and bypass caching entirely.
         private static readonly bool s_isProcessorNumberReallyFast = ProcessorIdCache.ProcessorNumberSpeedCheck();
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal void ResetThreadPoolThread()
         {
-            // Currently implemented in unmanaged method Thread::InternalReset and
-            // called internally from the ThreadPool in NotifyWorkItemComplete.
+            Debug.Assert(this == CurrentThread);
+            Debug.Assert(IsThreadPoolThread);
+
+            if (!ThreadPool.UsePortableThreadPool)
+            {
+                // Currently implemented in unmanaged method Thread::InternalReset and
+                // called internally from the ThreadPool in NotifyWorkItemComplete.
+                return;
+            }
+
+            if (_mayNeedResetForThreadPool)
+            {
+                ResetThreadPoolThreadSlow();
+            }
         }
-    } // End of class Thread
+    }
 }

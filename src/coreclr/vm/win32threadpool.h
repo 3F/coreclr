@@ -223,10 +223,27 @@ public:
         INT32 TimerId;
     } TimerInfoContext;
 
+#ifndef DACCESS_COMPILE
+    static void StaticInitialize()
+    {
+        WRAPPER_NO_CONTRACT;
+        s_usePortableThreadPool = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_ThreadPool_UsePortableThreadPool) != 0;
+    }
+#endif
+
+    static bool UsePortableThreadPool()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return s_usePortableThreadPool;
+    }
+
     static BOOL Initialize();
 
     static BOOL SetMaxThreadsHelper(DWORD MaxWorkerThreads,
                                         DWORD MaxIOCompletionThreads);
+
+    static bool CanSetMinIOCompletionThreads(DWORD ioCompletionThreads);
+    static bool CanSetMaxIOCompletionThreads(DWORD ioCompletionThreads);
 
     static BOOL SetMaxThreads(DWORD MaxWorkerThreads,
                               DWORD MaxIOCompletionThreads);
@@ -259,8 +276,6 @@ public:
         return GlobalCompletionPort != NULL;
     }
 
-    static BOOL DrainCompletionPortQueue();
-
     static BOOL RegisterWaitForSingleObject(PHANDLE phNewWaitObject,
                                             HANDLE hWaitObject,
                                             WAITORTIMERCALLBACK Callback,
@@ -280,17 +295,12 @@ public:
                                             DWORD numBytesTransferred,
                                             LPOVERLAPPED lpOverlapped);
 
-    static VOID WINAPI CallbackForInitiateDrainageOfCompletionPortQueue(
-        DWORD dwErrorCode,
-        DWORD dwNumberOfBytesTransfered,
-        LPOVERLAPPED lpOverlapped
-    );
+#ifdef TARGET_WINDOWS // the IO completion thread pool is currently only available on Windows
+    static void WINAPI ManagedWaitIOCompletionCallback(DWORD dwErrorCode,
+                                                       DWORD dwNumberOfBytesTransfered,
+                                                       LPOVERLAPPED lpOverlapped);
+#endif
 
-    static VOID WINAPI CallbackForContinueDrainageOfCompletionPortQueue(
-        DWORD dwErrorCode,
-        DWORD dwNumberOfBytesTransfered,
-        LPOVERLAPPED lpOverlapped
-    );
 
     static BOOL SetAppDomainRequestsActive(BOOL UnmanagedTP = FALSE);
     static void ClearAppDomainRequestsActive(BOOL UnmanagedTP = FALSE,  LONG index = -1);
@@ -336,11 +346,12 @@ public:
 
     static FORCEINLINE BOOL AreEtwIOQueueEventsSpeciallyHandled(LPOVERLAPPED_COMPLETION_ROUTINE Function)
     {
-        // We ignore drainage events b/c they are uninteresting
         // We handle registered waits at a higher abstraction level
-        return (Function == ThreadpoolMgr::CallbackForInitiateDrainageOfCompletionPortQueue
-                || Function == ThreadpoolMgr::CallbackForContinueDrainageOfCompletionPortQueue
-                || Function == ThreadpoolMgr::WaitIOCompletionCallback);
+        return (Function == ThreadpoolMgr::WaitIOCompletionCallback
+#ifdef TARGET_WINDOWS // the IO completion thread pool is currently only available on Windows
+                || Function == ThreadpoolMgr::ManagedWaitIOCompletionCallback
+#endif
+            );
     }
 #endif
 
@@ -740,18 +751,24 @@ public:
             DWORD processorNumber = 0;
 
 #ifndef TARGET_UNIX
-	        if (CPUGroupInfo::CanEnableGCCPUGroups() && CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
-                processorNumber = CPUGroupInfo::CalculateCurrentProcessorNumber();
+            if (CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
+            {
+                // The current processor number may not be within the total number of active processors determined at
+                // initialization time.
+                processorNumber = CPUGroupInfo::CalculateCurrentProcessorNumber() % CPUGroupInfo::GetNumActiveProcessors();
+            }
             else
+            {
                 // Turns out GetCurrentProcessorNumber can return a value greater than the number of processors reported by
                 // GetSystemInfo, if we're running in WOW64 on a machine with >32 processors.
-        	    processorNumber = GetCurrentProcessorNumber()%NumberOfProcessors;
+                processorNumber = GetCurrentProcessorNumber() % g_SystemInfo.dwNumberOfProcessors;
+            }
 #else // !TARGET_UNIX
             if (PAL_HasGetCurrentProcessorNumber())
             {
                 // On linux, GetCurrentProcessorNumber which uses sched_getcpu() can return a value greater than the number
                 // of processors reported by sysconf(_SC_NPROCESSORS_ONLN) when using OpenVZ kernel.
-                processorNumber = GetCurrentProcessorNumber()%NumberOfProcessors;
+                processorNumber = GetCurrentProcessorNumber() % PAL_GetTotalCpuCount();
             }
 #endif // !TARGET_UNIX
             return pRecycledListPerProcessor[processorNumber][memType];
@@ -787,6 +804,8 @@ public:
         }
         CONTRACTL_END;
 
+        _ASSERTE(!UsePortableThreadPool());
+
         if (WorkRequestTail)
         {
             _ASSERTE(WorkRequestHead != NULL);
@@ -811,6 +830,8 @@ public:
             GC_NOTRIGGER;
         }
         CONTRACTL_END;
+
+        _ASSERTE(!UsePortableThreadPool());
 
         WorkRequest* entry = NULL;
         if (WorkRequestHead)
@@ -842,13 +863,16 @@ public:
     static void NotifyWorkItemCompleted()
     {
         WRAPPER_NO_CONTRACT;
-        Thread::IncrementWorkerThreadPoolCompletionCount(GetThread());
+        _ASSERTE(!UsePortableThreadPool());
+
+        Thread::IncrementWorkerThreadPoolCompletionCount(GetThreadNULLOk());
         UpdateLastDequeueTime();
     }
 
     static bool ShouldAdjustMaxWorkersActive()
     {
         WRAPPER_NO_CONTRACT;
+        _ASSERTE(!UsePortableThreadPool());
 
         DWORD priorTime = PriorCompletedWorkRequestsTime;
         MemoryBarrier(); // read fresh value for NextCompletedWorkRequestsTime below
@@ -866,8 +890,6 @@ public:
 
     static void AdjustMaxWorkersActive();
     static bool ShouldWorkerKeepRunning();
-
-    static BOOL SuspendProcessing();
 
     static DWORD SafeWait(CLREvent * ev, DWORD sleepTime, BOOL alertable);
 
@@ -889,6 +911,10 @@ public:
     static void ProcessWaitCompletion( WaitInfo* waitInfo,
                                 unsigned index,      // array index
                                 BOOL waitTimedOut);
+
+#ifdef TARGET_WINDOWS // the IO completion thread pool is currently only available on Windows
+    static void ManagedWaitIOCompletionCallback_Worker(LPVOID state);
+#endif
 
     static DWORD WINAPI WaitThreadStart(LPVOID lpArgs);
 
@@ -953,8 +979,10 @@ private:
 
     static BOOL CreateGateThread();
     static void EnsureGateThreadRunning();
+    static bool NeedGateThreadForIOCompletions();
     static bool ShouldGateThreadKeepRunning();
     static DWORD WINAPI GateThreadStart(LPVOID lpArgs);
+    static void PerformGateActivities(int cpuUtilization);
     static BOOL SufficientDelaySinceLastSample(unsigned int LastThreadCreationTime,
                                                unsigned NumThreads, // total number of threads of that type (worker or CP)
                                                double   throttleRate=0.0 // the delay is increased by this percentage for each extra thread
@@ -985,6 +1013,8 @@ private:
         }
         CONTRACTL_END;
 
+        _ASSERTE(!UsePortableThreadPool());
+
         DWORD result = QueueUserAPC(reinterpret_cast<PAPCFUNC>(DeregisterWait), waitThread, reinterpret_cast<ULONG_PTR>(waitInfo));
         SetWaitThreadAPCPending();
         return result;
@@ -995,18 +1025,12 @@ private:
     inline static void ResetWaitThreadAPCPending() {IsApcPendingOnWaitThread = FALSE;}
     inline static BOOL IsWaitThreadAPCPending()  {return IsApcPendingOnWaitThread;}
 
-#ifdef _DEBUG
-    inline static DWORD GetTickCount()
-    {
-        LIMITED_METHOD_CONTRACT;
-        return ::GetTickCount() + TickCountAdjustment;
-    }
-#endif
-
 #endif // #ifndef DACCESS_COMPILE
     // Private variables
 
-    static LONG Initialization;                         // indicator of whether the threadpool is initialized.
+    static Volatile<LONG> Initialization;                         // indicator of whether the threadpool is initialized.
+
+    static bool s_usePortableThreadPool;
 
     SVAL_DECL(LONG,MinLimitTotalWorkerThreads);         // same as MinLimitTotalCPThreads
     SVAL_DECL(LONG,MaxLimitTotalWorkerThreads);         // same as MaxLimitTotalCPThreads
@@ -1031,6 +1055,11 @@ private:
     static unsigned int LastCPThreadCreation;		// last time a completion port thread was created
     static unsigned int NumberOfProcessors;             // = NumberOfWorkerThreads - no. of blocked threads
 
+    static DWORD WorkerThreadTimeoutMs;
+    static DWORD IOCompletionThreadTimeoutMs;
+    static int NumWorkerThreadsBeingKeptAlive;
+    static int NumIOCompletionThreadsBeingKeptAlive;
+
     static BOOL IsApcPendingOnWaitThread;               // Indicates if an APC is pending on the wait thread
 
     // This needs to be non-hosted, because worker threads can run prior to EE startup.
@@ -1040,8 +1069,6 @@ public:
     static CrstStatic WorkerCriticalSection;
 
 private:
-    static const DWORD WorkerTimeout = 20 * 1000;
-
     DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) SVAL_DECL(ThreadCounter,WorkerCounter);
 
     //
@@ -1086,16 +1113,9 @@ private:
 
     DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) static LONG GateThreadStatus;    // See GateThreadStatus enumeration
 
-    static Volatile<LONG> NumCPInfrastructureThreads;   // number of threads currently busy handling draining cycle
-
     SVAL_DECL(LONG,cpuUtilization);
-    static LONG cpuUtilizationAverage;
 
     DECLSPEC_ALIGN(MAX_CACHE_LINE_SIZE) static RecycledListsWrapper RecycledLists;
-
-#ifdef _DEBUG
-    static DWORD   TickCountAdjustment;                 // add this value to value returned by GetTickCount
-#endif
 };
 
 

@@ -3,30 +3,21 @@ parameters:
   osGroup: ''
   osSubgroup: ''
   archType: ''
-  crossrootfsDir: ''
-  framework: 'net5.0'
+  targetRid: ''
+  crossBuild: false
+  framework: 'net6.0'
   isOfficialBuild: false
-  isOfficialAllConfigurations: false
   runtimeVariant: ''
   platform: ''
-
-  # When set to a non-empty value (Debug / Release), it determines the runtime's
-  # build configuration to use for building libraries and tests. Setting this
-  # property implies a dependency of this job on the appropriate runtime build
-  # and is used to construct the name of the Azure artifact representing
-  # runtime build to use for building the libraries and library tests.
-  liveRuntimeBuildConfig: ''
-  runtimeFlavor: 'coreclr'
+  testScope: ''
 
   timeoutInMinutes: 150
-  preBuildSteps: []
   container: ''
   condition: true
   dependOnEvaluatePaths: false
+  shouldContinueOnError: false
   variables: {}
   pool: ''
-  runTests: false
-  testScope: ''
   testBuildPlatforms: []
 
 jobs:
@@ -36,15 +27,12 @@ jobs:
       osGroup:  ${{ parameters.osGroup }}
       osSubgroup:  ${{ parameters.osSubgroup }}
       archType:  ${{ parameters.archType }}
-      crossrootfsDir: ${{ parameters.crossrootfsDir }}
+      crossBuild: ${{ parameters.crossBuild }}
       framework:  ${{ parameters.framework }}
       isOfficialBuild: ${{ parameters.isOfficialBuild }}
-      isOfficialAllConfigurations: ${{ parameters.isOfficialAllConfigurations }}
-      liveRuntimeBuildConfig: ${{ parameters.liveRuntimeBuildConfig }}
       runtimeFlavor: ${{ parameters.runtimeFlavor }}
-      runTests: ${{ parameters.runTests }}
+      runTests: false
       timeoutInMinutes: ${{ parameters.timeoutInMinutes }}
-      preBuildSteps: ${{ parameters.preBuildSteps }}
       container: ${{ parameters.container }}
       condition: ${{ parameters.condition }}
       dependOnEvaluatePaths: ${{ parameters.dependOnEvaluatePaths }}
@@ -54,31 +42,16 @@ jobs:
       name: build
       displayName: 'Build'
 
-      ${{ if and(ne(parameters.liveRuntimeBuildConfig, ''), eq(parameters.runTests, true)) }}:
-        dependsOn:
-        # Use full product dependency for test runs
-        - ${{ format('{0}_{1}_product_build_{2}{3}_{4}_{5}', parameters.runtimeFlavor, parameters.runtimeVariant, parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.liveRuntimeBuildConfig) }}
-
       variables:
         - librariesTestsArtifactName: ${{ format('libraries_test_assets_{0}_{1}_{2}', parameters.osGroup, parameters.archType, parameters.buildConfig) }}
-        - _subset: libs
-        - _additionalBuildArguments: ''
-        - ${{ parameters.variables }}
-
-        # Tests only run for 'allConfiguration' and 'net48' build-jobs
-        # If platform is in testBuildPlatforms we build tests as well.
-        - ${{ if or(eq(parameters.runTests, true), containsValue(parameters.testBuildPlatforms, parameters.platform)) }}:
-          - _subset: libs+libs.tests
-          - _additionalBuildArguments: /p:ArchiveTests=true
-
+        - _subset: libs+libs.tests
+        - _buildAction: ''
+        - _additionalBuildArguments: '/p:ArchiveTests=true'
         - ${{ parameters.variables }}
 
       steps:
-        - ${{ if eq(parameters.isOfficialBuild, true) }}:
-          - template: /eng/pipelines/common/restore-internal-tools.yml
-
-        - ${{ if in(parameters.osGroup, 'OSX', 'iOS', 'tvOS') }}:
-          - script: $(Build.SourcesDirectory)/eng/install-native-dependencies.sh ${{ parameters.osGroup }}
+        - ${{ if in(parameters.osGroup, 'OSX', 'MacCatalyst', 'iOS', 'iOSSimulator', 'tvOS', 'tvOSSimulator') }}:
+          - script: $(Build.SourcesDirectory)/eng/install-native-dependencies.sh ${{ parameters.osGroup }} ${{ parameters.archType }} azDO
             displayName: Install Build Dependencies
 
           - script: |
@@ -88,61 +61,37 @@ jobs:
 
         - script: $(_buildScript)
                 -subset $(_subset)
+                $(_buildAction)
                 $(_buildArguments)
                 $(_additionalBuildArguments)
           displayName: Restore and Build Product
 
-        - ${{ if in(parameters.osGroup, 'OSX', 'iOS','tvOS') }}: 
+        - ${{ if in(parameters.osGroup, 'OSX', 'iOS', 'tvOS') }}: 
           - script: |
               du -sh $(Build.SourcesDirectory)/*
               df -h
             displayName: Disk Usage after Build
 
-        - ${{ if eq(parameters.runTests, false) }}:
-          - template: /eng/pipelines/libraries/prepare-for-bin-publish.yml
-            parameters:
-              isOfficialBuild: ${{ parameters.isOfficialBuild }}
+        - template: /eng/pipelines/libraries/prepare-for-bin-publish.yml
 
-          - template: /eng/pipelines/common/upload-artifact-step.yml
-            parameters:
-              rootFolder: $(Build.ArtifactStagingDirectory)/artifacts
-              includeRootFolder: false
-              archiveType: $(archiveType)
-              archiveExtension: $(archiveExtension)
-              tarCompression: $(tarCompression)
-              artifactName: $(librariesBuildArtifactName)
-              displayName: Build Assets
-          
-          - ${{ if containsValue(parameters.testBuildPlatforms, parameters.platform) }}:
-            - template: /eng/pipelines/common/upload-artifact-step.yml
-              parameters:
-                rootFolder: $(Build.SourcesDirectory)/artifacts/helix
-                includeRootFolder: true
-                archiveType: $(archiveType)
-                archiveExtension: $(archiveExtension)
-                tarCompression: $(tarCompression)
-                artifactName: $(librariesTestsArtifactName)
-                displayName: Test Assets
+        - template: /eng/pipelines/common/upload-artifact-step.yml
+          parameters:
+            rootFolder: $(Build.ArtifactStagingDirectory)/artifacts
+            includeRootFolder: false
+            archiveType: $(archiveType)
+            archiveExtension: $(archiveExtension)
+            tarCompression: $(tarCompression)
+            artifactName: $(librariesBuildArtifactName)
+            displayName: Build Assets
 
-          # Save AllConfigurations artifacts using the prepare-signed-artifacts format. The
-          # platform-specific jobs' nupkgs automatically flow through the matching platform-specific
-          # Installer build, but AllConfigurations should only be uploaded once, here.
-          - ${{ if eq(parameters.isOfficialAllConfigurations, true) }}:
-            - template: /eng/pipelines/common/upload-unsigned-artifacts-step.yml
-              parameters:
-                name: Libraries_AllConfigurations
-                condition: eq(variables['_librariesBuildProducedPackages'], true)
-
-        - ${{ if eq(parameters.runTests, true) }}:
-          - template: /eng/pipelines/libraries/helix.yml
-            parameters:
-              osGroup: ${{ parameters.osGroup }}
-              archType: ${{ parameters.archType }}
-              buildConfig: ${{ parameters.buildConfig }}
-              helixQueues: ${{ parameters.helixQueues }}
-              testScope: ${{ parameters.testScope }}
-              creator: dotnet-bot
-              testRunNamePrefixSuffix: $(_testRunNamePrefixSuffix)
-              extraHelixArguments: $(_extraHelixArguments)
-              ${{ if eq(parameters.framework, 'allConfigurations') }}:
-                condition: eq(variables['_librariesBuildProducedPackages'], true)
+        # Upload test assets
+        # We'll pull them down in another job to send to Helix
+        - template: /eng/pipelines/common/upload-artifact-step.yml
+          parameters:
+            rootFolder: $(Build.SourcesDirectory)/artifacts/helix
+            includeRootFolder: true
+            archiveType: $(archiveType)
+            archiveExtension: $(archiveExtension)
+            tarCompression: $(tarCompression)
+            artifactName: $(librariesTestsArtifactName)
+            displayName: Test Assets

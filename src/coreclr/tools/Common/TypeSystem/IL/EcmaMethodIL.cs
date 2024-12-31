@@ -11,7 +11,10 @@ using Internal.TypeSystem.Ecma;
 
 namespace Internal.IL
 {
-    public sealed partial class EcmaMethodIL : MethodIL
+    // Marker interface implemented by EcmaMethodIL and EcmaMethodILScope
+    public interface IEcmaMethodIL { }
+
+    public sealed partial class EcmaMethodIL : MethodIL, IEcmaMethodIL
     {
         private readonly EcmaModule _module;
         private readonly EcmaMethod _method;
@@ -22,24 +25,19 @@ namespace Internal.IL
         private LocalVariableDefinition[] _locals;
         private ILExceptionRegion[] _ilExceptionRegions;
 
-        // TODO: Remove: Workaround for missing ClearInitLocals transforms in CoreRT CoreLib
-        private readonly bool _clearInitLocals;
-
-        public static EcmaMethodIL Create(EcmaMethod method, bool clearInitLocals = false)
+        public static EcmaMethodIL Create(EcmaMethod method)
         {
             var rva = method.MetadataReader.GetMethodDefinition(method.Handle).RelativeVirtualAddress;
             if (rva == 0)
                 return null;
-            return new EcmaMethodIL(method, rva, clearInitLocals);
+            return new EcmaMethodIL(method, rva);
         }
 
-        private EcmaMethodIL(EcmaMethod method, int rva, bool clearInitLocals)
+        private EcmaMethodIL(EcmaMethod method, int rva)
         {
             _method = method;
             _module = method.Module;
             _methodBody = _module.PEReader.GetMethodBody(rva);
-
-            _clearInitLocals = clearInitLocals;
         }
 
         public EcmaModule Module
@@ -71,7 +69,7 @@ namespace Internal.IL
         {
             get
             {
-                return !_clearInitLocals && _methodBody.LocalVariablesInitialized;
+                return _methodBody.LocalVariablesInitialized;
             }
         }
 
@@ -94,7 +92,7 @@ namespace Internal.IL
                 return Array.Empty<LocalVariableDefinition>();
             BlobReader signatureReader = metadataReader.GetBlobReader(metadataReader.GetStandaloneSignature(localSignature).Signature);
 
-            EcmaSignatureParser parser = new EcmaSignatureParser(_module, signatureReader);
+            EcmaSignatureParser parser = new EcmaSignatureParser(_module, signatureReader, NotFoundBehavior.Throw);
             LocalVariableDefinition[] locals = parser.ParseLocalsSignature();
 
             Interlocked.CompareExchange(ref _locals, locals, null);
@@ -136,13 +134,55 @@ namespace Internal.IL
             return _ilExceptionRegions;
         }
 
-        public override object GetObject(int token)
+        public override object GetObject(int token, NotFoundBehavior notFoundBehavior = NotFoundBehavior.Throw)
         {
             // UserStrings cannot be wrapped in EntityHandle
             if ((token & 0xFF000000) == 0x70000000)
                 return _module.GetUserString(MetadataTokens.UserStringHandle(token));
 
-            return _module.GetObject(MetadataTokens.EntityHandle(token));
+            return _module.GetObject(MetadataTokens.EntityHandle(token), notFoundBehavior);
+        }
+    }
+
+    public sealed partial class EcmaMethodILScope : MethodILScope, IEcmaMethodIL
+    {
+        private readonly EcmaModule _module;
+        private readonly EcmaMethod _method;
+
+        public static EcmaMethodILScope Create(EcmaMethod method)
+        {
+            return new EcmaMethodILScope(method);
+        }
+
+        private EcmaMethodILScope(EcmaMethod method)
+        {
+            _method = method;
+            _module = method.Module;
+        }
+
+        public EcmaModule Module
+        {
+            get
+            {
+                return _module;
+            }
+        }
+
+        public override MethodDesc OwningMethod
+        {
+            get
+            {
+                return _method;
+            }
+        }
+
+        public override object GetObject(int token, NotFoundBehavior notFoundBehavior = NotFoundBehavior.Throw)
+        {
+            // UserStrings cannot be wrapped in EntityHandle
+            if ((token & 0xFF000000) == 0x70000000)
+                return _module.GetUserString(MetadataTokens.UserStringHandle(token));
+
+            return _module.GetObject(MetadataTokens.EntityHandle(token), notFoundBehavior);
         }
     }
 }

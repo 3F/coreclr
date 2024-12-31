@@ -7,15 +7,15 @@ namespace Internal.Runtime
 {
     //
     // Please keep the data structures in this file in sync with the native version at
-    //  src/Native/Runtime/inc/ModuleHeaders.h
+    //  src/coreclr/inc/readytorun.h
     //
 
     internal struct ReadyToRunHeaderConstants
     {
         public const uint Signature = 0x00525452; // 'RTR'
 
-        public const ushort CurrentMajorVersion = 4;
-        public const ushort CurrentMinorVersion = 1;
+        public const ushort CurrentMajorVersion = 5;
+        public const ushort CurrentMinorVersion = 4;
     }
 
 #pragma warning disable 0169
@@ -65,6 +65,8 @@ namespace Internal.Runtime
         InliningInfo2 = 114, // Added in 4.1
         ComponentAssemblies = 115, // Added in 4.1
         OwnerCompositeExecutable = 116, // Added in 4.1
+        PgoInstrumentationData = 117, // Added in 5.2
+        ManifestAssemblyMvids = 118, // Added in 5.3
 
         //
         // CoreRT ReadyToRun sections

@@ -292,8 +292,6 @@ CorUnix::InternalCanonicalizeRealPath(LPCSTR lpUnixPath, PathCharString& lpBuffe
     StringHolder lpExistingPath;
     LPSTR pchSeparator = NULL;
     LPSTR lpFilename = NULL;
-    DWORD cchBuffer = 0;
-    DWORD cchFilename = 0;
 #endif // !REALPATH_SUPPORTS_NONEXISTENT_FILES
 
     if (lpUnixPath == NULL)
@@ -327,34 +325,10 @@ CorUnix::InternalCanonicalizeRealPath(LPCSTR lpUnixPath, PathCharString& lpBuffe
             goto LExit;
         }
 
-        if (! RealPathHelper(pszCwdBuffer, lpBuffer))
+        if (!RealPathHelper(pszCwdBuffer, lpBuffer))
         {
             WARN("realpath() failed with error %d\n", errno);
             palError = FILEGetLastErrorFromErrno();
-#if defined(HOST_AMD64)
-            // If we are here, then we tried to invoke realpath
-            // against a directory.
-            //
-            // On Mac64, realpath implementation differs from Mac32
-            // by *not* supporting invalid filenames in the path (while
-            // Mac32 implementation does).
-            //
-            // Thus, if we are here, and the error code we see is
-            // ERROR_FILE_NOT_FOUND, then we should map it to
-            // ERROR_PATH_NOT_FOUND since it was a directory that
-            // was not found (and not a file).
-            if (palError == ERROR_FILE_NOT_FOUND)
-            {
-                // Since lpBuffer can be modified by the realpath call,
-                // and can result in a truncated subset of the original buffer,
-                // we use strstr as a level of safety.
-                 if (strstr(pszCwdBuffer, lpBuffer) != 0)
-                 {
-                     palError = ERROR_PATH_NOT_FOUND;
-                 }
-            }
-#endif // defined(HOST_AMD64)
-
             goto LExit;
         }
         lpFilename = lpExistingPath;
@@ -392,32 +366,6 @@ CorUnix::InternalCanonicalizeRealPath(LPCSTR lpUnixPath, PathCharString& lpBuffe
         {
             WARN("realpath() failed with error %d\n", errno);
             palError = FILEGetLastErrorFromErrno();
-
-#if defined(HOST_AMD64)
-            // If we are here, then we tried to invoke realpath
-            // against a directory after stripping out the filename
-            // from the original path.
-            //
-            // On Mac64, realpath implementation differs from Mac32
-            // by *not* supporting invalid filenames in the path (while
-            // Mac32 implementation does).
-            //
-            // Thus, if we are here, and the error code we see is
-            // ERROR_FILE_NOT_FOUND, then we should map it to
-            // ERROR_PATH_NOT_FOUND since it was a directory that
-            // was not found (and not a file).
-            if (palError == ERROR_FILE_NOT_FOUND)
-            {
-                // Since lpBuffer can be modified by the realpath call,
-                // and can result in a truncated subset of the original buffer,
-                // we use strstr as a level of safety.
-                if (strstr(lpExistingPath, lpBuffer) != 0)
-                 {
-                     palError = ERROR_PATH_NOT_FOUND;
-                 }
-            }
-#endif // defined(HOST_AMD64)
-
             goto LExit;
         }
 
@@ -1934,8 +1882,6 @@ CorUnix::InternalWriteFile(
     CFileProcessLocalData *pLocalData = NULL;
     IDataLock *pLocalDataLock = NULL;
     int ifd;
-
-    LONG writeOffsetStartLow = 0, writeOffsetStartHigh = 0;
     int res;
 
     if (NULL != lpNumberOfBytesWritten)
@@ -2108,8 +2054,6 @@ CorUnix::InternalReadFile(
     CFileProcessLocalData *pLocalData = NULL;
     IDataLock *pLocalDataLock = NULL;
     int ifd;
-
-    LONG readOffsetStartLow = 0, readOffsetStartHigh = 0;
     int res;
 
     if (NULL != lpNumberOfBytesRead)
@@ -3333,7 +3277,7 @@ GetTempFileNameW(
     INT prefix_size = 0;
     CHAR * full_name;
     CHAR * prefix_string;
-    CHAR * tempfile_name;
+    CHAR * tempfile_name = NULL;
     PathCharString full_namePS, prefix_stringPS;
     INT length = 0;
     UINT   uRet;
@@ -3419,8 +3363,6 @@ GetTempFileNameW(
         path_size = MultiByteToWideChar( CP_ACP, 0, tempfile_name, -1,
                                            lpTempFileName, MAX_LONGPATH );
 
-        free(tempfile_name);
-        tempfile_name = NULL;
         if (!path_size)
         {
             DWORD dwLastError = GetLastError();
@@ -3440,6 +3382,8 @@ GetTempFileNameW(
     }
 
 done:
+    free(tempfile_name);
+
     LOGEXIT("GetTempFileNameW returns UINT %u\n", uRet);
     PERF_EXIT(GetTempFileNameW);
     return uRet;

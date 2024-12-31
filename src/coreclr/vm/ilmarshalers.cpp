@@ -756,7 +756,7 @@ void ILWSTRBufferMarshaler::EmitConvertContentsCLRToNative(ILCodeStream* pslILEm
 {
     STANDARD_VM_CONTRACT;
 
-    DWORD dwTempNumBytesLocal = pslILEmit->NewLocal(ELEMENT_TYPE_I4);
+    DWORD dwTempNumCharsLocal = pslILEmit->NewLocal(ELEMENT_TYPE_I4);
 
     ILCodeLabel* pNullRefLabel = pslILEmit->NewCodeLabel();
 
@@ -778,19 +778,14 @@ void ILWSTRBufferMarshaler::EmitConvertContentsCLRToNative(ILCodeStream* pslILEm
 
     // stack: StringBuilder length
 
-    pslILEmit->EmitDUP();
-    pslILEmit->EmitADD();
-
-    // stack: StringBuilder cb
-
-    pslILEmit->EmitSTLOC(dwTempNumBytesLocal);
+    pslILEmit->EmitSTLOC(dwTempNumCharsLocal);
 
     // stack: StringBuilder
 
     EmitLoadNativeValue(pslILEmit);
-    pslILEmit->EmitLDLOC(dwTempNumBytesLocal);
+    pslILEmit->EmitLDLOC(dwTempNumCharsLocal);
 
-    // stack: stringbuilder native_buffer cb
+    // stack: StringBuilder native_buffer length
 
     // void System.Text.StringBuilder.InternalCopy(IntPtr dest,int len)
     pslILEmit->EmitCALL(METHOD__STRING_BUILDER__INTERNAL_COPY, 3, 0);
@@ -799,8 +794,10 @@ void ILWSTRBufferMarshaler::EmitConvertContentsCLRToNative(ILCodeStream* pslILEm
     // null-terminate the native string
     //
     EmitLoadNativeValue(pslILEmit);
-    pslILEmit->EmitLDLOC(dwTempNumBytesLocal);
-    pslILEmit->EmitADD();
+    pslILEmit->EmitLDLOC(dwTempNumCharsLocal);
+    pslILEmit->EmitDUP();
+    pslILEmit->EmitADD(); // dwTempNumCharsLocal + dwTempNumCharsLocal
+    pslILEmit->EmitADD(); // + native_buffer
     pslILEmit->EmitLDC(0);
     pslILEmit->EmitSTIND_I2();
 
@@ -2146,6 +2143,7 @@ void ILLayoutClassPtrMarshalerBase::EmitConvertSpaceCLRToNative(ILCodeStream* ps
 
     EmitLoadManagedValue(pslILEmit);
     pslILEmit->EmitBRFALSE(pNullRefLabel);
+
     ILCodeLabel* pTypeMismatchedLabel = pslILEmit->NewCodeLabel();
     bool emittedTypeCheck = EmitExactTypeCheck(pslILEmit, pTypeMismatchedLabel);
     DWORD sizeLocal = pslILEmit->NewLocal(LocalDesc(ELEMENT_TYPE_I4));
@@ -2193,6 +2191,7 @@ void ILLayoutClassPtrMarshalerBase::EmitConvertSpaceCLRToNativeTemp(ILCodeStream
 
         EmitLoadManagedValue(pslILEmit);
         pslILEmit->EmitBRFALSE(pNullRefLabel);
+
         ILCodeLabel* pTypeMismatchedLabel = pslILEmit->NewCodeLabel();
         bool emittedTypeCheck = EmitExactTypeCheck(pslILEmit, pTypeMismatchedLabel);
         DWORD sizeLocal = pslILEmit->NewLocal(LocalDesc(ELEMENT_TYPE_I4));
@@ -2210,6 +2209,7 @@ void ILLayoutClassPtrMarshalerBase::EmitConvertSpaceCLRToNativeTemp(ILCodeStream
         }
         pslILEmit->EmitSTLOC(sizeLocal);
         pslILEmit->EmitLDLOC(sizeLocal);
+
         pslILEmit->EmitLOCALLOC();
         pslILEmit->EmitDUP();           // for INITBLK
         EmitStoreNativeValue(pslILEmit);
@@ -3477,13 +3477,24 @@ MarshalerOverrideStatus ILBlittableValueClassWithCopyCtorMarshaler::ArgumentOver
     else
     {
         // nothing to do but pass the value along
-        // note that on x86 the argument comes by-value but is converted to pointer by the UM thunk
-        // so that we don't make copies that would not be accounted for by copy ctors
+        // note that on x86 the argument comes by-value
+        // but on other platforms it comes by-reference
+#ifdef TARGET_X86
+        LocalDesc locDesc(pargs->mm.m_pMT);
+        pslIL->SetStubTargetArgType(&locDesc);
+
+        DWORD       dwNewValueTypeLocal;
+        dwNewValueTypeLocal = pslIL->NewLocal(locDesc);
+        pslILDispatch->EmitLDARG(argidx);
+        pslILDispatch->EmitSTLOC(dwNewValueTypeLocal);
+        pslILDispatch->EmitLDLOCA(dwNewValueTypeLocal);
+#else
         LocalDesc   locDesc(pargs->mm.m_pMT);
         locDesc.MakeCopyConstructedPointer();
 
-        pslIL->SetStubTargetArgType(&locDesc);              // native type is a pointer
+        pslIL->SetStubTargetArgType(&locDesc);
         pslILDispatch->EmitLDARG(argidx);
+#endif
 
         return OVERRIDDEN;
     }
@@ -3653,7 +3664,7 @@ void ILArrayWithOffsetMarshaler::EmitConvertSpaceAndContentsCLRToNativeTemp(ILCo
     EmitLoadNativeValue(pslILEmit);                 // dest
 
     pslILEmit->EmitLDLOC(m_dwPinnedLocalNum);
-    pslILEmit->EmitCALL(METHOD__RUNTIME_HELPERS__GET_RAW_ARRAY_DATA, 1, 1);
+    pslILEmit->EmitCALL(METHOD__MEMORY_MARSHAL__GET_ARRAY_DATA_REFERENCE_MDARRAY, 1, 1);
     pslILEmit->EmitCONV_I();
 
     EmitLoadManagedValue(pslILEmit);
@@ -3697,7 +3708,7 @@ void ILArrayWithOffsetMarshaler::EmitConvertContentsNativeToCLR(ILCodeStream* ps
     pslILEmit->EmitSTLOC(m_dwPinnedLocalNum);
 
     pslILEmit->EmitLDLOC(m_dwPinnedLocalNum);
-    pslILEmit->EmitCALL(METHOD__RUNTIME_HELPERS__GET_RAW_ARRAY_DATA, 1, 1);
+    pslILEmit->EmitCALL(METHOD__MEMORY_MARSHAL__GET_ARRAY_DATA_REFERENCE_MDARRAY, 1, 1);
     pslILEmit->EmitCONV_I();
 
     pslILEmit->EmitLDLOC(m_dwOffsetLocalNum);

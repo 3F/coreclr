@@ -4,7 +4,7 @@
 //                                    Early Value Propagation
 //
 // This phase performs an SSA-based value propagation optimization that currently only applies to array
-// lengths, runtime type handles, and explicit null checks. An SSA-based backwards tracking of local variables
+// lengths and explicit null checks. An SSA-based backwards tracking of local variables
 // is performed at each point of interest, e.g., an array length reference site, a method table reference site, or
 // an indirection.
 // The tracking continues until an interesting value is encountered. The value is then used to rewrite
@@ -18,17 +18,15 @@
 bool Compiler::optDoEarlyPropForFunc()
 {
     bool propArrayLen  = (optMethodFlags & OMF_HAS_NEWARRAY) && (optMethodFlags & OMF_HAS_ARRAYREF);
-    bool propGetType   = (optMethodFlags & (OMF_HAS_NEWOBJ | OMF_HAS_NEWARRAY)) && (optMethodFlags & OMF_HAS_VTABLEREF);
     bool propNullCheck = (optMethodFlags & OMF_HAS_NULLCHECK) != 0;
-    return propArrayLen || propGetType || propNullCheck;
+    return propArrayLen || propNullCheck;
 }
 
 bool Compiler::optDoEarlyPropForBlock(BasicBlock* block)
 {
     bool bbHasArrayRef  = (block->bbFlags & BBF_HAS_IDX_LEN) != 0;
-    bool bbHasVtableRef = (block->bbFlags & BBF_HAS_VTABREF) != 0;
     bool bbHasNullCheck = (block->bbFlags & BBF_HAS_NULLCHECK) != 0;
-    return bbHasArrayRef || bbHasVtableRef || bbHasNullCheck;
+    return bbHasArrayRef || bbHasNullCheck;
 }
 
 //--------------------------------------------------------------------
@@ -72,6 +70,8 @@ GenTree* Compiler::getArrayLengthFromAllocation(GenTree* tree DEBUGARG(BasicBloc
 {
     assert(tree != nullptr);
 
+    GenTree* arrayLength = nullptr;
+
     if (tree->OperGet() == GT_CALL)
     {
         GenTreeCall* call = tree->AsCall();
@@ -83,17 +83,28 @@ GenTree* Compiler::getArrayLengthFromAllocation(GenTree* tree DEBUGARG(BasicBloc
                 call->gtCallMethHnd == eeFindHelper(CORINFO_HELP_NEWARR_1_VC) ||
                 call->gtCallMethHnd == eeFindHelper(CORINFO_HELP_NEWARR_1_ALIGN8))
             {
+                // This is an array allocation site. Grab the array length node.
+                arrayLength = gtArgEntryByArgNum(call, 1)->GetNode();
+            }
+            else if (call->gtCallMethHnd == eeFindHelper(CORINFO_HELP_READYTORUN_NEWARR_1))
+            {
+                // On arm when compiling on certain platforms for ready to run, a handle will be
+                // inserted before the length. To handle this case, we will grab the last argument
+                // as that's always the length. See fgInitArgInfo for where the handle is inserted.
+                int arrLenArgNum = call->fgArgInfo->ArgCount() - 1;
+                arrayLength      = gtArgEntryByArgNum(call, arrLenArgNum)->GetNode();
+            }
 #ifdef DEBUG
+            if (arrayLength != nullptr)
+            {
                 optCheckFlagsAreSet(OMF_HAS_NEWARRAY, "OMF_HAS_NEWARRAY", BBF_HAS_NEWARRAY, "BBF_HAS_NEWARRAY", tree,
                                     block);
-#endif
-                // This is an array allocation site. Grab the array length node.
-                return gtArgEntryByArgNum(call, 1)->GetNode();
             }
+#endif
         }
     }
 
-    return nullptr;
+    return arrayLength;
 }
 
 //-----------------------------------------------------------------------------
@@ -231,7 +242,7 @@ void Compiler::optEarlyProp()
 
     assert(fgSsaPassesCompleted == 1);
 
-    for (BasicBlock* block = fgFirstBB; block != nullptr; block = block->bbNext)
+    for (BasicBlock* const block : Blocks())
     {
 #ifndef DEBUG
         if (!optDoEarlyPropForBlock(block))
@@ -321,26 +332,7 @@ GenTree* Compiler::optEarlyPropRewriteTree(GenTree* tree, LocalNumberToNullCheck
     }
     else
     {
-        assert(tree->OperIsIndir());
-        if (gtIsVtableRef(tree))
-        {
-            // Don't propagate type handles that are used as null checks, which are usually in
-            // form of
-            //      *  stmtExpr  void  (top level)
-            //      \--*  indir     int
-            //          \--*  lclVar    ref    V02 loc0
-            if (compCurStmt->GetRootNode() == tree)
-            {
-                return nullptr;
-            }
-
-            objectRefPtr = tree->AsIndir()->Addr();
-            propKind     = optPropKind::OPK_OBJ_GETTYPE;
-        }
-        else
-        {
-            return nullptr;
-        }
+        return nullptr;
     }
 
     if (!objectRefPtr->OperIsScalarLocal() || !lvaInSsa(objectRefPtr->AsLclVarCommon()->GetLclNum()))
@@ -355,11 +347,6 @@ GenTree* Compiler::optEarlyPropRewriteTree(GenTree* tree, LocalNumberToNullCheck
             optCheckFlagsAreSet(OMF_HAS_ARRAYREF, "OMF_HAS_ARRAYREF", BBF_HAS_IDX_LEN, "BBF_HAS_IDX_LEN", tree,
                                 compCurBB);
         }
-        else
-        {
-            optCheckFlagsAreSet(OMF_HAS_VTABLEREF, "OMF_HAS_VTABLEREF", BBF_HAS_VTABREF, "BBF_HAS_VTABREF", tree,
-                                compCurBB);
-        }
     }
 #endif
 
@@ -369,8 +356,8 @@ GenTree* Compiler::optEarlyPropRewriteTree(GenTree* tree, LocalNumberToNullCheck
 
     if (actualVal != nullptr)
     {
-        assert((propKind == optPropKind::OPK_ARRAYLEN) || (propKind == optPropKind::OPK_OBJ_GETTYPE));
-        assert(actualVal->IsCnsIntOrI());
+        assert(propKind == optPropKind::OPK_ARRAYLEN);
+        assert(actualVal->IsCnsIntOrI() && !actualVal->AsIntCon()->IsIconHandle());
         assert(actualVal->GetNodeSize() == TREE_NODE_SZ_SMALL);
 
         ssize_t actualConstVal = actualVal->AsIntCon()->IconValue();
@@ -401,12 +388,21 @@ GenTree* Compiler::optEarlyPropRewriteTree(GenTree* tree, LocalNumberToNullCheck
                     if ((checkConstVal >= 0) && (checkConstVal < actualConstVal))
                     {
                         GenTree* comma = check->gtGetParent(nullptr);
-                        if ((comma != nullptr) && comma->OperIs(GT_COMMA) && (comma->gtGetOp1() == check))
+
+                        // We should never see cases other than these in the IR,
+                        // as the check node does not produce a value.
+                        assert(((comma != nullptr) && comma->OperIs(GT_COMMA) &&
+                                (comma->gtGetOp1() == check || comma->TypeIs(TYP_VOID))) ||
+                               (check == compCurStmt->GetRootNode()));
+
+                        // Still, we guard here so that release builds do not try to optimize trees we don't understand.
+                        if (((comma != nullptr) && comma->OperIs(GT_COMMA) && (comma->gtGetOp1() == check)) ||
+                            (check == compCurStmt->GetRootNode()))
                         {
-                            optRemoveRangeCheck(comma, compCurStmt);
                             // Both `tree` and `check` have been removed from the statement.
                             // 'tree' was replaced with 'nop' or side effect list under 'comma'.
-                            return comma->gtGetOp1();
+                            // optRemoveRangeCheck returns this modified tree.
+                            return optRemoveRangeCheck(check, comma, compCurStmt);
                         }
                     }
                 }
@@ -528,7 +524,8 @@ GenTree* Compiler::optPropGetValueRec(unsigned lclNum, unsigned ssaNum, optPropK
 
         GenTree* treeRhs = ssaDefAsg->gtGetOp2();
 
-        if (treeRhs->OperIsScalarLocal() && lvaInSsa(treeRhs->AsLclVarCommon()->GetLclNum()))
+        if (treeRhs->OperIsScalarLocal() && lvaInSsa(treeRhs->AsLclVarCommon()->GetLclNum()) &&
+            treeRhs->AsLclVarCommon()->HasSsaName())
         {
             // Recursively track the Rhs
             unsigned rhsLclNum = treeRhs->AsLclVarCommon()->GetLclNum();
@@ -548,14 +545,6 @@ GenTree* Compiler::optPropGetValueRec(unsigned lclNum, unsigned ssaNum, optPropK
                         // Leave out non-constant-sized array
                         value = nullptr;
                     }
-                }
-            }
-            else if (valueKind == optPropKind::OPK_OBJ_GETTYPE)
-            {
-                value = getObjectHandleNodeFromAllocation(treeRhs DEBUGARG(ssaVarDsc->GetBlock()));
-                if (value != nullptr)
-                {
-                    assert(value->IsCnsIntOrI());
                 }
             }
         }

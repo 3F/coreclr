@@ -70,7 +70,6 @@ VOID ParseNativeType(Module*                     pModule,
         FALSE, // We only need validation of the native signature and the MARSHAL_TYPE_*
         FALSE, // so we don't need to accurately get the BestFitCustomAttribute data for this construction.
         FALSE, /* fEmitsIL */
-        FALSE, /* onInstanceMethod */
         nullptr,
         FALSE /* fUseCustomMarshal */
 #ifdef _DEBUG
@@ -251,6 +250,7 @@ bool IsFieldBlittable(
             break;
         case ELEMENT_TYPE_R4:
             isBlittable = (nativeType == NATIVE_TYPE_DEFAULT) || (nativeType == NATIVE_TYPE_R4);
+            break;
         case ELEMENT_TYPE_R8:
             isBlittable = (nativeType == NATIVE_TYPE_DEFAULT) || (nativeType == NATIVE_TYPE_R8);
             break;

@@ -630,6 +630,7 @@ typedef struct _DacGlobals
 #endif
 #ifdef FEATURE_COMWRAPPERS
     ULONG fn__ManagedObjectWrapper_QueryInterface;
+    ULONG fn__TrackerTarget_QueryInterface;
 #endif
 
     // Vtable pointer values for all classes that must
@@ -1468,10 +1469,10 @@ public:
     }
     void EnumMem(void) const
     {
-        char* str = DacInstantiateStringW(m_addr, maxChars, false);
+        WCHAR* str = DacInstantiateStringW(m_addr, maxChars, false);
         if (str)
         {
-            DacEnumMemoryRegion(m_addr, strlen(str) + 1);
+            DacEnumMemoryRegion(m_addr, wcslen(str) + 1);
         }
     }
 };
@@ -2386,6 +2387,7 @@ typedef DPTR(IMAGE_NT_HEADERS)      PTR_IMAGE_NT_HEADERS;
 typedef DPTR(IMAGE_NT_HEADERS32)    PTR_IMAGE_NT_HEADERS32;
 typedef DPTR(IMAGE_NT_HEADERS64)    PTR_IMAGE_NT_HEADERS64;
 typedef DPTR(IMAGE_SECTION_HEADER)  PTR_IMAGE_SECTION_HEADER;
+typedef DPTR(IMAGE_EXPORT_DIRECTORY)  PTR_IMAGE_EXPORT_DIRECTORY;
 typedef DPTR(IMAGE_TLS_DIRECTORY)   PTR_IMAGE_TLS_DIRECTORY;
 
 #if defined(DACCESS_COMPILE)
@@ -2464,7 +2466,7 @@ typedef DPTR(PTR_PCODE) PTR_PTR_PCODE;
 // We add a simple macro here which defines DAC_ALIGNAS to the C++11 alignas operator
 // This helps force the alignment of the next member
 // For most cross compilation cases the layout of types simply works
-// There are a few cases (where this macro is helpful) which are not consistent accross platforms:
+// There are a few cases (where this macro is helpful) which are not consistent across platforms:
 // - Base class whose size is padded to its align size.  On Linux the gcc/clang
 //   layouts will reuse this padding in the derived class for the first member
 // - Class with an vtable pointer and an alignment greater than the pointer size.

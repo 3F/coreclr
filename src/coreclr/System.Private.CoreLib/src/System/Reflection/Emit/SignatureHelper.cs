@@ -21,11 +21,6 @@ namespace System.Reflection.Emit
             return GetMethodSigHelper(mod, CallingConventions.Standard, returnType, null, null, parameterTypes, null, null);
         }
 
-        internal static SignatureHelper GetMethodSigHelper(Module? mod, CallingConventions callingConvention, Type? returnType, int cGenericParam)
-        {
-            return GetMethodSigHelper(mod, callingConvention, cGenericParam, returnType, null, null, null, null, null);
-        }
-
         public static SignatureHelper GetMethodSigHelper(Module? mod, CallingConventions callingConvention, Type? returnType)
         {
             return GetMethodSigHelper(mod, callingConvention, returnType, null, null, null, null, null);
@@ -82,7 +77,7 @@ namespace System.Reflection.Emit
             return sigHelp;
         }
 
-        public static SignatureHelper GetMethodSigHelper(Module? mod, CallingConvention unmanagedCallConv, Type? returnType)
+        internal static SignatureHelper GetMethodSigHelper(Module? mod, CallingConvention unmanagedCallConv, Type? returnType)
         {
             MdSigCallingConvention intCall;
 
@@ -122,7 +117,7 @@ namespace System.Reflection.Emit
             return GetMethodSigHelper(null, callingConvention, returnType);
         }
 
-        public static SignatureHelper GetMethodSigHelper(CallingConvention unmanagedCallingConvention, Type? returnType)
+        internal static SignatureHelper GetMethodSigHelper(CallingConvention unmanagedCallingConvention, Type? returnType)
         {
             return GetMethodSigHelper(null, unmanagedCallingConvention, returnType);
         }
@@ -301,7 +296,7 @@ namespace System.Reflection.Emit
 
                     AddElementType(CorElementType.ELEMENT_TYPE_CMOD_OPT);
 
-                    int token = m_module!.GetTypeToken(t).Token;
+                    int token = m_module!.GetTypeToken(t);
                     Debug.Assert(!MetadataToken.IsNullToken(token));
                     AddToken(token);
                 }
@@ -324,7 +319,7 @@ namespace System.Reflection.Emit
 
                     AddElementType(CorElementType.ELEMENT_TYPE_CMOD_REQD);
 
-                    int token = m_module!.GetTypeToken(t).Token;
+                    int token = m_module!.GetTypeToken(t);
                     Debug.Assert(!MetadataToken.IsNullToken(token));
                     AddToken(token);
                 }
@@ -361,7 +356,7 @@ namespace System.Reflection.Emit
             else if (clsArgument is TypeBuilder)
             {
                 TypeBuilder clsBuilder = (TypeBuilder)clsArgument;
-                TypeToken tkType;
+                int tkType;
 
                 if (clsBuilder.Module.Equals(m_module))
                 {
@@ -384,7 +379,7 @@ namespace System.Reflection.Emit
             else if (clsArgument is EnumBuilder)
             {
                 TypeBuilder clsBuilder = ((EnumBuilder)clsArgument).m_typeBuilder;
-                TypeToken tkType;
+                int tkType;
 
                 if (clsBuilder.Module.Equals(m_module))
                 {
@@ -545,11 +540,11 @@ namespace System.Reflection.Emit
             AddData(rid);
         }
 
-        private void InternalAddTypeToken(TypeToken clsToken, CorElementType CorType)
+        private void InternalAddTypeToken(int clsToken, CorElementType CorType)
         {
             // Add a type token into signature. CorType will be either CorElementType.ELEMENT_TYPE_CLASS or CorElementType.ELEMENT_TYPE_VALUETYPE
             AddElementType(CorType);
-            AddToken(clsToken.Token);
+            AddToken(clsToken);
         }
 
         private unsafe void InternalAddRuntimeType(Type type)

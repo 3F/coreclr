@@ -122,13 +122,16 @@ class RuntimeTypeHandle {
 public:
 
     // Static method on RuntimeTypeHandle
-    static FCDECL1(Object*, Allocate, ReflectClassBaseObject *refType) ; //A.CI work
-    static FCDECL6(Object*, CreateInstance, ReflectClassBaseObject* refThisUNSAFE,
-                                            CLR_BOOL publicOnly,
-                                            CLR_BOOL wrapExceptions,
-                                            CLR_BOOL *pbCanBeCached,
-                                            MethodDesc** pConstructor,
-                                            CLR_BOOL *pbHasNoDefaultCtor);
+
+    static
+    void QCALLTYPE GetActivationInfo(
+        QCall::ObjectHandleOnStack pRuntimeType,
+        PCODE* ppfnAllocator,
+        void** pvAllocatorFirstArg,
+        PCODE* ppfnCtor,
+        BOOL* pfCtorIsPublic);
+
+    static FCDECL1(Object*, AllocateComObject, void* pClassFactory);
 
     static
     void QCALLTYPE MakeByRef(QCall::TypeHandle pTypeHandle, QCall::ObjectHandleOnStack retType);
@@ -188,11 +191,11 @@ public:
     static
     BOOL QCALLTYPE IsVisible(QCall::TypeHandle pTypeHandle);
 
-    static FCDECL2(FC_BOOL_RET, IsComObject, ReflectClassBaseObject *pType, CLR_BOOL isGenericCOM);
     static FCDECL2(FC_BOOL_RET, CanCastTo, ReflectClassBaseObject *pType, ReflectClassBaseObject *pTarget);
     static FCDECL2(FC_BOOL_RET, IsInstanceOfType, ReflectClassBaseObject *pType, Object *object);
 
     static FCDECL6(FC_BOOL_RET, SatisfiesConstraints, PTR_ReflectClassBaseObject pGenericParameter, TypeHandle *typeContextArgs, INT32 typeContextCount, TypeHandle *methodContextArgs, INT32 methodContextCount, PTR_ReflectClassBaseObject pGenericArgument);
+
     static
     FCDECL1(FC_BOOL_RET, HasInstantiation, PTR_ReflectClassBaseObject pType);
 
@@ -235,6 +238,7 @@ public:
 
     static FCDECL2(MethodDesc*, GetMethodAt, PTR_ReflectClassBaseObject pType, INT32 slot);
     static FCDECL1(INT32, GetNumVirtuals, ReflectClassBaseObject *pType);
+    static FCDECL1(INT32, GetNumVirtualsAndStaticVirtuals, ReflectClassBaseObject *pType);
 
     static
     void QCALLTYPE VerifyInterfaceIsImplemented(QCall::TypeHandle pTypeHandle, QCall::TypeHandle pIFaceHandle);
@@ -247,14 +251,18 @@ public:
     static FCDECL1(MethodDesc *, GetFirstIntroducedMethod, ReflectClassBaseObject* pType);
     static FCDECL1(void, GetNextIntroducedMethod, MethodDesc **ppMethod);
 
-    static FCDECL2(Object*, CreateInstanceForGenericType, ReflectClassBaseObject* pType
-        , ReflectClassBaseObject* parameterType );
+    static
+    void QCALLTYPE CreateInstanceForAnotherGenericParameter(QCall::TypeHandle pTypeHandle, TypeHandle *pInstArray, INT32 cInstArray, QCall::ObjectHandleOnStack pInstantiatedObject);
 
     static
     FCDECL1(IMDInternalImport*, GetMetadataImport, ReflectClassBaseObject * pModuleUNSAFE);
 
     static
     PVOID QCALLTYPE AllocateTypeAssociatedMemory(QCall::TypeHandle type, UINT32 size);
+
+    // Helper methods not called by managed code
+
+    static void ValidateTypeAbleToBeInstantiated(TypeHandle typeHandle, bool fGetUninitializedObject);
 };
 
 class RuntimeMethodHandle {
@@ -262,7 +270,7 @@ class RuntimeMethodHandle {
 public:
     static FCDECL1(ReflectMethodObject*, GetCurrentMethod, StackCrawlMark* stackMark);
 
-    static FCDECL5(Object*, InvokeMethod, Object *target, PTRArray *objs, SignatureNative* pSig, CLR_BOOL fConstructor, CLR_BOOL fWrapExceptions);
+    static FCDECL5(Object*, InvokeMethod, Object *target, Span<OBJECTREF>* objs, SignatureNative* pSig, CLR_BOOL fConstructor, CLR_BOOL fWrapExceptions);
 
     struct StreamingContextData {
         Object * additionalContext;  // additionalContex was changed from OBJECTREF to Object to avoid having a

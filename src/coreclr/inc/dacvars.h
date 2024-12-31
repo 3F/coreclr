@@ -162,9 +162,6 @@ DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pObjectClass, ::g_pObjectClass
 DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pRuntimeTypeClass, ::g_pRuntimeTypeClass)
 DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pCanonMethodTableClass, ::g_pCanonMethodTableClass)
 DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pStringClass, ::g_pStringClass)
-#ifdef FEATURE_UTF8STRING
-DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pUtf8StringClass, ::g_pUtf8StringClass)
-#endif // FEATURE_UTF8STRING
 DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pArrayClass, ::g_pArrayClass)
 DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pSZArrayHelperClass, ::g_pSZArrayHelperClass)
 DEFINE_DACVAR(ULONG, UNKNOWN_POINTER_TYPE, dac__g_pNullableClass, ::g_pNullableClass)
@@ -250,6 +247,12 @@ DEFINE_DACVAR(ULONG, TADDR, dac__g_MiniMetaDataBuffAddress, ::g_MiniMetaDataBuff
 #endif // FEATURE_MINIMETADATA_IN_TRIAGEDUMPS
 
 DEFINE_DACVAR(ULONG, SIZE_T, dac__g_clrNotificationArguments, ::g_clrNotificationArguments)
+
+#ifdef EnC_SUPPORTED
+DEFINE_DACVAR(ULONG, bool, dac__g_metadataUpdatesApplied, ::g_metadataUpdatesApplied)
+#endif
+
+DEFINE_DACVAR(ULONG, PTR_WSTR, dac__g_EntryAssemblyPath, ::g_EntryAssemblyPath)
 
 #undef DEFINE_DACVAR
 #undef DEFINE_DACVAR_NO_DUMP

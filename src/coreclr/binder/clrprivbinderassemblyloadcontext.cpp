@@ -42,11 +42,11 @@ HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByNameWorker(BINDER_SPACE:
     return hr;
 }
 
-HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByName(IAssemblyName     *pIAssemblyName,
+HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByName(AssemblyNameData *pAssemblyNameData,
                                                              ICLRPrivAssembly **ppAssembly)
 {
     HRESULT hr = S_OK;
-    VALIDATE_ARG_RET(pIAssemblyName != nullptr && ppAssembly != nullptr);
+    VALIDATE_ARG_RET(pAssemblyNameData != nullptr && ppAssembly != nullptr);
 
     _ASSERTE(m_pTPABinder != NULL);
 
@@ -54,7 +54,7 @@ HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByName(IAssemblyName     *
     ReleaseHolder<AssemblyName> pAssemblyName;
 
     SAFE_NEW(pAssemblyName, AssemblyName);
-    IF_FAIL_GO(pAssemblyName->Init(pIAssemblyName));
+    IF_FAIL_GO(pAssemblyName->Init(*pAssemblyNameData));
 
     // When LoadContext needs to resolve an assembly reference, it will go through the following lookup order:
     //
@@ -84,7 +84,7 @@ HRESULT CLRPrivBinderAssemblyLoadContext::BindAssemblyByName(IAssemblyName     *
             // of what to do next. The host-overridden binder can either fail the bind or return reference to an existing assembly
             // that has been loaded.
             //
-            hr = AssemblyBinder::BindUsingHostAssemblyResolver(GetManagedAssemblyLoadContext(), pAssemblyName, pIAssemblyName, m_pTPABinder, &pCoreCLRFoundAssembly);
+            hr = AssemblyBinder::BindUsingHostAssemblyResolver(GetManagedAssemblyLoadContext(), pAssemblyName, m_pTPABinder, this, &pCoreCLRFoundAssembly);
             if (SUCCEEDED(hr))
             {
                 // We maybe returned an assembly that was bound to a different AssemblyLoadContext instance.
@@ -258,11 +258,13 @@ void CLRPrivBinderAssemblyLoadContext::PrepareForLoadContextRelease(INT_PTR ptrM
     _ASSERTE(m_pAssemblyLoaderAllocator != NULL);
     _ASSERTE(m_loaderAllocatorHandle != NULL);
 
-    // We cannot delete the binder here as it is used indirectly when comparing assemblies with the same binder
-    // It will be deleted when the LoaderAllocator will be deleted
-    // But we can release the LoaderAllocator as we are no longer using it here
+    // We need to keep the LoaderAllocator pointer set as it still may be needed for creating references between the
+    // native LoaderAllocators of two collectible contexts in case the AssemblyLoadContext.Unload was called on the current
+    // context before returning from its AssemblyLoadContext.Load override or the context's Resolving event.
+    // But we need to release the LoaderAllocator so that it doesn't prevent completion of the final phase of unloading in
+    // some cases. It is safe to do as the AssemblyLoaderAllocator is guaranteed to be alive at least until the 
+    // CustomAssemblyBinder::ReleaseLoadContext is called, where we NULL this pointer.
     m_pAssemblyLoaderAllocator->Release();
-    m_pAssemblyLoaderAllocator = NULL;
 
     // Destroy the strong handle to the LoaderAllocator in order to let it reach its finalizer
     DestroyHandle(reinterpret_cast<OBJECTHANDLE>(m_loaderAllocatorHandle));
@@ -287,6 +289,10 @@ void CLRPrivBinderAssemblyLoadContext::ReleaseLoadContext()
     handle = reinterpret_cast<OBJECTHANDLE>(m_ptrManagedStrongAssemblyLoadContext);
     DestroyHandle(handle);
     m_ptrManagedAssemblyLoadContext = NULL;
+
+    // The AssemblyLoaderAllocator is in a process of shutdown and should not be used 
+    // after this point.
+    m_pAssemblyLoaderAllocator = NULL;
 }
 
 #endif // !defined(DACCESS_COMPILE) && !defined(CROSSGEN_COMPILE)

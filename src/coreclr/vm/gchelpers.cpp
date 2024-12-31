@@ -324,7 +324,8 @@ void PublishObjectAndNotify(TObj* &orObject, GC_ALLOC_FLAGS flags)
     // Notify the profiler of the allocation
     // do this after initializing bounds so callback has size information
     if (TrackAllocations() ||
-        (TrackLargeAllocations() && flags & GC_ALLOC_LARGE_OBJECT_HEAP))
+        (TrackLargeAllocations() && flags & GC_ALLOC_LARGE_OBJECT_HEAP) ||
+		(TrackPinnedAllocations() && flags & GC_ALLOC_PINNED_OBJECT_HEAP))
     {
         OBJECTREF objref = ObjectToOBJECTREF((Object*)orObject);
         GCPROTECT_BEGIN(objref);
@@ -342,13 +343,11 @@ void PublishObjectAndNotify(TObj* &orObject, GC_ALLOC_FLAGS flags)
 #endif // FEATURE_EVENT_TRACE
 }
 
-inline SIZE_T MaxArrayLength(SIZE_T componentSize)
+inline SIZE_T MaxArrayLength()
 {
-    // Impose limits on maximum array length in each dimension to allow efficient
-    // implementation of advanced range check elimination in future. We have to allow
-    // higher limit for array of bytes (or one byte structs) for backward compatibility.
-    // Keep in sync with Array.MaxArrayLength in BCL.
-    return (componentSize == 1) ? 0X7FFFFFC7 : 0X7FEFFFFF;
+    // Impose limits on maximum array length to prevent corner case integer overflow bugs
+    // Keep in sync with Array.MaxLength in BCL.
+    return 0X7FFFFFC7;
 }
 
 OBJECTREF AllocateSzArray(TypeHandle arrayType, INT32 cElements, GC_ALLOC_FLAGS flags)
@@ -388,11 +387,11 @@ OBJECTREF AllocateSzArray(MethodTable* pArrayMT, INT32 cElements, GC_ALLOC_FLAGS
     if (cElements < 0)
         COMPlusThrow(kOverflowException);
 
-    SIZE_T componentSize = pArrayMT->GetComponentSize();
-    if ((SIZE_T)cElements > MaxArrayLength(componentSize))
+    if ((SIZE_T)cElements > MaxArrayLength())
         ThrowOutOfMemoryDimensionsExceeded();
 
     // Allocate the space from the GC heap
+    SIZE_T componentSize = pArrayMT->GetComponentSize();
 #ifdef TARGET_64BIT
     // POSITIVE_INT32 * UINT16 + SMALL_CONST
     // this cannot overflow on 64bit
@@ -568,7 +567,6 @@ OBJECTREF AllocateArrayEx(MethodTable *pArrayMT, INT32 *pArgs, DWORD dwNumArgs, 
 
     // Calculate the total number of elements in the array
     UINT32 cElements;
-    SIZE_T componentSize = pArrayMT->GetComponentSize();
     bool maxArrayDimensionLengthOverflow = false;
     bool providedLowerBounds = false;
 
@@ -599,7 +597,7 @@ OBJECTREF AllocateArrayEx(MethodTable *pArrayMT, INT32 *pArgs, DWORD dwNumArgs, 
             int length = pArgs[i];
             if (length < 0)
                 COMPlusThrow(kOverflowException);
-            if ((SIZE_T)length > MaxArrayLength(componentSize))
+            if ((SIZE_T)length > MaxArrayLength())
                 maxArrayDimensionLengthOverflow = true;
             if ((length > 0) && (lowerBound + (length - 1) < lowerBound))
                 COMPlusThrow(kArgumentOutOfRangeException, W("ArgumentOutOfRange_ArrayLBAndLength"));
@@ -615,7 +613,7 @@ OBJECTREF AllocateArrayEx(MethodTable *pArrayMT, INT32 *pArgs, DWORD dwNumArgs, 
         int length = pArgs[0];
         if (length < 0)
             COMPlusThrow(kOverflowException);
-        if ((SIZE_T)length > MaxArrayLength(componentSize))
+        if ((SIZE_T)length > MaxArrayLength())
             maxArrayDimensionLengthOverflow = true;
         cElements = length;
     }
@@ -625,6 +623,7 @@ OBJECTREF AllocateArrayEx(MethodTable *pArrayMT, INT32 *pArgs, DWORD dwNumArgs, 
         ThrowOutOfMemoryDimensionsExceeded();
 
     // Allocate the space from the GC heap
+    SIZE_T componentSize = pArrayMT->GetComponentSize();
 #ifdef TARGET_64BIT
     // POSITIVE_INT32 * UINT16 + SMALL_CONST
     // this cannot overflow on 64bit
@@ -869,55 +868,6 @@ STRINGREF AllocateString( DWORD cchStringLength )
     return ObjectToSTRINGREF(orString);
 }
 
-#ifdef FEATURE_UTF8STRING
-UTF8STRINGREF AllocateUtf8String(DWORD cchStringLength)
-{
-    CONTRACTL{
-        THROWS;
-        GC_TRIGGERS;
-        MODE_COOPERATIVE; // returns an objref without pinning it => cooperative
-    } CONTRACTL_END;
-
-#ifdef _DEBUG
-    if (g_pConfig->ShouldInjectFault(INJECTFAULT_GCHEAP))
-    {
-        char *a = new char;
-        delete a;
-    }
-#endif
-
-    // Limit the maximum string size to <2GB to mitigate risk of security issues caused by 32-bit integer
-    // overflows in buffer size calculations.
-    //
-    // 0x7FFFFFBF is derived from the const 0x3FFFFFDF in SlowAllocateString.
-    // Adding +1 (for null terminator) and multiplying by sizeof(WCHAR) means that
-    // SlowAllocateString allows a maximum of 0x7FFFFFC0 bytes to be used for the
-    // string data itself, with some additional buffer for object headers and other
-    // data. Since we don't have the sizeof(WCHAR) multiplication here, we only need
-    // -1 to account for the null terminator, leading to a max size of 0x7FFFFFBF.
-    if (cchStringLength > 0x7FFFFFBF)
-        ThrowOutOfMemory();
-
-    SIZE_T totalSize = PtrAlign(Utf8StringObject::GetSize(cchStringLength));
-    _ASSERTE(totalSize > cchStringLength);
-
-    SetTypeHandleOnThreadForAlloc(TypeHandle(g_pUtf8StringClass));
-
-    GC_ALLOC_FLAGS flags = GC_ALLOC_NO_FLAGS;
-    if (totalSize >= g_pConfig->GetGCLOHThreshold())
-        flags |= GC_ALLOC_LARGE_OBJECT_HEAP;
-
-    Utf8StringObject* orString = (Utf8StringObject*)Alloc(totalSize, flags);
-
-    // Initialize Object
-    orString->SetMethodTable(g_pUtf8StringClass);
-    orString->SetLength(cchStringLength);
-
-    PublishObjectAndNotify(orString, flags);
-    return ObjectToUTF8STRINGREF(orString);
-}
-#endif // FEATURE_UTF8STRING
-
 #ifdef FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
 // OBJECTREF AllocateComClassObject(ComClassFactory* pComClsFac)
 void AllocateComClassObject(ComClassFactory* pComClsFac, OBJECTREF* ppRefClass)
@@ -981,15 +931,25 @@ OBJECTREF AllocateObject(MethodTable *pMT
 #ifdef FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
     if (fHandleCom && pMT->IsComObjectType())
     {
+        if (!g_pConfig->IsBuiltInCOMSupported())
+        {
+            COMPlusThrow(kNotSupportedException, W("NotSupported_COM"));
+        }
+
         // Create a instance of __ComObject here is not allowed as we don't know what COM object to create
         if (pMT == g_pBaseCOMObject)
             COMPlusThrow(kInvalidComObjectException, IDS_EE_NO_BACKING_CLASS_FACTORY);
 
         oref = OBJECTREF_TO_UNCHECKED_OBJECTREF(AllocateComObject_ForManaged(pMT));
     }
-    else
 #endif // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
+#else  // FEATURE_COMINTEROP
+    if (pMT->IsComObjectType())
+    {
+        COMPlusThrow(kPlatformNotSupportedException, IDS_EE_ERROR_COM);
+    }
 #endif // FEATURE_COMINTEROP
+    else
     {
         GC_ALLOC_FLAGS flags = GC_ALLOC_NO_FLAGS;
         if (pMT->ContainsPointers())

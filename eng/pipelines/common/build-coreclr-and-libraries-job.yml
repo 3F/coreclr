@@ -3,9 +3,10 @@ parameters:
   archType: ''
   osGroup: ''
   osSubgroup: ''
+  targetRid: ''
   container: ''
   testGroup: ''
-  crossrootfsDir: ''
+  crossBuild: false
   timeoutInMinutes: ''
   signBinaries: false
   stagedBuild: false
@@ -21,9 +22,10 @@ jobs:
     archType: ${{ parameters.archType }}
     osGroup: ${{ parameters.osGroup }}
     osSubgroup: ${{ parameters.osSubgroup }}
+    targetRid: ${{ parameters.targetRid }}
     container: ${{ parameters.container }}
     testGroup: ${{ parameters.testGroup }}
-    crossrootfsDir: ${{ parameters.crossrootfsDir }}
+    crossBuild: ${{ parameters.crossBuild }}
     timeoutInminutes: ${{ parameters.timeoutInMinutes }}
     signBinaries: ${{ parameters.signBinaries }}
     stagedBuild: ${{ parameters.stagedBuild }}
@@ -41,7 +43,7 @@ jobs:
     osSubgroup: ${{ parameters.osSubgroup }}
     container: ${{ parameters.container }}
     testGroup: ${{ parameters.testGroup }}
-    crossrootfsDir: ${{ parameters.crossrootfsDir }}
+    crossBuild: ${{ parameters.crossBuild }}
     timeoutInminutes: ${{ parameters.timeoutInMinutes }}
     variables: ${{ parameters.variables }}
     pool: ${{ parameters.pool }}

@@ -68,7 +68,7 @@ void MakeProperSourceFileName(__in __nullterminated WCHAR* wzOrigName,
     {
         j--;
         if(wzProperName[j] == '.') break;
-        if((wzProperName[j] == '\\')||(j == 0))
+        if((wzProperName[j] == DIRECTORY_SEPARATOR_CHAR_A)||(j == 0))
         {
             wcscat_s(wzProperName,MAX_FILENAME_LENGTH,W(".il"));
             break;
@@ -113,7 +113,7 @@ WCHAR       wzPdbFilename[MAX_FILENAME_LENGTH];
 extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 {
     int         i, NumFiles = 0, NumDeltaFiles = 0;
-    bool        IsDLL = false, IsOBJ = false;
+    bool        IsDLL = false;
     Assembler   *pAsm;
     MappedFileStream *pIn;
     AsmParse    *pParser;
@@ -121,7 +121,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
     bool        bLogo = TRUE;
     bool        bReportProgress = TRUE;
     BOOL        bGeneratePdb = FALSE;
-    PdbFormat   pdbFormat = CLASSIC;
     WCHAR*      wzIncludePath = NULL;
     WCHAR*      wzPathToCvtRes = nullptr;
     int exitcode = 0;
@@ -178,8 +177,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
       printf("\n/DLL            Compile to .dll");
       printf("\n/EXE            Compile to .exe (default)");
       printf("\n/PDB            Create the PDB file without enabling debug info tracking");
-      printf("\n/PDBFMT=CLASSIC     Use classic PDB format for PDB file generation (default)");
-      printf("\n/PDBFMT=PORTABLE    Use portable PDB format for PDB file generation");
       printf("\n/APPCONTAINER   Create an AppContainer exe or dll");
       printf("\n/DEBUG          Disable JIT optimization, create PDB file, use sequence points from PDB");
       printf("\n/DEBUG=IMPL     Disable JIT optimization, create PDB file, use implicit sequence points");
@@ -212,7 +209,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
       printf("\n/ARM            Target processor: ARM (AArch32) processor");
       printf("\n/ARM64          Target processor: ARM64 (AArch64) processor");
       printf("\n/32BITPREFERRED Create a 32BitPreferred image (PE32)");
-      printf("\n/ENC=<file>     Create Edit-and-Continue deltas from specified source file");
 
       printf("\n\nKey may be '-' or '/'\nOptions are recognized by first 3 characters (except ARM/ARM64)\nDefault source file extension is .il\n");
 
@@ -226,8 +222,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
     }
 
     uCodePage = CP_UTF8;
-    WszSetEnvironmentVariable(W("COMP_ENC_OPENSCOPE"), W(""));
-    WszSetEnvironmentVariable(W("COMP_ENC_EMIT"), W(""));
     if((pAsm = new Assembler()))
     {
         pAsm->SetCodePage(uCodePage);
@@ -294,42 +288,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     else if (!_stricmp(szOpt, "PDB"))
                     {
                         bGeneratePdb = TRUE;
-
-                        // check for /PDBFMT= command line option
-                        char szOpt2[3 + 1] = { 0 };
-                        WszWideCharToMultiByte(uCodePage, 0, &argv[i][4], 3, szOpt2, sizeof(szOpt2), NULL, NULL);
-                        if (!_stricmp(szOpt2, "FMT"))
-                        {
-                            WCHAR* pStr = EqualOrColon(argv[i]);
-                            if (pStr != NULL)
-                            {
-                                for (pStr++; *pStr == L' '; pStr++);        //skip the blanks        
-                                if (wcslen(pStr) == 0)
-                                {
-                                    goto InvalidOption;                     //if no suboption
-                                }
-                                else
-                                {
-                                    WCHAR wzSubOpt[8 + 1];
-                                    wcsncpy_s(wzSubOpt, 8 + 1, pStr, 8);
-                                    wzSubOpt[8] = 0;
-                                    if (0 == _wcsicmp(wzSubOpt, W("CLASSIC")))
-                                        pdbFormat = CLASSIC;
-                                    else if (0 == _wcsicmp(wzSubOpt, W("PORTABLE")))
-                                        pdbFormat = PORTABLE;
-                                    else
-                                        goto InvalidOption;                 // bad subooption
-                                }
-                            }
-                            else
-                            {
-                                goto InvalidOption;                         // bad subooption
-                            }
-                        }
-                        else if (*szOpt2)
-                        {
-                            goto InvalidOption; // bad subooption
-                        }
                     }
                     else if (!_stricmp(szOpt, "CLO"))
                     {
@@ -338,13 +296,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     }
                     else if (!_stricmp(szOpt, "DLL"))
                     {
-                      IsDLL = true; IsOBJ = false;
-                    }
-                    else if (!_stricmp(szOpt, "OBJ"))
-                    {
-                      //IsOBJ = true; IsDLL = false;
-                      printf("Option /OBJECT is not supported.\n");
-                      goto ErrorExit;
+                      IsDLL = true;
                     }
                     else if (!_stricmp(szOpt, "ERR"))
                     {
@@ -499,15 +451,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                     pAsm->m_wMSVminor = (WORD)minor;
                             }
                         }
-                    }
-                    else if (!_stricmp(szOpt, "ENC"))
-                    {
-                        WCHAR *pStr = EqualOrColon(argv[i]);
-                        if(pStr == NULL) goto InvalidOption;
-                        for(pStr++; *pStr == L' '; pStr++); //skip the blanks
-                        if(wcslen(pStr)==0) goto InvalidOption; //if no file name
-                        pwzDeltaFiles[NumDeltaFiles++] = pStr;
-                        pAsm->m_fTolerateDupMethods = TRUE;
                     }
                     else if (!_stricmp(szOpt, "SUB"))
                     {
@@ -664,15 +607,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 delete pAsm;
                 goto ErrorExit;
             }
-            if (bGeneratePdb && CLASSIC == pdbFormat)
-            {
-                // Classic PDB format is not supported on CoreCLR
-                // https://github.com/dotnet/runtime/issues/5051
-
-                printf("WARNING: Classic PDB format is not supported on CoreCLR.\n");
-                printf("Use '/PDBFMT=PORTABLE' option in order to generate portable PDB format. \n");
-            }
-            if (!pAsm->Init(bGeneratePdb, pdbFormat))
+            if (!pAsm->Init(bGeneratePdb))
             {
                 fprintf(stderr,"Failed to initialize Assembler\n");
                 delete pAsm;
@@ -695,7 +630,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                     }
                 }
                 while(j);
-                wcscat_s(wzOutputFilename, MAX_FILENAME_LENGTH,(IsDLL ? W(".dll") : (IsOBJ ? W(".obj") : W(".exe"))));
+                wcscat_s(wzOutputFilename, MAX_FILENAME_LENGTH,(IsDLL ? W(".dll") : W(".exe")));
             }
             if (pAsm->m_fGeneratePDB)
             {
@@ -733,7 +668,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 }
 
                 pAsm->SetDLL(IsDLL);
-                pAsm->SetOBJ(IsOBJ);
                 wcscpy_s(pAsm->m_wzOutputFileName,MAX_FILENAME_LENGTH,wzOutputFilename);
                 strcpy_s(pAsm->m_szSourceFileName,MAX_FILENAME_LENGTH*3+1,szInputFilename);
 
@@ -753,10 +687,8 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                         if(pAsm->m_fReportProgress)
                         {
                             pParser->msg("\nAssembling '%s' ", szInputFilename);
-                            if(pAsm->m_fCPlusPlus)  pParser->msg(" C++");
-                            if(pAsm->m_fWindowsCE)  pParser->msg(" WINCE");
                             if(!pAsm->m_fAutoInheritFromObject) pParser->msg(" NOAUTOINHERIT");
-                            pParser->msg(IsDLL ? " to DLL" : (IsOBJ? " to OBJ" : " to EXE"));
+                            pParser->msg(IsDLL ? " to DLL" : " to EXE");
                             //======================================================================
                             if (pAsm->m_fStdMapping == FALSE)
                                 pParser->msg(", with REFERENCE mapping");
@@ -823,7 +755,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                             if(exitval == 0) // Write the output file
                             {
                                 if(bClock) cw.cFilegenEnd = GetTickCount();
-                                if(pAsm->m_fReportProgress) pParser->msg("Writing %s file\n", pAsm->m_fOBJ ? "COFF" : "PE");
+                                if(pAsm->m_fReportProgress) pParser->msg("Writing PE file\n");
                                 // Generate the file
                                 if (FAILED(hr = pAsm->m_pCeeFileGen->GenerateCeeFile(pAsm->m_pCeeFile)))
                                 {
@@ -841,10 +773,8 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                     }
                                 }
                                 if(bClock) cw.cEnd = GetTickCount();
-#define ENC_ENABLED
                                 if(exitval==0)
                                 {
-                                    pAsm->m_fENCMode = TRUE;
                                     WCHAR wzNewOutputFilename[MAX_FILENAME_LENGTH+16];
                                     for(iFile = 0; iFile < NumDeltaFiles; iFile++)
                                     {
@@ -855,8 +785,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                         if(pAsm->m_fReportProgress)
                                         {
                                             pParser->msg("\nAssembling delta '%s' ", szInputFilename);
-                                            if(pAsm->m_fCPlusPlus)  pParser->msg(" C++");
-                                            if(pAsm->m_fWindowsCE)  pParser->msg(" WINCE");
                                             if(!pAsm->m_fAutoInheritFromObject) pParser->msg(" NOAUTOINHERIT");
                                             pParser->msg(" to DMETA,DIL");
                                             //======================================================================
@@ -882,54 +810,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                                 pParser->msg("%s is not a text file\n",szInputFilename);
                                                 fAllFilesPresent = FALSE;
                                             }
-                                            else
 #endif
-                                            if (SUCCEEDED(pAsm->InitMetaDataForENC(wzNewOutputFilename, bGeneratePdb, pdbFormat)))
-                                            {
-                                                pAsm->SetSourceFileName(FullFileName(wzInputFilename,uCodePage)); // deletes the argument!
-
-                                                pParser->ParseFile(pIn);
-                                                if (pParser->Success() || pAsm->OnErrGo)
-                                                {
-                                                    exitval = 1;
-                                                    if(FAILED(hr=pAsm->CreateDeltaFiles(wzNewOutputFilename)))
-                                                        pParser->msg("Could not create output delta files, error code=0x%08X\n",hr);
-                                                    else
-                                                    {
-                                                        if(pAsm->m_fFoldCode && pAsm->m_fReportProgress)
-                                                            pParser->msg("%d methods folded\n",pAsm->m_dwMethodsFolded);
-                                                        if(pParser->Success()) exitval = 0;
-                                                        else    pParser->msg("Output delta files contain errors\n");
-
-#ifdef GENERATE_SUMMARY_PE_FILE
-                                                        if(pAsm->OnErrGo) exitval = 0;
-
-                                                        //if(FAILED(hr=pAsm->CreatePEFile(wzOutputFilename)))
-                                                        //    pParser->msg("Could not create output file, error code=0x%08X\n",hr);
-                                                        //else
-                                                        {
-                                                            if(pAsm->m_fReportProgress) pParser->msg("Writing %s file\n", pAsm->m_fOBJ ? "COFF" : "PE");
-                                                            // Generate the file
-                                                            if (FAILED(hr = pAsm->m_pCeeFileGen->GenerateCeeFile(pAsm->m_pCeeFile)))
-                                                            {
-                                                                exitval = 1;
-                                                                pParser->msg("Failed to write output file, error code=0x%08X\n",hr);
-                                                            }
-                                                            else if (pAsm->m_pManifest->m_sStrongName.m_fFullSign)
-                                                            {
-                                                                // Strong name sign the resultant assembly.
-                                                                if(pAsm->m_fReportProgress) pParser->msg("Signing file with strong name\n");
-                                                                if (FAILED(hr=pAsm->StrongNameSign()))
-                                                                {
-                                                                    exitval = 1;
-                                                                    pParser->msg("Failed to strong name sign output file, error code=0x%08X\n",hr);
-                                                                }
-                                                            }
-                                                        }
-#endif
-                                                    }
-                                                } // end if (pParser->Success() || pAsm->OnErrGo)
-                                            } //end if (SUCCEEDED(pAsm->InitMetaDataForENC()))
                                         } // end if ((!pIn) || !(pIn->IsValid())) -- else
                                         if(pIn)
                                         {
@@ -952,9 +833,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
         delete pAsm;
     }
     else printf("Insufficient memory\n");
-
-    WszSetEnvironmentVariable(W("COMP_ENC_OPENSCOPE"), W(""));
-    WszSetEnvironmentVariable(W("COMP_ENC_EMIT"), W(""));
 
     if (exitval || !bGeneratePdb)
     {

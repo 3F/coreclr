@@ -1,9 +1,10 @@
 set(SOURCES
+  EnableEventLogging.cpp
   ${CMAKE_CURRENT_BINARY_DIR}/clralltestevents.cpp
 )
 
 set(EVENT_MANIFEST ${VM_DIR}/ClrEtwAll.man)
-set(TEST_GENERATOR ${CLR_DIR}/src/scripts/genEventingTests.py)
+set(TEST_GENERATOR ${CLR_DIR}/scripts/genEventingTests.py)
 
 include(FindPythonInterp)
 
@@ -19,7 +20,8 @@ if(TARGET_UNIX)
     include_directories(${COREPAL_SOURCE_DIR}/inc/rt)
 endif(TARGET_UNIX)
 
-add_executable(eventprovidertest
+add_executable_clr(eventprovidertest
+            EXCLUDE_FROM_ALL
             ${SOURCES}
             )
 set(EVENT_PROVIDER_DEPENDENCIES "")
@@ -37,3 +39,6 @@ endif(FEATURE_EVENT_TRACE)
 
 target_link_libraries(eventprovidertest  ${EVENT_PROVIDER_DEPENDENCIES} coreclrpal)
 add_dependencies(eventprovidertest eventing_headers)
+
+install (TARGETS eventprovidertest DESTINATION paltests/eventprovider COMPONENT paltests EXCLUDE_FROM_ALL)
+add_dependencies(paltests_install eventprovidertest)

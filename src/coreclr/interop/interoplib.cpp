@@ -35,7 +35,7 @@ namespace InteropLib
             HRESULT hr;
 
             // Convert input to appropriate types.
-            auto vtables = static_cast<ABI::ComInterfaceEntry*>(vtablesRaw);
+            auto vtables = static_cast<::ABI::ComInterfaceEntry*>(vtablesRaw);
 
             ManagedObjectWrapper* mow;
             RETURN_IF_FAILED(ManagedObjectWrapper::Create(flags, instance, vtableCount, vtables, &mow));
@@ -96,12 +96,13 @@ namespace InteropLib
             return wrapper->IsSet(CreateComInterfaceFlagsEx::IsComActivated) ? S_OK : S_FALSE;
         }
 
-        HRESULT GetIdentityForCreateWrapperForExternal(
+        HRESULT DetermineIdentityAndInnerForExternal(
             _In_ IUnknown* external,
             _In_ enum CreateObjectFlags flags,
-            _Outptr_ IUnknown** identity) noexcept
+            _Outptr_ IUnknown** identity,
+            _Inout_ IUnknown** innerMaybe) noexcept
         {
-            _ASSERTE(external != nullptr && identity != nullptr);
+            _ASSERTE(external != nullptr && identity != nullptr && innerMaybe != nullptr);
 
             IUnknown* checkForIdentity = external;
 
@@ -122,12 +123,27 @@ namespace InteropLib
                 // interface QI. Once we have the IReferenceTracker
                 // instance we can be sure the QI for IUnknown will really
                 // be the true identity.
-                HRESULT hr = external->QueryInterface(&trackerObject);
+                HRESULT hr = external->QueryInterface(IID_IReferenceTracker, (void**)&trackerObject);
                 if (SUCCEEDED(hr))
                     checkForIdentity = trackerObject.p;
             }
 
-            return checkForIdentity->QueryInterface(identity);
+            HRESULT hr;
+
+            IUnknown* identityLocal;
+            RETURN_IF_FAILED(checkForIdentity->QueryInterface(IID_IUnknown, (void **)&identityLocal));
+
+            // Set the inner if scenario dictates an update.
+            if (*innerMaybe == nullptr          // User didn't supply inner - .NET 5 API scenario sanity check.
+                && checkForIdentity != external // Target of check was changed - .NET 5 API scenario sanity check.
+                && external != identityLocal    // The supplied object doesn't match the computed identity.
+                && refTrackerInnerScenario)     // The appropriate flags were set.
+            {
+                *innerMaybe = external;
+            }
+
+            *identity = identityLocal;
+            return S_OK;
         }
 
         HRESULT CreateWrapperForExternal(
@@ -151,11 +167,11 @@ namespace InteropLib
         }
 
         void NotifyWrapperForExternalIsBeingCollected(_In_ void* contextMaybe) noexcept
-        {
-            NativeObjectWrapperContext* context = NativeObjectWrapperContext::MapFromRuntimeContext(contextMaybe);
+         {
+             NativeObjectWrapperContext* context = NativeObjectWrapperContext::MapFromRuntimeContext(contextMaybe);
 
-            // A caller should not be destroying a context without knowing if the context is valid.
-            _ASSERTE(context != nullptr);
+             // A caller should not be destroying a context without knowing if the context is valid.
+             _ASSERTE(context != nullptr);
 
             // Check if the tracker object manager should be informed of collection.
             IReferenceTracker* trackerMaybe = context->GetReferenceTracker();
@@ -179,8 +195,8 @@ namespace InteropLib
             if (notifyIsBeingCollected)
                 NotifyWrapperForExternalIsBeingCollected(contextMaybe);
 
-            NativeObjectWrapperContext::Destroy(context);
-        }
+             NativeObjectWrapperContext::Destroy(context);
+         }
 
         void SeparateWrapperFromTrackerRuntime(_In_ void* contextMaybe) noexcept
         {

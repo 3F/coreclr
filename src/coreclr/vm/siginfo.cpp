@@ -23,6 +23,7 @@
 #include "../md/compiler/custattr.h"
 #include <corhlprpriv.h>
 #include "argdestination.h"
+#include "multicorejit.h"
 
 /*******************************************************************/
 const CorTypeInfo::CorTypeInfoEntry CorTypeInfo::info[ELEMENT_TYPE_MAX] =
@@ -188,7 +189,7 @@ void SigPointer::ConvertToInternalExactlyOne(Module* pSigModule, SigTypeContext 
 
     if (pTypeContext != NULL)
     {
-        ULONG varNum;
+        uint32_t varNum;
         if (typ == ELEMENT_TYPE_VAR)
         {
             IfFailThrowBF(GetData(&varNum), BFA_BAD_COMPLUS_SIG, pSigModule);
@@ -221,7 +222,7 @@ void SigPointer::ConvertToInternalExactlyOne(Module* pSigModule, SigTypeContext 
             case ELEMENT_TYPE_VAR:
             case ELEMENT_TYPE_MVAR:
                 {
-                    ULONG varNum;
+                    uint32_t varNum;
                     // Skip variable number
                     IfFailThrowBF(GetData(&varNum), BFA_BAD_COMPLUS_SIG, pSigModule);
                     pSigBuilder->AppendData(varNum);
@@ -247,30 +248,30 @@ void SigPointer::ConvertToInternalExactlyOne(Module* pSigModule, SigTypeContext 
                 {
                     ConvertToInternalExactlyOne(pSigModule, pTypeContext, pSigBuilder, bSkipCustomModifier);
 
-                    ULONG rank = 0; // Get rank
+                    uint32_t rank = 0; // Get rank
                     IfFailThrowBF(GetData(&rank), BFA_BAD_COMPLUS_SIG, pSigModule);
                     pSigBuilder->AppendData(rank);
 
                     if (rank)
                     {
-                        ULONG nsizes = 0;
+                        uint32_t nsizes = 0;
                         IfFailThrowBF(GetData(&nsizes), BFA_BAD_COMPLUS_SIG, pSigModule);
                         pSigBuilder->AppendData(nsizes);
 
                         while (nsizes--)
                         {
-                            ULONG data = 0;
+                            uint32_t data = 0;
                             IfFailThrowBF(GetData(&data), BFA_BAD_COMPLUS_SIG, pSigModule);
                             pSigBuilder->AppendData(data);
                         }
 
-                        ULONG nlbounds = 0;
+                        uint32_t nlbounds = 0;
                         IfFailThrowBF(GetData(&nlbounds), BFA_BAD_COMPLUS_SIG, pSigModule);
                         pSigBuilder->AppendData(nlbounds);
 
                         while (nlbounds--)
                         {
-                            ULONG data = 0;
+                            uint32_t data = 0;
                             IfFailThrowBF(GetData(&data), BFA_BAD_COMPLUS_SIG, pSigModule);
                             pSigBuilder->AppendData(data);
                         }
@@ -302,7 +303,7 @@ void SigPointer::ConvertToInternalExactlyOne(Module* pSigModule, SigTypeContext 
                     pSigBuilder->AppendElementType(ELEMENT_TYPE_INTERNAL);
                     pSigBuilder->AppendPointer(genericType.AsPtr());
 
-                    ULONG argCnt = 0; // Get number of parameters
+                    uint32_t argCnt = 0; // Get number of parameters
                     IfFailThrowBF(GetData(&argCnt), BFA_BAD_COMPLUS_SIG, pSigModule);
                     pSigBuilder->AppendData(argCnt);
 
@@ -352,13 +353,13 @@ void SigPointer::ConvertToInternalSignature(Module* pSigModule, SigTypeContext *
     // Skip type parameter count
     if (uCallConv & IMAGE_CEE_CS_CALLCONV_GENERIC)
     {
-        ULONG nParams = 0;
+        uint32_t nParams = 0;
         IfFailThrowBF(GetData(&nParams), BFA_BAD_COMPLUS_SIG, pSigModule);
         pSigBuilder->AppendData(nParams);
     }
 
     // Get arg count;
-    ULONG cArgs = 0;
+    uint32_t cArgs = 0;
     IfFailThrowBF(GetData(&cArgs), BFA_BAD_COMPLUS_SIG, pSigModule);
     pSigBuilder->AppendData(cArgs);
 
@@ -576,7 +577,7 @@ void MetaSig::Init(
     {
         case sigLocalVars:
         {
-            ULONG data = 0;
+            uint32_t data = 0;
             IfFailGo(psig.GetCallingConvInfo(&data)); // Store calling convention
             m_CallConv = (BYTE)data;
 
@@ -588,7 +589,7 @@ void MetaSig::Init(
         }
         case sigMember:
         {
-            ULONG data = 0;
+            uint32_t data = 0;
             IfFailGo(psig.GetCallingConvInfo(&data)); // Store calling convention
             m_CallConv = (BYTE)data;
 
@@ -606,7 +607,7 @@ void MetaSig::Init(
         }
         case sigField:
         {
-            ULONG data = 0;
+            uint32_t data = 0;
             IfFailGo(psig.GetCallingConvInfo(&data)); // Store calling convention
             m_CallConv = (BYTE)data;
 
@@ -988,7 +989,8 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
                  BOOL                        dropGenericArgumentLevel/*=FALSE*/,
                  const Substitution *        pSubst/*=NULL*/,
                  // ZapSigContext is only set when decoding zapsigs
-                 const ZapSig::Context *     pZapSigContext) const
+                 const ZapSig::Context *     pZapSigContext,
+                 MethodTable *               pMTInterfaceMapOwner) const
 {
     CONTRACT(TypeHandle)
     {
@@ -1113,7 +1115,8 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
         //
         // pOrigModule is the original module that contained this ZapSig
         //
-        Module *                     pOrigModule   = (pZapSigContext != NULL) ? pZapSigContext->pInfoModule : pModule;
+        Module * pOrigModule = (pZapSigContext != NULL) ? pZapSigContext->pInfoModule : pModule;
+
         ClassLoader::NotFoundAction  notFoundAction;
         CorInternalStates            tdTypes;
 
@@ -1164,11 +1167,18 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
         case ELEMENT_TYPE_MODULE_ZAPSIG:
         {
 #ifndef DACCESS_COMPILE
-            DWORD ix;
+            uint32_t ix;
             IfFailThrowBF(psig.GetData(&ix), BFA_BAD_SIGNATURE, pModule);
-
-            PREFIX_ASSUME(pZapSigContext != NULL);
-            pModule = pZapSigContext->GetZapSigModule()->GetModuleFromIndex(ix);
+#ifdef FEATURE_MULTICOREJIT
+            if (pZapSigContext->externalTokens == ZapSig::MulticoreJitTokens)
+            {
+                pModule = MulticoreJitManager::DecodeModuleFromIndex(pZapSigContext->pModuleContext, ix);
+            }
+            else
+#endif
+            {
+                pModule = pZapSigContext->GetZapSigModule()->GetModuleFromIndex(ix);
+            }
 
             if ((pModule != NULL) && pModule->IsInCurrentVersionBubble())
             {
@@ -1196,7 +1206,7 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
         case ELEMENT_TYPE_VAR_ZAPSIG:
         {
 #ifndef DACCESS_COMPILE
-            DWORD rid;
+            RID rid;
             IfFailThrowBF(psig.GetData(&rid), BFA_BAD_SIGNATURE, pModule);
 
             mdGenericParam tkTyPar = TokenFromRid(rid, mdtGenericParam);
@@ -1239,11 +1249,11 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
 #ifdef _DEBUG_IMPL
                 _ASSERTE(!FORBIDGC_LOADER_USE_ENABLED());
 #endif
-                DWORD index;
+                uint32_t index;
                 IfFailThrow(psig.GetData(&index));
 
                 SigPointer inst = pSubst->GetInst();
-                for (DWORD i = 0; i < index; i++)
+                for (uint32_t i = 0; i < index; i++)
                 {
                     IfFailThrowBF(inst.SkipExactlyOne(), BFA_BAD_SIGNATURE, pOrigModule);
                 }
@@ -1314,7 +1324,7 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
             }
 
             // The number of type parameters follows
-            DWORD ntypars = 0;
+            uint32_t ntypars = 0;
             IfFailThrowBF(psig.GetData(&ntypars), BFA_BAD_SIGNATURE, pOrigModule);
 
             DWORD dwAllocaSize = 0;
@@ -1405,20 +1415,31 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
                 break;
             }
 
-            // Group together the current signature type context and substitution chain, which
-            // we may later use to instantiate constraints of type arguments that turn out to be
-            // typespecs, i.e. generic types.
-            InstantiationContext instContext(pTypeContext, pSubst);
+            Instantiation genericLoadInst(thisinst, ntypars);
 
-            // Now make the instantiated type
-            // The class loader will check the arity
-            // When we know it was correctly computed at NGen time, we ask the class loader to skip that check.
-            thRet = (ClassLoader::LoadGenericInstantiationThrowing(pGenericTypeModule,
-                                                                   tkGenericType,
-                                                                   Instantiation(thisinst, ntypars),
-                                                                   fLoadTypes, level,
-                                                                   &instContext,
-                                                                   pZapSigContext && pZapSigContext->externalTokens == ZapSig::NormalTokens));
+#ifndef FEATURE_PREJIT // PREJIT doesn't support the volatile update semantics in the interface map that this requires
+            if (pMTInterfaceMapOwner != NULL && genericLoadInst.ContainsAllOneType(pMTInterfaceMapOwner))
+            {
+                thRet = ClassLoader::LoadTypeDefThrowing(pGenericTypeModule, tkGenericType, ClassLoader::ThrowIfNotFound, ClassLoader::PermitUninstDefOrRef, 0, level);
+            }
+            else
+#endif // FEATURE_PREJIT
+            {
+                // Group together the current signature type context and substitution chain, which
+                // we may later use to instantiate constraints of type arguments that turn out to be
+                // typespecs, i.e. generic types.
+                InstantiationContext instContext(pTypeContext, pSubst);
+
+                // Now make the instantiated type
+                // The class loader will check the arity
+                // When we know it was correctly computed at NGen time, we ask the class loader to skip that check.
+                thRet = (ClassLoader::LoadGenericInstantiationThrowing(pGenericTypeModule,
+                                                                    tkGenericType,
+                                                                    genericLoadInst,
+                                                                    fLoadTypes, level,
+                                                                    &instContext,
+                                                                    pZapSigContext && pZapSigContext->externalTokens == ZapSig::NormalTokens));
+            }
             break;
         }
 
@@ -1537,7 +1558,7 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
                     break;
             }
 
-            ULONG rank = 0;
+            uint32_t rank = 0;
             if (typ == ELEMENT_TYPE_ARRAY) {
                 IfFailThrowBF(psig.SkipExactlyOne(), BFA_BAD_SIGNATURE, pOrigModule);
                 IfFailThrowBF(psig.GetData(&rank), BFA_BAD_SIGNATURE, pOrigModule);
@@ -1583,7 +1604,7 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
         case ELEMENT_TYPE_FNPTR:
             {
 #ifndef DACCESS_COMPILE
-                ULONG uCallConv = 0;
+                uint32_t uCallConv = 0;
                 IfFailThrowBF(psig.GetData(&uCallConv), BFA_BAD_SIGNATURE, pOrigModule);
 
                 if ((uCallConv & IMAGE_CEE_CS_CALLCONV_MASK) == IMAGE_CEE_CS_CALLCONV_FIELD)
@@ -1593,12 +1614,12 @@ TypeHandle SigPointer::GetTypeHandleThrowing(
                     THROW_BAD_FORMAT(BFA_FNPTR_CANNOT_BE_GENERIC, pOrigModule);
 
                 // Get arg count;
-                ULONG cArgs = 0;
+                uint32_t cArgs = 0;
                 IfFailThrowBF(psig.GetData(&cArgs), BFA_BAD_SIGNATURE, pOrigModule);
 
-                ULONG cAllocaSize;
-                if (!ClrSafeInt<ULONG>::addition(cArgs, 1, cAllocaSize) ||
-                    !ClrSafeInt<ULONG>::multiply(cAllocaSize, sizeof(TypeHandle), cAllocaSize))
+                uint32_t cAllocaSize;
+                if (!ClrSafeInt<uint32_t>::addition(cArgs, 1, cAllocaSize) ||
+                    !ClrSafeInt<uint32_t>::multiply(cAllocaSize, sizeof(TypeHandle), cAllocaSize))
                 {
                     ThrowHR(COR_E_OVERFLOW);
                 }
@@ -1702,7 +1723,7 @@ TypeHandle SigPointer::GetGenericInstType(Module *        pModule,
     }
     CONTRACTL_END
 
-    Module * pOrigModule = (pZapSigContext != NULL) ? pZapSigContext->pInfoModule : pModule;
+    Module * pOrigModule   = (pZapSigContext != NULL) ? pZapSigContext->pInfoModule : pModule;
 
     CorElementType typ = ELEMENT_TYPE_END;
     IfFailThrowBF(GetElemType(&typ), BFA_BAD_SIGNATURE, pOrigModule);
@@ -1849,7 +1870,7 @@ TypeHandle SigPointer::GetTypeVariable(CorElementType et,
     }
     CONTRACT_END
 
-    DWORD index;
+    uint32_t index;
     if (FAILED(GetData(&index)))
     {
         TypeHandle thNull;
@@ -1945,11 +1966,11 @@ VarKind SigPointer::IsPolyType(const SigTypeContext *pTypeContext) const
             if (FAILED(psig.SkipExactlyOne()))
                 return hasNoVars;
 
-            ULONG ntypars;
+            uint32_t ntypars;
             if(FAILED(psig.GetData(&ntypars)))
                 return hasNoVars;
 
-            for (ULONG i = 0; i < ntypars; i++)
+            for (uint32_t i = 0; i < ntypars; i++)
             {
               k = (VarKind) (psig.IsPolyType(pTypeContext) | k);
               if (FAILED(psig.SkipExactlyOne()))
@@ -1973,7 +1994,7 @@ VarKind SigPointer::IsPolyType(const SigTypeContext *pTypeContext) const
                 return hasNoVars;
 
             // Get arg count;
-            ULONG cArgs;
+            uint32_t cArgs;
             if (FAILED(psig.GetData(&cArgs)))
                 return hasNoVars;
 
@@ -2428,7 +2449,8 @@ SigPointer::PeekElemTypeClosed(
                     return type;
             }
 
-            // intentionally fall through
+            FALLTHROUGH;
+
             case ELEMENT_TYPE_INTERNAL:
             {
                 TypeHandle th;
@@ -2588,7 +2610,7 @@ UINT MetaSig::GetElemSize(CorElementType etype, TypeHandle thValueType)
 // Returns size of that element in bytes. This is the minimum size that a
 // field of this type would occupy inside an object.
 //
-UINT SigPointer::SizeOf(Module* pModule, const SigTypeContext *pTypeContext) const
+UINT SigPointer::SizeOf(Module* pModule, const SigTypeContext *pTypeContext, TypeHandle* pTypeHandle) const
 {
     CONTRACTL
     {
@@ -2603,9 +2625,8 @@ UINT SigPointer::SizeOf(Module* pModule, const SigTypeContext *pTypeContext) con
     }
     CONTRACTL_END
 
-    TypeHandle thValueType;
-    CorElementType etype = PeekElemTypeNormalized(pModule, pTypeContext, &thValueType);
-    return MetaSig::GetElemSize(etype, thValueType);
+    CorElementType etype = PeekElemTypeNormalized(pModule, pTypeContext, pTypeHandle);
+    return MetaSig::GetElemSize(etype, *pTypeHandle);
 }
 
 #ifndef DACCESS_COMPILE
@@ -4059,6 +4080,7 @@ MetaSig::CompareElementType(
         }
     } // switch
     // Unreachable
+    UNREACHABLE();
 } // MetaSig::CompareElementType
 #ifdef _PREFAST_
 #pragma warning(pop)
@@ -5118,7 +5140,7 @@ void MetaSig::EnsureSigValueTypesLoaded(MethodDesc *pMD)
     // Skip over calling convention.
     IfFailThrowBF(ptr.GetCallingConv(NULL), BFA_BAD_SIGNATURE, pModule);
 
-    ULONG numArgs = 0;
+    uint32_t numArgs = 0;
     IfFailThrowBF(ptr.GetData(&numArgs), BFA_BAD_SIGNATURE, pModule);
 
     // Force a load of value type arguments.
@@ -5157,14 +5179,14 @@ void MetaSig::CheckSigTypesCanBeLoaded(MethodDesc * pMD)
     // Skip over calling convention.
     IfFailThrowBF(ptr.GetCallingConv(NULL), BFA_BAD_SIGNATURE, pModule);
 
-    ULONG numArgs = 0;
+    uint32_t numArgs = 0;
     IfFailThrowBF(ptr.GetData(&numArgs), BFA_BAD_SIGNATURE, pModule);
 
     // must do a skip so we skip any class tokens associated with the return type
     IfFailThrowBF(ptr.SkipExactlyOne(), BFA_BAD_SIGNATURE, pModule);
 
     // Force a load of value type arguments.
-    for(ULONG i=0; i < numArgs; i++)
+    for(uint32_t i=0; i < numArgs; i++)
     {
         unsigned type = ptr.PeekElemTypeNormalized(pModule,&typeContext);
         if (type == ELEMENT_TYPE_VALUETYPE || type == ELEMENT_TYPE_CLASS)
@@ -5228,132 +5250,6 @@ BOOL MetaSig::IsReturnTypeVoid() const
 }
 
 #ifndef DACCESS_COMPILE
-
-namespace
-{
-    HRESULT GetNameOfTypeRefOrDef(
-        _In_ const Module *pModule,
-        _In_ mdToken token,
-        _Out_ LPCSTR *namespaceOut,
-        _Out_ LPCSTR *nameOut)
-    {
-        CONTRACTL
-        {
-            NOTHROW;
-            GC_NOTRIGGER;
-            FORBID_FAULT;
-            MODE_ANY;
-        }
-        CONTRACTL_END
-
-        IMDInternalImport *pInternalImport = pModule->GetMDImport();
-        if (TypeFromToken(token) == mdtTypeDef)
-        {
-            HRESULT hr = pInternalImport->GetNameOfTypeDef(token, nameOut, namespaceOut);
-            if (FAILED(hr))
-                return hr;
-        }
-        else if (TypeFromToken(token) == mdtTypeRef)
-        {
-            HRESULT hr = pInternalImport->GetNameOfTypeRef(token, namespaceOut, nameOut);
-            if (FAILED(hr))
-                return hr;
-        }
-        else
-        {
-            return E_INVALIDARG;
-        }
-
-        return S_OK;
-    }
-}
-
-//----------------------------------------------------------
-// Returns the unmanaged calling convention.
-//----------------------------------------------------------
-/*static*/
-HRESULT
-MetaSig::TryGetUnmanagedCallingConventionFromModOpt(
-    _In_ Module *pModule,
-    _In_ PCCOR_SIGNATURE pSig,
-    _In_ ULONG cSig,
-    _Out_ CorUnmanagedCallingConvention *callConvOut,
-    _Out_ UINT *errorResID)
-{
-    CONTRACTL
-    {
-        NOTHROW;
-        GC_NOTRIGGER;
-        FORBID_FAULT;
-        MODE_ANY;
-        PRECONDITION(callConvOut != NULL);
-        PRECONDITION(errorResID != NULL);
-    }
-    CONTRACTL_END
-
-    // Instantiations aren't relevant here
-    MetaSig msig(pSig, cSig, pModule, NULL);
-    PCCOR_SIGNATURE pWalk = msig.m_pRetType.GetPtr();
-    _ASSERTE(pWalk <= pSig + cSig);
-
-    *callConvOut = (CorUnmanagedCallingConvention)0;
-    bool found = false;
-    while ((pWalk < (pSig + cSig)) && ((*pWalk == ELEMENT_TYPE_CMOD_OPT) || (*pWalk == ELEMENT_TYPE_CMOD_REQD)))
-    {
-        BOOL fIsOptional = (*pWalk == ELEMENT_TYPE_CMOD_OPT);
-
-        pWalk++;
-        if (pWalk + CorSigUncompressedDataSize(pWalk) > pSig + cSig)
-        {
-            *errorResID = BFA_BAD_SIGNATURE;
-            return COR_E_BADIMAGEFORMAT; // Bad formatting
-        }
-
-        mdToken tk;
-        pWalk += CorSigUncompressToken(pWalk, &tk);
-
-        if (!fIsOptional)
-            continue;
-
-        LPCSTR typeNamespace;
-        LPCSTR typeName;
-
-        // Check for CallConv types specified in modopt
-        if (FAILED(GetNameOfTypeRefOrDef(pModule, tk, &typeNamespace, &typeName)))
-            continue;
-
-        if (::strcmp(typeNamespace, CMOD_CALLCONV_NAMESPACE) != 0)
-            continue;
-
-        const struct {
-            LPCSTR name;
-            CorUnmanagedCallingConvention value;
-        } knownCallConvs[] = {
-            { CMOD_CALLCONV_NAME_CDECL,     IMAGE_CEE_UNMANAGED_CALLCONV_C },
-            { CMOD_CALLCONV_NAME_STDCALL,   IMAGE_CEE_UNMANAGED_CALLCONV_STDCALL },
-            { CMOD_CALLCONV_NAME_THISCALL,  IMAGE_CEE_UNMANAGED_CALLCONV_THISCALL },
-            { CMOD_CALLCONV_NAME_FASTCALL,  IMAGE_CEE_UNMANAGED_CALLCONV_FASTCALL } };
-
-        for (const auto &callConv : knownCallConvs)
-        {
-            // Look for a recognized calling convention in metadata.
-            if (::strcmp(typeName, callConv.name) == 0)
-            {
-                // Error if there are multiple recognized calling conventions
-                if (found)
-                {
-                    *errorResID = IDS_EE_MULTIPLE_CALLCONV_UNSUPPORTED;
-                    return COR_E_INVALIDPROGRAM;
-                }
-
-                *callConvOut = callConv.value;
-                found = true;
-            }
-        }
-    }
-
-    return found ? S_OK : S_FALSE;
-}
 
 //---------------------------------------------------------------------------------------
 //

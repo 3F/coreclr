@@ -173,7 +173,7 @@ BOOL ClrVirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWO
         CONTRACT_VIOLATION(ThrowsViolation);
 
         // Get reference to MSCORWKS image in memory...
-        PEDecoder pe(g_hThisInst);
+        PEDecoder pe(GetClrModuleBase());
 
         // Find the UEF section from the image
         IMAGE_SECTION_HEADER* pUEFSection = pe.FindSection(CLR_UEF_SECTION_NAME);
@@ -274,7 +274,7 @@ BOOL __SwitchToThread (DWORD dwSleepMSec, DWORD dwSwitchCount)
         NOTHROW;
         GC_NOTRIGGER;
         MODE_ANY;
-        PRECONDITION(dwSleepMSec < 10000 || GetThread() == NULL || !GetThread()->PreemptiveGCDisabled());
+        PRECONDITION(dwSleepMSec < 10000 || GetThreadNULLOk() == NULL || !GetThread()->PreemptiveGCDisabled());
     }
     CONTRACTL_END;
 

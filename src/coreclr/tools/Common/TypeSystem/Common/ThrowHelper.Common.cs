@@ -22,6 +22,11 @@ namespace Internal.TypeSystem
             ThrowTypeLoadException(ExceptionStringID.ClassLoadGeneral, Format.Type(@namespace, name), Format.Module(module));
         }
 
+        public static void ThrowTypeLoadException(string @namespace, string name, string moduleName)
+        {
+            ThrowTypeLoadException(ExceptionStringID.ClassLoadGeneral, Format.Type(@namespace, name), moduleName);
+        }
+
         [System.Diagnostics.DebuggerHidden]
         public static void ThrowTypeLoadException(TypeDesc type)
         {
@@ -77,7 +82,7 @@ namespace Internal.TypeSystem
 
             public static string Type(string @namespace, string name)
             {
-                return String.IsNullOrEmpty(@namespace) ? name : @namespace + "." + name;
+                return string.IsNullOrEmpty(@namespace) ? name : @namespace + "." + name;
             }
 
             public static string Field(TypeDesc owningType, string fieldName)

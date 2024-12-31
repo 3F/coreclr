@@ -27,7 +27,7 @@ set(SOURCES
 if (CLR_CMAKE_TARGET_ARCH_AMD64 AND CLR_CMAKE_TARGET_WIN32)
   set ( SOURCES
     ${SOURCES}
-    ../vxsort/isa_detection_dummy.cpp
+    ../vxsort/isa_detection.cpp
     ../vxsort/do_vxsort_avx2.cpp
     ../vxsort/do_vxsort_avx512.cpp
     ../vxsort/machine_traits.avx2.cpp
@@ -47,6 +47,8 @@ if(CLR_CMAKE_TARGET_WIN32)
     advapi32.lib)
 endif(CLR_CMAKE_TARGET_WIN32)
 
+add_definitions(-DVERIFY_HEAP)
+
 if(CLR_CMAKE_TARGET_WIN32)
     list(APPEND SOURCES
         ../windows/gcenv.windows.cpp)
@@ -56,7 +58,7 @@ else()
         ../gcenv.unix.cpp)
 endif()
 
-_add_executable(gcsample
+add_executable_clr(gcsample
     ${SOURCES}
 )
 

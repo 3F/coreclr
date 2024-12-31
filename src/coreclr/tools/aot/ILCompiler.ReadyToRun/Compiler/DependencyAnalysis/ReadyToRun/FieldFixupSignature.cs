@@ -41,20 +41,31 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
 
                 EcmaModule targetModule = factory.SignatureContext.GetTargetModule(_fieldDesc);
                 SignatureContext innerContext = dataBuilder.EmitFixup(factory, _fixupKind, targetModule, factory.SignatureContext);
+                uint baseOffset = 0;
+                uint fieldOffset = (uint)_fieldDesc.Offset.AsInt;
 
                 if (_fixupKind == ReadyToRunFixupKind.Verify_FieldOffset)
                 {
                     TypeDesc baseType = _fieldDesc.OwningType.BaseType;
-                    if ((_fieldDesc.OwningType.BaseType != null) && !_fieldDesc.IsStatic && !_fieldDesc.OwningType.IsValueType)
-                        dataBuilder.EmitUInt((uint)_fieldDesc.OwningType.BaseType.InstanceByteCount.AsInt);
-                    else
-                        dataBuilder.EmitUInt(0);
+                    if ((_fieldDesc.OwningType.BaseType != null)
+                        && !_fieldDesc.IsStatic
+                        && !_fieldDesc.OwningType.IsValueType)
+                    {
+                        MetadataType owningType = (MetadataType)_fieldDesc.OwningType;
+                        baseOffset = (uint)owningType.FieldBaseOffset().AsInt;
+                        if (factory.CompilationModuleGroup.NeedsAlignmentBetweenBaseTypeAndDerived((MetadataType)baseType, owningType))
+                        {
+                            fieldOffset -= baseOffset;
+                            baseOffset = 0;
+                        }
+                    }
+                    dataBuilder.EmitUInt(baseOffset);
                 }
 
                 if ((_fixupKind == ReadyToRunFixupKind.Check_FieldOffset) ||
                     (_fixupKind == ReadyToRunFixupKind.Verify_FieldOffset))
                 {
-                    dataBuilder.EmitUInt((uint)_fieldDesc.Offset.AsInt);
+                    dataBuilder.EmitUInt(fieldOffset);
                 }
 
                 dataBuilder.EmitFieldSignature(_fieldDesc, innerContext);
@@ -66,7 +77,8 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
         public override void AppendMangledName(NameMangler nameMangler, Utf8StringBuilder sb)
         {
             sb.Append(nameMangler.CompilationUnitPrefix);
-            sb.Append($@"TypeFixupSignature({_fixupKind.ToString()}): {_fieldDesc.ToString()}");
+            sb.Append($@"FieldFixupSignature({_fixupKind.ToString()}): ");
+            sb.Append(nameMangler.GetMangledFieldName(_fieldDesc));
         }
 
         public override int CompareToImpl(ISortableNode other, CompilerComparer comparer)

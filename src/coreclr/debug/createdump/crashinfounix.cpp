@@ -3,6 +3,12 @@
 
 #include "createdump.h"
 
+#ifndef PT_ARM_EXIDX
+#define PT_ARM_EXIDX   0x70000001      /* See llvm ELF.h */
+#endif
+
+extern CrashInfo* g_crashInfo;
+
 bool GetStatus(pid_t pid, pid_t* ppid, pid_t* tgid, std::string* name);
 
 bool
@@ -14,7 +20,7 @@ CrashInfo::Initialize()
     m_fd = open(memPath, O_RDONLY);
     if (m_fd == -1)
     {
-        fprintf(stderr, "open(%s) FAILED %d (%s)\n", memPath, errno, strerror(errno));
+        printf_error("open(%s) FAILED %d (%s)\n", memPath, errno, strerror(errno));
         return false;
     }
     // Get the process info
@@ -58,7 +64,7 @@ CrashInfo::EnumerateAndSuspendThreads()
     DIR* taskDir = opendir(taskPath);
     if (taskDir == nullptr)
     {
-        fprintf(stderr, "opendir(%s) FAILED %s\n", taskPath, strerror(errno));
+        printf_error("opendir(%s) FAILED %s\n", taskPath, strerror(errno));
         return false;
     }
 
@@ -76,7 +82,7 @@ CrashInfo::EnumerateAndSuspendThreads()
             }
             else
             {
-                fprintf(stderr, "ptrace(ATTACH, %d) FAILED %s\n", tid, strerror(errno));
+                printf_error("ptrace(ATTACH, %d) FAILED %s\n", tid, strerror(errno));
                 closedir(taskDir);
                 return false;
             }
@@ -102,7 +108,7 @@ CrashInfo::GetAuxvEntries()
     int fd = open(auxvPath, O_RDONLY, 0);
     if (fd == -1)
     {
-        fprintf(stderr, "open(%s) FAILED %s\n", auxvPath, strerror(errno));
+        printf_error("open(%s) FAILED %s\n", auxvPath, strerror(errno));
         return false;
     }
     bool result = false;
@@ -159,7 +165,7 @@ CrashInfo::EnumerateModuleMappings()
     FILE* mapsFile = fopen(mapPath, "r");
     if (mapsFile == nullptr)
     {
-        fprintf(stderr, "fopen(%s) FAILED %s\n", mapPath, strerror(errno));
+        printf_error("fopen(%s) FAILED %s\n", mapPath, strerror(errno));
         return false;
     }
     // linuxGateAddress is the beginning of the kernel's mapping of
@@ -260,25 +266,37 @@ CrashInfo::GetDSOInfo()
 void
 CrashInfo::VisitModule(uint64_t baseAddress, std::string& moduleName)
 {
-    if (baseAddress == 0 || baseAddress == m_auxvValues[AT_SYSINFO_EHDR] || baseAddress == m_auxvValues[AT_BASE]) {
+    if (baseAddress == 0 || baseAddress == m_auxvValues[AT_SYSINFO_EHDR]) {
         return;
     }
+    AddModuleInfo(false, baseAddress, nullptr, moduleName);
     if (m_coreclrPath.empty())
     {
-        size_t last = moduleName.rfind(MAKEDLLNAME_A("coreclr"));
+        size_t last = moduleName.rfind(DIRECTORY_SEPARATOR_STR_A MAKEDLLNAME_A("coreclr"));
         if (last != std::string::npos) {
-            m_coreclrPath = moduleName.substr(0, last);
+            m_coreclrPath = moduleName.substr(0, last + 1);
 
             // Now populate the elfreader with the runtime module info and
             // lookup the DAC table symbol to ensure that all the memory
             // necessary is in the core dump.
             if (PopulateForSymbolLookup(baseAddress)) {
                 uint64_t symbolOffset;
-                TryLookupSymbol("g_dacTable", &symbolOffset);
+                if (!TryLookupSymbol("g_dacTable", &symbolOffset))
+                {
+                    TRACE("TryLookupSymbol(g_dacTable) FAILED\n");
+                }
             }
         }
     }
     EnumerateProgramHeaders(baseAddress);
+}
+
+// Helper for PAL_GetUnwindInfoSize. Reads memory directly without adding it to the memory region list.
+BOOL
+ReadMemoryAdapter(PVOID address, PVOID buffer, SIZE_T size)
+{
+    size_t read = 0;
+    return g_crashInfo->ReadProcessMemory(address, buffer, size, &read);
 }
 
 //
@@ -292,15 +310,42 @@ CrashInfo::VisitProgramHeader(uint64_t loadbias, uint64_t baseAddress, Phdr* phd
     {
     case PT_DYNAMIC:
     case PT_NOTE:
-    case PT_GNU_EH_FRAME:
-        if (phdr->p_vaddr != 0 && phdr->p_memsz != 0) {
+#if defined(TARGET_ARM)
+    case PT_ARM_EXIDX:
+#endif
+        if (phdr->p_vaddr != 0 && phdr->p_memsz != 0)
+        {
             InsertMemoryRegion(loadbias + phdr->p_vaddr, phdr->p_memsz);
         }
         break;
 
+    case PT_GNU_EH_FRAME:
+        if (phdr->p_vaddr != 0 && phdr->p_memsz != 0)
+        {
+            uint64_t ehFrameHdrStart = loadbias + phdr->p_vaddr;
+            uint64_t ehFrameHdrSize = phdr->p_memsz;
+            TRACE("VisitProgramHeader: ehFrameHdrStart %016llx ehFrameHdrSize %08llx\n", ehFrameHdrStart, ehFrameHdrSize);
+            InsertMemoryRegion(ehFrameHdrStart, ehFrameHdrSize);
+
+            uint64_t ehFrameStart;
+            uint64_t ehFrameSize;
+            if (PAL_GetUnwindInfoSize(baseAddress, ehFrameHdrStart, ReadMemoryAdapter, &ehFrameStart, &ehFrameSize))
+            {
+                TRACE("VisitProgramHeader: ehFrameStart %016llx ehFrameSize %08llx\n", ehFrameStart, ehFrameSize);
+                if (ehFrameStart != 0 && ehFrameSize != 0)
+                {
+                    InsertMemoryRegion(ehFrameStart, ehFrameSize);
+                }
+            }
+            else
+            {
+                TRACE("VisitProgramHeader: PAL_GetUnwindInfoSize FAILED\n");
+            }
+        }
+        break;
+
     case PT_LOAD:
-        MemoryRegion region(0, loadbias + phdr->p_vaddr, loadbias + phdr->p_vaddr + phdr->p_memsz, baseAddress);
-        m_moduleAddresses.insert(region);
+        AddModuleAddressRange(loadbias + phdr->p_vaddr, loadbias + phdr->p_vaddr + phdr->p_memsz, baseAddress);
         break;
     }
 }
@@ -374,7 +419,7 @@ GetStatus(pid_t pid, pid_t* ppid, pid_t* tgid, std::string* name)
     FILE *statusFile = fopen(statusPath, "r");
     if (statusFile == nullptr)
     {
-        fprintf(stderr, "GetStatus fopen(%s) FAILED\n", statusPath);
+        printf_error("GetStatus fopen(%s) FAILED\n", statusPath);
         return false;
     }
 
@@ -410,4 +455,14 @@ GetStatus(pid_t pid, pid_t* ppid, pid_t* tgid, std::string* name)
     free(line);
     fclose(statusFile);
     return true;
+}
+
+void
+ModuleInfo::LoadModule()
+{
+    if (m_module == nullptr)
+    {
+        m_module = dlopen(m_moduleName.c_str(), RTLD_LAZY);
+        m_localBaseAddress = ((struct link_map*)m_module)->l_addr;
+    }
 }

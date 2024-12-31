@@ -72,8 +72,8 @@ namespace BINDER_SPACE
         LPCWSTR GetSimpleName();
 
         STDMETHOD(BindAssemblyByName)(
-                IAssemblyName * pIAssemblyName,
-                ICLRPrivAssembly ** ppAssembly);
+            /* [in] */ AssemblyNameData *pAssemblyNameData,
+            /* [retval][out] */ ICLRPrivAssembly **ppAssembly);
 
         STDMETHOD(GetAvailableImageTypes)(PDWORD pdwImageTypes);
 
@@ -116,7 +116,7 @@ namespace BINDER_SPACE
 #ifndef CROSSGEN_COMPILE
     protected:
 #endif
-        // Asssembly Flags
+        // Assembly Flags
         enum
         {
             FLAG_NONE = 0x00,

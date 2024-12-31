@@ -53,11 +53,15 @@ namespace ILCompiler.DependencyAnalysis
 
         public TargetDetails Target { get; }
 
-        public CompilationModuleGroup CompilationModuleGroup { get; }
+        public ReadyToRunCompilationModuleGroupBase CompilationModuleGroup { get; }
+
+        public ProfileDataManager ProfileDataManager { get; }
 
         public NameMangler NameMangler { get; }
 
         public MetadataManager MetadataManager { get; }
+
+        public CompositeImageSettings CompositeImageSettings { get; set; }
 
         public bool MarkingComplete => _markingComplete;
 
@@ -145,7 +149,8 @@ namespace ILCompiler.DependencyAnalysis
 
         public NodeFactory(
             CompilerTypeSystemContext context,
-            CompilationModuleGroup compilationModuleGroup,
+            ReadyToRunCompilationModuleGroupBase compilationModuleGroup,
+            ProfileDataManager profileDataManager,
             NameMangler nameMangler,
             CopiedCorHeaderNode corHeaderNode,
             DebugDirectoryNode debugDirectoryNode,
@@ -154,12 +159,13 @@ namespace ILCompiler.DependencyAnalysis
         {
             TypeSystemContext = context;
             CompilationModuleGroup = compilationModuleGroup;
+            ProfileDataManager = profileDataManager;
             Target = context.Target;
             NameMangler = nameMangler;
             MetadataManager = new ReadyToRunTableManager(context);
             CopiedCorHeaderNode = corHeaderNode;
             DebugDirectoryNode = debugDirectoryNode;
-            Resolver = new ModuleTokenResolver(compilationModuleGroup, TypeSystemContext);
+            Resolver = compilationModuleGroup.Resolver;
             Header = new GlobalHeaderNode(Target, flags);
             if (!win32Resources.IsEmpty)
                 Win32ResourcesNode = new Win32ResourcesNode(win32Resources);
@@ -211,6 +217,11 @@ namespace ILCompiler.DependencyAnalysis
                 return new Import(EagerImports, new ReadyToRunHelperSignature(helperId));
             });
 
+            _importThunks = new NodeCache<ImportThunkKey, ImportThunk>(key =>
+            {
+                return new ImportThunk(this, key.Helper, key.ContainingImportSection, key.UseVirtualCall);
+            });
+
             _importMethods = new NodeCache<TypeAndMethod, IMethodNode>(CreateMethodEntrypoint);
 
             _localMethodCache = new NodeCache<MethodDesc, MethodWithGCInfo>(key =>
@@ -232,11 +243,16 @@ namespace ILCompiler.DependencyAnalysis
                 return new TypeFixupSignature(key.FixupKind, key.TypeDesc);
             });
 
+            _virtualResolutionSignatures = new NodeCache<VirtualResolutionFixupSignatureFixupKey, VirtualResolutionFixupSignature>(key =>
+            {
+                return new ReadyToRun.VirtualResolutionFixupSignature(key.FixupKind, key.DeclMethod, key.ImplType, key.ImplMethod);
+            });
+
             _dynamicHelperCellCache = new NodeCache<DynamicHelperCellKey, ISymbolNode>(key =>
             {
                 return new DelayLoadHelperMethodImport(
                     this,
-                    DispatchImports,
+                    DispatchImports, 
                     ReadyToRunHelper.DelayLoad_Helper_Obj,
                     key.Method,
                     useVirtualCall: false,
@@ -288,6 +304,8 @@ namespace ILCompiler.DependencyAnalysis
             });
         }
 
+        public int CompilationCurrentPhase { get; private set; }
+
         public SignatureContext SignatureContext;
 
         public ModuleTokenResolver Resolver;
@@ -312,6 +330,8 @@ namespace ILCompiler.DependencyAnalysis
         public ManifestMetadataTableNode ManifestMetadataTable;
 
         public ImportSectionsTableNode ImportSectionsTable;
+
+        public InstrumentationDataTableNode InstrumentationDataTable;
 
         public Import ModuleImport;
 
@@ -396,7 +416,7 @@ namespace ILCompiler.DependencyAnalysis
                 EcmaModule module = ((EcmaMethod)method.GetTypicalMethodDefinition()).Module;
                 ModuleToken moduleToken = Resolver.GetModuleTokenForMethod(method, throwIfNotFound: true);
 
-                IMethodNode methodNodeDebug = MethodEntrypoint(new MethodWithToken(method, moduleToken, constrainedType: null, unboxing: false), false, false);
+                IMethodNode methodNodeDebug = MethodEntrypoint(new MethodWithToken(method, moduleToken, constrainedType: null, unboxing: false, context: null), false, false);
                 MethodWithGCInfo methodCodeNodeDebug = methodNodeDebug as MethodWithGCInfo;
                 if (methodCodeNodeDebug == null && methodNodeDebug is DelayLoadMethodImport DelayLoadMethodImport)
                 {
@@ -489,8 +509,95 @@ namespace ILCompiler.DependencyAnalysis
             return _typeSignatures.GetOrAdd(fixupKey);
         }
 
+        private struct VirtualResolutionFixupSignatureFixupKey : IEquatable<VirtualResolutionFixupSignatureFixupKey>
+        {
+            public readonly ReadyToRunFixupKind FixupKind;
+            public readonly MethodWithToken DeclMethod;
+            public readonly TypeDesc ImplType;
+            public readonly MethodWithToken ImplMethod;
+
+            public VirtualResolutionFixupSignatureFixupKey(ReadyToRunFixupKind fixupKind, MethodWithToken declMethod, TypeDesc implType, MethodWithToken implMethod)
+            {
+                FixupKind = fixupKind;
+                DeclMethod = declMethod;
+                ImplType = implType;
+                ImplMethod = implMethod;
+            }
+
+            public bool Equals(VirtualResolutionFixupSignatureFixupKey other)
+            {
+                return FixupKind == other.FixupKind && DeclMethod.Equals(other.DeclMethod) && ImplType == other.ImplType && 
+                    ((ImplMethod == null && other.ImplMethod == null) || (ImplMethod != null && ImplMethod.Equals(other.ImplMethod)));
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is VirtualResolutionFixupSignatureFixupKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                if (ImplMethod != null)
+                    return HashCode.Combine(FixupKind, DeclMethod, ImplType, ImplMethod);
+                else
+                    return HashCode.Combine(FixupKind, DeclMethod, ImplType);
+            }
+
+            public override string ToString() => $"'{FixupKind}' '{DeclMethod}' on '{ImplType}' results in '{(ImplMethod != null ? ImplMethod.ToString() : "null")}'";
+        }
+
+        private NodeCache<VirtualResolutionFixupSignatureFixupKey, VirtualResolutionFixupSignature> _virtualResolutionSignatures;
+
+        public VirtualResolutionFixupSignature VirtualResolutionFixupSignature(ReadyToRunFixupKind fixupKind, MethodWithToken declMethod, TypeDesc implType, MethodWithToken implMethod)
+        {
+            return _virtualResolutionSignatures.GetOrAdd(new VirtualResolutionFixupSignatureFixupKey(fixupKind, declMethod, implType, implMethod));
+        }
+
+        private struct ImportThunkKey : IEquatable<ImportThunkKey>
+        {
+            public readonly ReadyToRunHelper Helper;
+            public readonly ImportSectionNode ContainingImportSection;
+            public readonly bool UseVirtualCall;
+
+            public ImportThunkKey(ReadyToRunHelper helper, ImportSectionNode containingImportSection, bool useVirtualCall)
+            {
+                Helper = helper;
+                ContainingImportSection = containingImportSection;
+                UseVirtualCall = useVirtualCall;
+            }
+
+            public bool Equals(ImportThunkKey other)
+            {
+                return Helper == other.Helper &&
+                    ContainingImportSection == other.ContainingImportSection &&
+                    UseVirtualCall == other.UseVirtualCall;
+            }
+
+            public override bool Equals(object obj)
+            {
+                return obj is ImportThunkKey other && Equals(other);
+            }
+
+            public override int GetHashCode()
+            {
+                return unchecked(31 * Helper.GetHashCode() +
+                    31 * ContainingImportSection.GetHashCode() +
+                    31 * UseVirtualCall.GetHashCode());
+            }
+        }
+
+        private NodeCache<ImportThunkKey, ImportThunk> _importThunks;
+
+        public ImportThunk ImportThunk(ReadyToRunHelper helper, ImportSectionNode containingImportSection, bool useVirtualCall)
+        {
+            ImportThunkKey thunkKey = new ImportThunkKey(helper, containingImportSection, useVirtualCall);
+            return _importThunks.GetOrAdd(thunkKey);
+        }
+
         public void AttachToDependencyGraph(DependencyAnalyzerBase<NodeFactory> graph)
         {
+            graph.ComputingDependencyPhaseChange += Graph_ComputingDependencyPhaseChange;
+
             var compilerIdentifierNode = new CompilerIdentifierNode(Target);
             Header.Add(Internal.Runtime.ReadyToRunSectionType.CompilerIdentifier, compilerIdentifierNode, compilerIdentifierNode);
 
@@ -513,6 +620,9 @@ namespace ILCompiler.DependencyAnalysis
             ManifestMetadataTable = new ManifestMetadataTableNode(this);
             Header.Add(Internal.Runtime.ReadyToRunSectionType.ManifestMetadata, ManifestMetadataTable, ManifestMetadataTable);
             Resolver.SetModuleIndexLookup(ManifestMetadataTable.ModuleToIndex);
+
+            ManifestAssemblyMvidHeaderNode mvidTableNode = new ManifestAssemblyMvidHeaderNode(ManifestMetadataTable);
+            Header.Add(Internal.Runtime.ReadyToRunSectionType.ManifestAssemblyMvids, mvidTableNode, mvidTableNode);
 
             AssemblyTableNode assemblyTable = null;
 
@@ -582,15 +692,38 @@ namespace ILCompiler.DependencyAnalysis
             {
                 Import personalityRoutineImport = new Import(EagerImports, new ReadyToRunHelperSignature(
                     ReadyToRunHelper.PersonalityRoutine));
-                PersonalityRoutine = new ImportThunk(
-                    ReadyToRunHelper.PersonalityRoutine, this, personalityRoutineImport, useVirtualCall: false);
+                PersonalityRoutine = new ImportThunk(this,
+                    ReadyToRunHelper.PersonalityRoutine, EagerImports, useVirtualCall: false);
                 graph.AddRoot(PersonalityRoutine, "Personality routine is faster to root early rather than referencing it from each unwind info");
 
                 Import filterFuncletPersonalityRoutineImport = new Import(EagerImports, new ReadyToRunHelperSignature(
                     ReadyToRunHelper.PersonalityRoutineFilterFunclet));
-                FilterFuncletPersonalityRoutine = new ImportThunk(
-                    ReadyToRunHelper.PersonalityRoutineFilterFunclet, this, filterFuncletPersonalityRoutineImport, useVirtualCall: false);
+                FilterFuncletPersonalityRoutine = new ImportThunk(this,
+                    ReadyToRunHelper.PersonalityRoutineFilterFunclet, EagerImports, useVirtualCall: false);
                 graph.AddRoot(FilterFuncletPersonalityRoutine, "Filter funclet personality routine is faster to root early rather than referencing it from each unwind info");
+            }
+
+            if ((ProfileDataManager != null) && (ProfileDataManager.EmbedPgoDataInR2RImage))
+            {
+                // Profile instrumentation data attaches here
+                HashSet<MethodDesc> methodsToInsertInstrumentationDataFor = new HashSet<MethodDesc>();
+                foreach (EcmaModule inputModule in CompilationModuleGroup.CompilationModuleSet)
+                {
+                    foreach (MethodDesc method in ProfileDataManager.GetMethodsForModuleDesc(inputModule))
+                    {
+                        if (ProfileDataManager[method].SchemaData != null)
+                        {
+                            methodsToInsertInstrumentationDataFor.Add(method);
+                        }
+                    }
+                }
+                if (methodsToInsertInstrumentationDataFor.Count != 0)
+                {
+                    MethodDesc[] methodsToInsert = methodsToInsertInstrumentationDataFor.ToArray();
+                    methodsToInsert.MergeSort(new TypeSystemComparer().Compare);
+                    InstrumentationDataTable = new InstrumentationDataTableNode(this, methodsToInsert, ProfileDataManager);
+                    Header.Add(Internal.Runtime.ReadyToRunSectionType.PgoInstrumentationData, InstrumentationDataTable, InstrumentationDataTable);
+                }
             }
 
             MethodImports = new ImportSectionNode(
@@ -654,6 +787,11 @@ namespace ILCompiler.DependencyAnalysis
                 graph.AddRoot(Win32ResourcesNode, "Win32 Resources are placed if not empty");
 
             MetadataManager.AttachToDependencyGraph(graph);
+        }
+
+        private void Graph_ComputingDependencyPhaseChange(int newPhase)
+        {
+            CompilationCurrentPhase = newPhase;
         }
 
         private ReadyToRunHelper GetGenericStaticHelper(ReadyToRunHelperId helperId)

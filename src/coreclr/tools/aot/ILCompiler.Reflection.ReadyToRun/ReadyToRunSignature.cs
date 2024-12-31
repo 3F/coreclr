@@ -16,8 +16,24 @@ namespace ILCompiler.Reflection.ReadyToRun
     /// <summary>
     /// This represents all possible signatures that is 
     /// </summary>
-    public class ReadyToRunSignature
+    public abstract class ReadyToRunSignature
     {
+        private SignatureDecoder _decoder;
+        public ReadyToRunFixupKind FixupKind {get;private set;}
+        public ReadyToRunSignature(SignatureDecoder decoder, ReadyToRunFixupKind fixupKind)
+        {
+            _decoder = decoder;
+            FixupKind = fixupKind;
+        }
+
+        public string ToString(SignatureFormattingOptions options)
+        {
+            StringBuilder builder = new StringBuilder();
+            _decoder.Reset();
+            _decoder.Context.Options = options;
+            _decoder.ReadR2RSignature(builder);
+            return builder.ToString();
+        }
     }
 
     /// <summary>
@@ -25,16 +41,27 @@ namespace ILCompiler.Reflection.ReadyToRun
     /// </summary>
     public class TodoSignature : ReadyToRunSignature
     {
+        public TodoSignature(SignatureDecoder decoder, ReadyToRunFixupKind fixupKind) : base(decoder, fixupKind)
+        {
+        }
     }
 
     public class MethodDefEntrySignature : ReadyToRunSignature
     {
         public uint MethodDefToken { get; set; }
+
+        public MethodDefEntrySignature(SignatureDecoder decoder) : base(decoder, ReadyToRunFixupKind.MethodEntry_DefToken)
+        {
+        }
     }
 
     public class MethodRefEntrySignature : ReadyToRunSignature
     {
         public uint MethodRefToken { get; set; }
+
+        public MethodRefEntrySignature(SignatureDecoder decoder) : base(decoder, ReadyToRunFixupKind.MethodEntry_RefToken)
+        {
+        }
     }
 
     /// <summary>
@@ -64,11 +91,12 @@ namespace ILCompiler.Reflection.ReadyToRun
             return formatter.EmitHandleName(handle, namespaceQualified, owningTypeOverride, signaturePrefix);
         }
 
-        public static string FormatSignature(IAssemblyResolver assemblyResolver, ReadyToRunReader r2rReader, int imageOffset, out ReadyToRunSignature result)
+        public static ReadyToRunSignature FormatSignature(IAssemblyResolver assemblyResolver, ReadyToRunReader r2rReader, int imageOffset)
         {
-            SignatureDecoder decoder = new SignatureDecoder(assemblyResolver, r2rReader.GetGlobalMetadataReader(), r2rReader, imageOffset);
-            string answer = decoder.ReadR2RSignature(out result);
-            return answer;
+            SignatureFormattingOptions dummyOptions = new SignatureFormattingOptions();
+            SignatureDecoder decoder = new SignatureDecoder(assemblyResolver, dummyOptions, r2rReader.GetGlobalMetadata()?.MetadataReader, r2rReader, imageOffset);
+            StringBuilder dummyBuilder = new StringBuilder();
+            return decoder.ReadR2RSignature(dummyBuilder);
         }
 
         /// <summary>
@@ -406,6 +434,11 @@ namespace ILCompiler.Reflection.ReadyToRun
         private int _offset;
 
         /// <summary>
+        /// Offset within the image file when the object is constructed.
+        /// </summary>
+        private readonly int _originalOffset;
+
+        /// <summary>
         /// Query signature parser for the current offset.
         /// </summary>
         public int Offset => _offset;
@@ -424,15 +457,19 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// </summary>
         /// <param name="r2rReader">R2RReader object representing the PE file containing the ECMA metadata</param>
         /// <param name="offset">Signature offset within the PE file byte array</param>
-        public R2RSignatureDecoder(IR2RSignatureTypeProvider<TType, TMethod, TGenericContext> provider, TGenericContext context, MetadataReader metadataReader, ReadyToRunReader r2rReader, int offset)
+        public R2RSignatureDecoder(IR2RSignatureTypeProvider<TType, TMethod, TGenericContext> provider, TGenericContext context, MetadataReader metadataReader, ReadyToRunReader r2rReader, int offset, bool skipOverrideMetadataReader = false)
         {
-            _metadataReader = metadataReader;
-            _outerReader = metadataReader;
             Context = context;
             _provider = provider;
             _image = r2rReader.Image;
-            _offset = offset;
+            _originalOffset = _offset = offset;
             _contextReader = r2rReader;
+            MetadataReader moduleOverrideMetadataReader = null;
+            if (!skipOverrideMetadataReader)
+                moduleOverrideMetadataReader = TryGetModuleOverrideMetadataReader();
+            _metadataReader = moduleOverrideMetadataReader ?? metadataReader;
+            _outerReader = moduleOverrideMetadataReader ?? metadataReader;
+            Reset();
         }
 
         /// <summary>
@@ -444,15 +481,41 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// <param name="offset">Signature offset within the signature byte array</param>
         /// <param name="outerReader">Metadata reader representing the outer signature context</param>
         /// <param name="contextReader">Top-level signature context reader</param>
-        public R2RSignatureDecoder(IR2RSignatureTypeProvider<TType, TMethod, TGenericContext> provider, TGenericContext context, MetadataReader metadataReader, byte[] signature, int offset, MetadataReader outerReader, ReadyToRunReader contextReader)
+        public R2RSignatureDecoder(IR2RSignatureTypeProvider<TType, TMethod, TGenericContext> provider, TGenericContext context, MetadataReader metadataReader, byte[] signature, int offset, MetadataReader outerReader, ReadyToRunReader contextReader, bool skipOverrideMetadataReader = false)
         {
             Context = context;
             _provider = provider;
-            _metadataReader = metadataReader;
             _image = signature;
-            _offset = offset;
-            _outerReader = outerReader;
+            _originalOffset = _offset = offset;
             _contextReader = contextReader;
+            MetadataReader moduleOverrideMetadataReader = null;
+            if (!skipOverrideMetadataReader)
+                moduleOverrideMetadataReader = TryGetModuleOverrideMetadataReader();
+            _metadataReader = moduleOverrideMetadataReader ?? metadataReader;
+            _outerReader = moduleOverrideMetadataReader ?? outerReader;
+            Reset();
+        }
+
+        private MetadataReader TryGetModuleOverrideMetadataReader()
+        {
+            bool moduleOverride = (ReadByte() & (byte)ReadyToRunFixupKind.ModuleOverride) != 0;
+            // Check first byte for a module override being encoded
+            if (moduleOverride)
+            {
+                int moduleIndex = (int)ReadUInt();
+                IAssemblyMetadata refAsmEcmaReader = _contextReader.OpenReferenceAssembly(moduleIndex);
+                return refAsmEcmaReader.MetadataReader;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Reset the offset back to the point where the decoder is constructed to allow re-decoding the same signature.
+        /// </summary>
+        internal void Reset()
+        {
+            this._offset = _originalOffset;
         }
 
         /// <summary>
@@ -697,8 +760,8 @@ namespace ILCompiler.Reflection.ReadyToRun
                 case CorElementType.ELEMENT_TYPE_MODULE_ZAPSIG:
                     {
                         int moduleIndex = (int)ReadUInt();
-                        MetadataReader refAsmReader = _contextReader.OpenReferenceAssembly(moduleIndex);
-                        var refAsmDecoder = new R2RSignatureDecoder<TType, TMethod, TGenericContext>(_provider, Context, refAsmReader, _image, _offset, _outerReader, _contextReader);
+                        IAssemblyMetadata refAsmReader = _contextReader.OpenReferenceAssembly(moduleIndex);
+                        var refAsmDecoder = new R2RSignatureDecoder<TType, TMethod, TGenericContext>(_provider, Context, refAsmReader.MetadataReader, _image, _offset, _outerReader, _contextReader);
                         var result = refAsmDecoder.ParseType();
                         _offset = refAsmDecoder.Offset;
                         return result;
@@ -746,6 +809,24 @@ namespace ILCompiler.Reflection.ReadyToRun
         {
             uint methodFlags = ReadUInt();
 
+            if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_UpdateContext) != 0)
+            {
+                int moduleIndex = (int)ReadUInt();
+                IAssemblyMetadata refAsmReader = _contextReader.OpenReferenceAssembly(moduleIndex);
+                var refAsmDecoder = new R2RSignatureDecoder<TType, TMethod, TGenericContext>(_provider, Context, refAsmReader.MetadataReader, _image, _offset, _outerReader, _contextReader, skipOverrideMetadataReader: true);
+                var result = refAsmDecoder.ParseMethodWithMethodFlags(methodFlags);
+                _offset = refAsmDecoder.Offset;
+                return result;
+            }
+            else
+            {
+                return ParseMethodWithMethodFlags(methodFlags);
+            }
+        }
+
+
+        private TMethod ParseMethodWithMethodFlags(uint methodFlags)
+        {
             TType owningTypeOverride = default(TType);
             if ((methodFlags & (uint)ReadyToRunMethodSigFlags.READYTORUN_METHOD_SIG_OwnerType) != 0)
             {
@@ -819,15 +900,21 @@ namespace ILCompiler.Reflection.ReadyToRun
     }
     public class TextSignatureDecoderContext
     {
-        public TextSignatureDecoderContext(IAssemblyResolver options)
+        public TextSignatureDecoderContext(IAssemblyResolver assemblyResolver, SignatureFormattingOptions options)
         {
+            AssemblyResolver = assemblyResolver;
             Options = options;
         }
 
         /// <summary>
-        /// Dump options are used to specify details of signature formatting.
+        /// AssemblyResolver is used to find where the dependent assembly are
         /// </summary>
-        public IAssemblyResolver Options { get; }
+        public IAssemblyResolver AssemblyResolver { get; }
+
+        /// <summary>
+        /// SignatureFormattingOptions are used to specify details of signature formatting.
+        /// </summary>
+        public SignatureFormattingOptions Options { get; set;  }
     }
 
     /// <summary>
@@ -924,25 +1011,27 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// <summary>
         /// Construct the signature decoder by storing the image byte array and offset within the array.
         /// </summary>
-        /// <param name="options">Dump options and paths</param>
+        /// <param name="assemblyResolver">Assembly Resolver used to locate dependent assembly</param>
+        /// <param name="options">SignatureFormattingOptions for signature formatting</param>
         /// <param name="r2rReader">R2RReader object representing the PE file containing the ECMA metadata</param>
         /// <param name="offset">Signature offset within the PE file byte array</param>
-        public SignatureDecoder(IAssemblyResolver options, MetadataReader metadataReader, ReadyToRunReader r2rReader, int offset) :
-            base(TextTypeProvider.Singleton, new TextSignatureDecoderContext(options), metadataReader, r2rReader, offset)
+        public SignatureDecoder(IAssemblyResolver assemblyResolver, SignatureFormattingOptions options, MetadataReader metadataReader, ReadyToRunReader r2rReader, int offset) :
+            base(TextTypeProvider.Singleton, new TextSignatureDecoderContext(assemblyResolver, options), metadataReader, r2rReader, offset)
         {
         }
 
         /// <summary>
         /// Construct the signature decoder by storing the image byte array and offset within the array.
         /// </summary>
-        /// <param name="options">Dump options and paths</param>
+        /// <param name="assemblyResolver">Assembly Resolver used to locate dependent assembly</param>
+        /// <param name="options">SignatureFormattingOptions for signature formatting</param>
         /// <param name="metadataReader">Metadata reader for the R2R image</param>
         /// <param name="signature">Signature to parse</param>
         /// <param name="offset">Signature offset within the signature byte array</param>
         /// <param name="outerReader">Metadata reader representing the outer signature context</param>
         /// <param name="contextReader">Top-level signature context reader</param>
-        private SignatureDecoder(IAssemblyResolver options, MetadataReader metadataReader, byte[] signature, int offset, MetadataReader outerReader, ReadyToRunReader contextReader) :
-            base(TextTypeProvider.Singleton, new TextSignatureDecoderContext(options), metadataReader, signature, offset, outerReader, contextReader)
+        private SignatureDecoder(IAssemblyResolver assemblyResolver, SignatureFormattingOptions options, MetadataReader metadataReader, byte[] signature, int offset, MetadataReader outerReader, ReadyToRunReader contextReader) :
+            base(TextTypeProvider.Singleton, new TextSignatureDecoderContext(assemblyResolver, options), metadataReader, signature, offset, outerReader, contextReader)
         {
         }
 
@@ -952,22 +1041,12 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// by custom encoding per fixup type.
         /// </summary>
         /// <returns></returns>
-        public string ReadR2RSignature(out ReadyToRunSignature result)
+        internal ReadyToRunSignature ReadR2RSignature(StringBuilder builder)
         {
-            result = null;
-            StringBuilder builder = new StringBuilder();
             int startOffset = Offset;
-            try
-            {
-                result = ParseSignature(builder);
-                EmitSignatureBinaryFrom(builder, startOffset);
-            }
-            catch (Exception ex)
-            {
-                builder.Append(" - ");
-                builder.Append(ex.Message);
-            }
-            return builder.ToString();
+            ReadyToRunSignature result = ParseSignature(builder);
+            EmitSignatureBinaryFrom(builder, startOffset);
+            return result;
         }
 
         public string ReadTypeSignature()
@@ -1060,17 +1139,15 @@ namespace ILCompiler.Reflection.ReadyToRun
             bool moduleOverride = (fixupType & (byte)ReadyToRunFixupKind.ModuleOverride) != 0;
             SignatureDecoder moduleDecoder = this;
 
-            // Check first byte for a module override being encoded
+            // Check first byte for a module override being encoded. The metadata reader for the module
+            // override is configured in the R2RSignatureDecoder constructor.
             if (moduleOverride)
             {
                 fixupType &= ~(uint)ReadyToRunFixupKind.ModuleOverride;
-                int moduleIndex = (int)ReadUIntAndEmitInlineSignatureBinary(builder);
-                MetadataReader refAsmEcmaReader = _contextReader.OpenReferenceAssembly(moduleIndex);
-                moduleDecoder = new SignatureDecoder(Context.Options, refAsmEcmaReader, _image, Offset, refAsmEcmaReader, _contextReader);
+                ReadUIntAndEmitInlineSignatureBinary(builder);
             }
 
-            ReadyToRunSignature result = moduleDecoder.ParseSignature((ReadyToRunFixupKind)fixupType, builder);
-            UpdateOffset(moduleDecoder.Offset);
+            ReadyToRunSignature result = ParseSignature((ReadyToRunFixupKind)fixupType, builder);
             return result;
         }
 
@@ -1081,7 +1158,7 @@ namespace ILCompiler.Reflection.ReadyToRun
         /// <param name="builder">Output signature builder</param>
         private ReadyToRunSignature ParseSignature(ReadyToRunFixupKind fixupType, StringBuilder builder)
         {
-            ReadyToRunSignature result = new TodoSignature();
+            ReadyToRunSignature result = new TodoSignature(this, fixupType);
             switch (fixupType)
             {
                 case ReadyToRunFixupKind.ThisObjDictionaryLookup:
@@ -1127,14 +1204,14 @@ namespace ILCompiler.Reflection.ReadyToRun
                     uint methodDefToken = ParseMethodDefToken(builder, owningTypeOverride: null);
                     builder.Append(" (METHOD_ENTRY");
                     builder.Append(Context.Options.Naked ? ")" : "_DEF_TOKEN)");
-                    result = new MethodDefEntrySignature { MethodDefToken = methodDefToken };
+                    result = new MethodDefEntrySignature(this) { MethodDefToken = methodDefToken };
                     break;
 
                 case ReadyToRunFixupKind.MethodEntry_RefToken:
                     uint methodRefToken = ParseMethodRefToken(builder, owningTypeOverride: null);
                     builder.Append(" (METHOD_ENTRY");
                     builder.Append(Context.Options.Naked ? ")" : "_REF_TOKEN)");
-                    result = new MethodRefEntrySignature { MethodRefToken = methodRefToken };
+                    result = new MethodRefEntrySignature(this) { MethodRefToken = methodRefToken };
                     break;
 
 
@@ -1293,6 +1370,28 @@ namespace ILCompiler.Reflection.ReadyToRun
                         builder.Append(" (VERIFY_TYPE_LAYOUT)");
                     break;
 
+                case ReadyToRunFixupKind.Check_VirtualFunctionOverride:
+                case ReadyToRunFixupKind.Verify_VirtualFunctionOverride:
+                    ReadyToRunVirtualFunctionOverrideFlags flags = (ReadyToRunVirtualFunctionOverrideFlags)ReadUInt();
+                    ParseMethod(builder);
+                    builder.Append($" ImplType :");
+                    ParseType(builder);
+                    if (flags.HasFlag(ReadyToRunVirtualFunctionOverrideFlags.VirtualFunctionOverriden))
+                    {
+                        builder.Append($" ImplMethod :");
+                        ParseMethod(builder);
+                    }
+                    else
+                    {
+                        builder.Append("Not Overriden");
+                    }
+
+                    if (fixupType == ReadyToRunFixupKind.Check_TypeLayout)
+                        builder.Append(" (CHECK_VIRTUAL_FUNCTION_OVERRIDE)");
+                    else
+                        builder.Append(" (VERIFY_VIRTUAL_FUNCTION_OVERRIDE)");
+                    break;
+
                 case ReadyToRunFixupKind.Check_FieldOffset:
                     builder.Append($"{ReadUInt()} ");
                     ParseField(builder);
@@ -1341,8 +1440,7 @@ namespace ILCompiler.Reflection.ReadyToRun
                     break;
 
                 default:
-                    builder.Append(string.Format("Unknown fixup type: {0:X2}", fixupType));
-                    break;
+                    throw new BadImageFormatException();
             }
             return result;
         }
@@ -1356,7 +1454,7 @@ namespace ILCompiler.Reflection.ReadyToRun
             builder.Append(base.ParseType());
         }
 
-        public MetadataReader GetMetadataReaderFromModuleOverride()
+        public IAssemblyMetadata GetMetadataReaderFromModuleOverride()
         {
             if (PeekElementType() == CorElementType.ELEMENT_TYPE_MODULE_ZAPSIG)
             {
@@ -1364,7 +1462,7 @@ namespace ILCompiler.Reflection.ReadyToRun
 
                 ReadElementType();
                 int moduleIndex = (int)ReadUInt();
-                MetadataReader refAsmReader = _contextReader.OpenReferenceAssembly(moduleIndex);
+                IAssemblyMetadata refAsmReader = _contextReader.OpenReferenceAssembly(moduleIndex);
 
                 UpdateOffset(currentOffset);
 
@@ -1573,6 +1671,10 @@ namespace ILCompiler.Reflection.ReadyToRun
                     builder.Append("GCPOLL");
                     break;
 
+                case ReadyToRunHelper.GetCurrentManagedThreadId:
+                    builder.Append("GET_CURRENT_MANAGED_THREAD_ID");
+                    break;
+
                 case ReadyToRunHelper.ReversePInvokeEnter:
                     builder.Append("REVERSE_PINVOKE_ENTER");
                     break;
@@ -1626,6 +1728,14 @@ namespace ILCompiler.Reflection.ReadyToRun
 
                 case ReadyToRunHelper.NewMultiDimArr_NonVarArg:
                     builder.Append("NEW_MULTI_DIM_ARR__NON_VAR_ARG");
+                    break;
+
+                case ReadyToRunHelper.MonitorEnter:
+                    builder.Append("MONITOR_ENTER");
+                    break;
+
+                case ReadyToRunHelper.MonitorExit:
+                    builder.Append("MONITOR_EXIT");
                     break;
 
                 // Helpers used with generic handle lookup cases
@@ -1838,8 +1948,7 @@ namespace ILCompiler.Reflection.ReadyToRun
                     break;
 
                 default:
-                    builder.Append(string.Format("Unknown helper: {0:X2}", helperType));
-                    break;
+                    throw new BadImageFormatException();
             }
         }
 

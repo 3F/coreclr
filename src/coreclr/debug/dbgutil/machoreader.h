@@ -22,11 +22,12 @@ private:
     load_command* m_commands;
     std::vector<segment_command_64*> m_segments;
     symtab_command* m_symtabCommand;
+    dysymtab_command* m_dysymtabCommand;
     nlist_64* m_nlists;
-    char* m_strtab;
+    uint64_t m_strtabAddress;
 
 public:
-    MachOModule(MachOReader& reader, mach_vm_address_t baseAddress, mach_header_64* header = nullptr, std::string* name = nullptr);
+    MachOModule(MachOReader& reader, mach_vm_address_t baseAddress, std::string* name = nullptr);
     ~MachOModule();
 
     inline mach_vm_address_t BaseAddress() const { return m_baseAddress; }
@@ -36,14 +37,14 @@ public:
 
     bool ReadHeader();
     bool TryLookupSymbol(const char* symbolName, uint64_t* symbolValue);
+    bool TryLookupSymbol(int start, int nsyms, const char* symbolName, uint64_t* symbolValue);
     bool EnumerateSegments();
 
 private:
-    inline void SetName(std::string& name) { m_name = name; }
-
     bool ReadLoadCommands();
     bool ReadSymbolTable();
-    void* GetAddressFromFileOffset(uint32_t offset);
+    uint64_t GetAddressFromFileOffset(uint32_t offset);
+    std::string GetSymbolName(int index);
 };
 
 class MachOReader
@@ -51,13 +52,15 @@ class MachOReader
     friend MachOModule;
 public:
     MachOReader();
-    bool EnumerateModules(mach_vm_address_t address, mach_header_64* header);
+    bool EnumerateModules(mach_vm_address_t dyldInfoAddress);
 
 private:
+    bool TryRegisterModule(const struct mach_header* imageAddress, const char* imageFilePathAddress, bool dylinker);
     bool ReadString(const char* address, std::string& str);
     virtual void VisitModule(MachOModule& module) { };
     virtual void VisitSegment(MachOModule& module, const segment_command_64& segment) { };
     virtual void VisitSection(MachOModule& module, const section_64& section) { };
     virtual bool ReadMemory(void* address, void* buffer, size_t size) = 0;
     virtual void Trace(const char* format, ...) { };
+    virtual void TraceVerbose(const char* format, ...) { };
 };

@@ -134,12 +134,6 @@ class DbgTransportSession;
 // These hooks must be removed before shipping.
 class ShimProcess;
 
-
-#ifndef TARGET_UNIX
-extern HINSTANCE GetModuleInst();
-#endif
-
-
 template <class T>
 class CordbSafeHashTable;
 
@@ -2232,7 +2226,7 @@ public:
 #if defined(FEATURE_DBGIPC_TRANSPORT_DI)
     static COM_METHOD CreateObjectTelesto(REFIID id, void ** pObject);
 #endif // FEATURE_DBGIPC_TRANSPORT_DI
-    static COM_METHOD CreateObject(CorDebugInterfaceVersion iDebuggerVersion, DWORD pid, LPCWSTR lpApplicationGroupId, REFIID id, void **object);
+    static COM_METHOD CreateObject(CorDebugInterfaceVersion iDebuggerVersion, DWORD pid, LPCWSTR lpApplicationGroupId, LPCWSTR lpwstrDacModulePath, REFIID id, void** object);
 
     //-----------------------------------------------------------
     // ICorDebugRemote
@@ -2305,6 +2299,7 @@ public:
 
 private:
     Cordb(CorDebugInterfaceVersion iDebuggerVersion, const ProcessDescriptor& pd);
+    Cordb(CorDebugInterfaceVersion iDebuggerVersion, const ProcessDescriptor& pd, LPCWSTR dacModulePath);
 
     //-----------------------------------------------------------
     // Data members
@@ -2320,6 +2315,8 @@ public:
     CordbRCEventThread*         m_rcEventThread;
 
     CorDebugInterfaceVersion    GetDebuggerVersion() const;
+
+    PathString& GetDacModulePath() { return m_dacModulePath; }
 
 #ifdef FEATURE_CORESYSTEM
     HMODULE GetTargetCLR() { return m_targetCLR; }
@@ -2343,6 +2340,8 @@ private:
 
     // Store information about the process to be debugged
     ProcessDescriptor m_pd;
+
+    PathString m_dacModulePath;
 
 //Note - this code could be useful outside coresystem, but keeping the change localized
 // because we are late in the win8 release
@@ -2533,7 +2532,7 @@ public:
 
     // Unique objects that represent the use of some
                                          // basic ELEMENT_TYPE's as type parameters.  These
-                                         // are shared acrosss the entire process.  We could
+                                         // are shared across the entire process.  We could
                                          // go and try to find the classes corresponding to these
                                          // element types but it seems simpler just to keep
                                          // them as special cases.
@@ -5979,7 +5978,7 @@ public:
 
     // Moves a method signature from the start of the signature to the location of the return value (passing out the
     // number of generic parameters in the method).
-    static HRESULT SkipToReturn(SigParser &parser, ULONG *genArgCount = 0);
+    static HRESULT SkipToReturn(SigParser &parser, uint32_t *genArgCount = 0);
 
 private:
     // Read the actual bytes of native code into the data member m_rgbCode.
@@ -6051,7 +6050,8 @@ public:
 class CordbThread : public CordbBase, public ICorDebugThread,
                                       public ICorDebugThread2,
                                       public ICorDebugThread3,
-                                      public ICorDebugThread4
+                                      public ICorDebugThread4,
+                                      public ICorDebugThread5
 {
 public:
     CordbThread(CordbProcess * pProcess, VMPTR_Thread);
@@ -6121,6 +6121,10 @@ public:
 
     // ICorDebugThread4
     COM_METHOD HasUnhandledException();
+
+    // ICorDebugThread5
+    COM_METHOD GetBytesAllocated(ULONG64 *pSohAllocatedBytes,
+                                 ULONG64 *pUohAllocatedBytes);
 
     COM_METHOD GetBlockingObjects(ICorDebugBlockingObjectEnum **ppBlockingObjectEnum);
 
@@ -7467,7 +7471,7 @@ public:
     bool              m_fVarArgFnx;
 
     // the number of arguments, including the var args
-    ULONG             m_allArgsCount;
+    uint32_t          m_allArgsCount;
 
     // This byte array is used to store the signature for vararg methods.
     // It points to the underlying memory used by m_sigParserCached, and it enables us to easily delete

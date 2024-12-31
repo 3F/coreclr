@@ -1,3 +1,7 @@
 <Project>
-  <!-- TODO: Consolidate the Publishing.props files into here. -->
+
+  <PropertyGroup>
+    <ProducesDotNetReleaseShippingAssets>true</ProducesDotNetReleaseShippingAssets>
+  </PropertyGroup>
+
 </Project>

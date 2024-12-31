@@ -1,6 +1,5 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
 
 #include "portable_pdb.h"
 #include <time.h>
@@ -207,13 +206,7 @@ HRESULT PortablePdbWriter::DefineSequencePoints(Method* method)
     // Blob ::= header SequencePointRecord (SequencePointRecord | document-record)*
     // SequencePointRecord :: = sequence-point-record | hidden-sequence-point-record
 
-    // header ::= {LocalSignature, InitialDocument}
-    // LocalSignature
-    ULONG localSigRid = RidFromToken(method->m_LocalsSig);
-    CompressUnsignedLong(localSigRid, blob);
-    // InitialDocument TODO: skip this for now
-
-    // SequencePointRecord
+    ULONG localSigRid = 0;
     ULONG offset = 0;
     ULONG deltaLines = 0;
     LONG deltaColumns = 0;
@@ -224,7 +217,18 @@ HRESULT PortablePdbWriter::DefineSequencePoints(Method* method)
     LinePC* prevNonHiddenSeqPoint = NULL;
     LinePC* nextSeqPoint = NULL;
     BOOL isValid = TRUE;
+    BOOL hasEmptyMethodBody = method->m_LinePCList.COUNT() == 0;
 
+    // header ::= {LocalSignature, InitialDocument}
+    if (!hasEmptyMethodBody)
+    {
+        // LocalSignature
+        localSigRid = RidFromToken(method->m_LocalsSig);
+        CompressUnsignedLong(localSigRid, blob);
+        // InitialDocument TODO: skip this for now
+    }
+
+    // SequencePointRecord :: = sequence-point-record | hidden-sequence-point-record
     for (UINT32 i = 0; i < method->m_LinePCList.COUNT(); i++)
     {
         currSeqPoint = method->m_LinePCList.PEEK(i);
@@ -305,9 +309,10 @@ HRESULT PortablePdbWriter::DefineSequencePoints(Method* method)
     }
 
     // finally define sequence points for the method
-    if (isValid && currSeqPoint != NULL)
+    if ((isValid && currSeqPoint != NULL) || hasEmptyMethodBody)
     {
-        ULONG documentRid = RidFromToken(currSeqPoint->pOwnerDocument->GetToken());
+        mdDocument document = hasEmptyMethodBody ? m_currentDocument->GetToken() : currSeqPoint->pOwnerDocument->GetToken();
+        ULONG documentRid = RidFromToken(document);
         hr = m_pdbEmitter->DefineSequencePoints(documentRid, blob->ptr(), blob->length());
     }
 
@@ -337,13 +342,16 @@ BOOL PortablePdbWriter::_DefineLocalScope(mdMethodDef methodDefToken, Scope* cur
 
     while (pLocalVar != NULL)
     {
-        mdLocalVariable locVarToken = mdLocalScopeNil;
-        USHORT attribute = 0;                                       // TODO: not supported for now
-        USHORT index = pLocalVar->dwAttr & 0xffff; // slot
-        if (FAILED(m_pdbEmitter->DefineLocalVariable(attribute, index, (char*)pLocalVar->szName, &locVarToken))) goto exit;
+        if (pLocalVar->szName != NULL)
+        {
+            mdLocalVariable locVarToken = mdLocalScopeNil;
+            USHORT attribute = 0;                                       // TODO: not supported for now
+            USHORT index = pLocalVar->dwAttr & 0xffff; // slot
+            if (FAILED(m_pdbEmitter->DefineLocalVariable(attribute, index, (char*)pLocalVar->szName, &locVarToken))) goto exit;
 
-        if (firstLocVarToken == mdLocalScopeNil)
-            firstLocVarToken = locVarToken;
+            if (firstLocVarToken == mdLocalScopeNil)
+                firstLocVarToken = locVarToken;
+        }
 
         pLocalVar = pLocalVar->pNext;
     }

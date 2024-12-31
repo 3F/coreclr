@@ -1,7 +1,5 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 //----------------------------------------------------------
 // CallUtils.cpp - Utility code for analyzing and working with managed calls
@@ -12,6 +10,7 @@
 #include "typeutils.h"
 #include "errorhandling.h"
 #include "logging.h"
+#include "spmiutil.h"
 
 // String representations of the JIT helper functions
 const char* kHelperName[CORINFO_HELP_COUNT] = {
@@ -139,11 +138,11 @@ CallType CallUtils::GetDirectCallSiteInfo(MethodContext*            mc,
                   "Null method context passed into GetCallTargetInfo for call to target %016llX.", callTarget);
 
     CallType              targetType = CallType_Unknown;
-    MethodContext::DLD    functionEntryPoint;
+    DLD                   functionEntryPoint;
     CORINFO_METHOD_HANDLE methodHandle;
 
     // Try to first obtain a method handle associated with this call target
-    functionEntryPoint.A = (DWORDLONG)callTarget;
+    functionEntryPoint.A = CastPointer(callTarget);
     functionEntryPoint.B = 0; // TODO-Cleanup: we should be more conscious of this...
 
     if (mc->fndGetFunctionEntryPoint(functionEntryPoint, &methodHandle))
@@ -215,25 +214,6 @@ CallType CallUtils::GetDirectCallSiteInfo(MethodContext*            mc,
 // Utilty code that was stolen from various sections of the JIT codebase and tweaked to go through
 // SuperPMI's method context replaying instead of directly making calls into the JIT/EE interface.
 //-------------------------------------------------------------------------------------------------
-
-// Stolen from Compiler::impMethodInfo_hasRetBuffArg (in the importer)
-bool CallUtils::HasRetBuffArg(MethodContext* mc, CORINFO_SIG_INFO args)
-{
-    if (args.retType != CORINFO_TYPE_VALUECLASS && args.retType != CORINFO_TYPE_REFANY)
-    {
-        return false;
-    }
-
-#if defined(TARGET_AMD64)
-    // We don't need a return buffer if:
-    //   i) TYP_STRUCT argument that can fit into a single register and
-    //  ii) Power of two sized TYP_STRUCT on AMD64.
-    unsigned size = mc->repGetClassSize(args.retTypeClass);
-    return (size > sizeof(void*)) || ((size & (size - 1)) != 0);
-#else
-    return true;
-#endif
-}
 
 // Originally from src/jit/ee_il_dll.cpp
 const char* CallUtils::GetMethodName(MethodContext* mc, CORINFO_METHOD_HANDLE method, const char** classNamePtr)

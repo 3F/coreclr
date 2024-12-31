@@ -107,7 +107,7 @@ HRESULT CEECompileInfo::Startup(  BOOL fForceDebug,
     //
     if (SUCCEEDED(hr)) {
 #ifdef _DEBUG
-        Thread *pThread = GetThread();
+        Thread *pThread = GetThreadNULLOk();
         _ASSERTE(pThread);
 #endif
 
@@ -313,8 +313,7 @@ HRESULT CEECompileInfo::LoadAssemblyByPath(
             // Now load assembly into domain.
             DomainAssembly * pDomainAssembly = pDomain->LoadDomainAssembly(&spec, pAssemblyHolder, FILE_LOAD_BEGIN);
 
-            if (spec.CanUseWithBindingCache() && pDomainAssembly->CanUseWithBindingCache())
-                pDomain->AddAssemblyToCache(&spec, pDomainAssembly);
+            pDomain->AddAssemblyToCache(&spec, pDomainAssembly);
 
             pAssembly = pDomain->LoadAssembly(&spec, pAssemblyHolder, FILE_LOADED);
 
@@ -699,207 +698,10 @@ void CEECompileInfo::GetAssemblyCodeBase(CORINFO_ASSEMBLY_HANDLE hAssembly, SStr
     COOPERATIVE_TRANSITION_END();
 }
 
-//=================================================================================
-
-void FakePromote(PTR_PTR_Object ppObj, ScanContext *pSC, uint32_t dwFlags)
-{
-    CONTRACTL {
-        NOTHROW;
-        GC_NOTRIGGER;
-        MODE_ANY;
-    } CONTRACTL_END;
-
-    CORCOMPILE_GCREFMAP_TOKENS newToken = (dwFlags & GC_CALL_INTERIOR) ? GCREFMAP_INTERIOR : GCREFMAP_REF;
-
-    _ASSERTE((*(CORCOMPILE_GCREFMAP_TOKENS *)ppObj == NULL) || (*(CORCOMPILE_GCREFMAP_TOKENS *)ppObj == newToken));
-
-    *(CORCOMPILE_GCREFMAP_TOKENS *)ppObj = newToken;
-}
-
-//=================================================================================
-
-void FakePromoteCarefully(promote_func *fn, Object **ppObj, ScanContext *pSC, uint32_t dwFlags)
-{
-    (*fn)(ppObj, pSC, dwFlags);
-}
-
-//=================================================================================
-
-void FakeGcScanRoots(MetaSig& msig, ArgIterator& argit, MethodDesc * pMD, BYTE * pFrame)
-{
-    STANDARD_VM_CONTRACT;
-
-    ScanContext sc;
-
-    // Encode generic instantiation arg
-    if (argit.HasParamType())
-    {
-        // Note that intrinsic array methods have hidden instantiation arg too, but it is not reported to GC
-        if (pMD->RequiresInstMethodDescArg())
-            *(CORCOMPILE_GCREFMAP_TOKENS *)(pFrame + argit.GetParamTypeArgOffset()) = GCREFMAP_METHOD_PARAM;
-        else
-        if (pMD->RequiresInstMethodTableArg())
-            *(CORCOMPILE_GCREFMAP_TOKENS *)(pFrame + argit.GetParamTypeArgOffset()) = GCREFMAP_TYPE_PARAM;
-    }
-
-    // If the function has a this pointer, add it to the mask
-    if (argit.HasThis())
-    {
-        BOOL interior = pMD->GetMethodTable()->IsValueType() && !pMD->IsUnboxingStub();
-
-        FakePromote((Object **)(pFrame + argit.GetThisOffset()), &sc, interior ? GC_CALL_INTERIOR : 0);
-    }
-
-    if (argit.IsVarArg())
-    {
-        *(CORCOMPILE_GCREFMAP_TOKENS *)(pFrame + argit.GetVASigCookieOffset()) = GCREFMAP_VASIG_COOKIE;
-
-        // We are done for varargs - the remaining arguments are reported via vasig cookie
-        return;
-    }
-
-    // Also if the method has a return buffer, then it is the first argument, and could be an interior ref,
-    // so always promote it.
-    if (argit.HasRetBuffArg())
-    {
-        FakePromote((Object **)(pFrame + argit.GetRetBuffArgOffset()), &sc, GC_CALL_INTERIOR);
-    }
-
-    //
-    // Now iterate the arguments
-    //
-
-    // Cycle through the arguments, and call msig.GcScanRoots for each
-    int argOffset;
-    while ((argOffset = argit.GetNextOffset()) != TransitionBlock::InvalidOffset)
-    {
-        ArgDestination argDest(pFrame, argOffset, argit.GetArgLocDescForStructInRegs());
-        msig.GcScanRoots(&argDest, &FakePromote, &sc, &FakePromoteCarefully);
-    }
-}
-
 void CEECompileInfo::GetCallRefMap(CORINFO_METHOD_HANDLE hMethod, GCRefMapBuilder * pBuilder, bool isDispatchCell)
 {
-#ifdef _DEBUG
-    DWORD dwInitialLength = pBuilder->GetBlobLength();
-    UINT nTokensWritten = 0;
-#endif
-
     MethodDesc *pMD = (MethodDesc *)hMethod;
-
-    SigTypeContext typeContext(pMD);
-    PCCOR_SIGNATURE pSig;
-    DWORD cbSigSize;
-    pMD->GetSig(&pSig, &cbSigSize);
-    MetaSig msig(pSig, cbSigSize, pMD->GetModule(), &typeContext);
-
-    //
-    // Shared default interface methods (i.e. virtual interface methods with an implementation) require
-    // an instantiation argument. But if we're in a situation where we haven't resolved the method yet
-    // we need to pretent that unresolved default interface methods are like any other interface
-    // methods and don't have an instantiation argument.
-    // See code:CEEInfo::getMethodSigInternal
-    //
-    assert(!isDispatchCell || !pMD->RequiresInstArg() || pMD->GetMethodTable()->IsInterface());
-    if (pMD->RequiresInstArg() && !isDispatchCell)
-    {
-        msig.SetHasParamTypeArg();
-    }
-
-    ArgIterator argit(&msig);
-
-    UINT nStackBytes = argit.SizeOfFrameArgumentArray();
-
-    // Allocate a fake stack
-    CQuickBytes qbFakeStack;
-    qbFakeStack.AllocThrows(sizeof(TransitionBlock) + nStackBytes);
-    memset(qbFakeStack.Ptr(), 0, qbFakeStack.Size());
-
-    BYTE * pFrame = (BYTE *)qbFakeStack.Ptr();
-
-    // Fill it in
-    FakeGcScanRoots(msig, argit, pMD, pFrame);
-
-    //
-    // Encode the ref map
-    //
-
-    UINT nStackSlots;
-
-#ifdef TARGET_X86
-    UINT cbStackPop = argit.CbStackPop();
-    pBuilder->WriteStackPop(cbStackPop / sizeof(TADDR));
-
-    nStackSlots = nStackBytes / sizeof(TADDR) + NUM_ARGUMENT_REGISTERS;
-#else
-    nStackSlots = (sizeof(TransitionBlock) + nStackBytes - TransitionBlock::GetOffsetOfFirstGCRefMapSlot()) / TARGET_POINTER_SIZE;
-#endif
-
-    for (UINT pos = 0; pos < nStackSlots; pos++)
-    {
-        int ofs;
-
-#ifdef TARGET_X86
-        ofs = (pos < NUM_ARGUMENT_REGISTERS) ?
-            (TransitionBlock::GetOffsetOfArgumentRegisters() + ARGUMENTREGISTERS_SIZE - (pos + 1) * sizeof(TADDR)) :
-            (TransitionBlock::GetOffsetOfArgs() + (pos - NUM_ARGUMENT_REGISTERS) * sizeof(TADDR));
-#else
-        ofs = TransitionBlock::GetOffsetOfFirstGCRefMapSlot() + pos * TARGET_POINTER_SIZE;
-#endif
-
-        CORCOMPILE_GCREFMAP_TOKENS token = *(CORCOMPILE_GCREFMAP_TOKENS *)(pFrame + ofs);
-
-        if (token != 0)
-        {
-            INDEBUG(nTokensWritten++;)
-            pBuilder->WriteToken(pos, token);
-        }
-    }
-
-    // We are done
-    pBuilder->Flush();
-
-#ifdef _DEBUG
-    //
-    // Verify that decoder produces what got encoded
-    //
-
-    DWORD dwFinalLength;
-    PVOID pBlob = pBuilder->GetBlob(&dwFinalLength);
-
-    UINT nTokensDecoded = 0;
-
-    GCRefMapDecoder decoder((BYTE *)pBlob + dwInitialLength);
-
-#ifdef TARGET_X86
-    _ASSERTE(decoder.ReadStackPop() * sizeof(TADDR) == cbStackPop);
-#endif
-
-    while (!decoder.AtEnd())
-    {
-        int pos = decoder.CurrentPos();
-        int token = decoder.ReadToken();
-
-        int ofs;
-
-#ifdef TARGET_X86
-        ofs = (pos < NUM_ARGUMENT_REGISTERS) ?
-            (TransitionBlock::GetOffsetOfArgumentRegisters() + ARGUMENTREGISTERS_SIZE - (pos + 1) * sizeof(TADDR)) :
-            (TransitionBlock::GetOffsetOfArgs() + (pos - NUM_ARGUMENT_REGISTERS) * sizeof(TADDR));
-#else
-        ofs = TransitionBlock::GetOffsetOfFirstGCRefMapSlot() + pos * TARGET_POINTER_SIZE;
-#endif
-
-        if (token != 0)
-        {
-            _ASSERTE(*(CORCOMPILE_GCREFMAP_TOKENS *)(pFrame + ofs) == token);
-            nTokensDecoded++;
-        }
-    }
-
-    // Verify that all tokens got decoded.
-    _ASSERTE(nTokensWritten == nTokensDecoded);
-#endif // _DEBUG
+    ComputeCallRefMap(pMD, pBuilder, isDispatchCell);
 }
 
 void CEECompileInfo::CompressDebugInfo(
@@ -1166,6 +968,14 @@ BOOL CEEPreloader::DoesMethodNeedRestoringBeforePrestubIsRun(
     return FALSE;
 }
 
+BOOL CEECompileInfo::IsUnmanagedCallConvMethod(CORINFO_METHOD_HANDLE handle)
+{
+    WRAPPER_NO_CONTRACT;
+
+    MethodDesc * pMethod = GetMethod(handle);
+    return pMethod->HasUnmanagedCallConvAttribute();
+}
+
 BOOL CEECompileInfo::IsUnmanagedCallersOnlyMethod(CORINFO_METHOD_HANDLE handle)
 {
     WRAPPER_NO_CONTRACT;
@@ -1365,6 +1175,8 @@ void CEECompileInfo::EncodeMethod(
     STANDARD_VM_CONTRACT;
 
     COOPERATIVE_TRANSITION_BEGIN();
+
+    _ASSERTE(referencingModule);
     MethodDesc *pMethod = GetMethod(handle);
 
     BOOL fSuccess;
@@ -1509,7 +1321,7 @@ void EncodeTypeInDictionarySignature(
         // SigParser expects ELEMENT_TYPE_MODULE_ZAPSIG to be before ELEMENT_TYPE_GENERICINST
         //
         SigPointer peek(ptr);
-        ULONG instType = 0;
+        uint32_t instType = 0;
         IfFailThrow(peek.GetData(&instType));
         _ASSERTE(instType == ELEMENT_TYPE_INTERNAL);
 
@@ -1537,7 +1349,7 @@ void EncodeTypeInDictionarySignature(
         EncodeTypeInDictionarySignature(pTypeHandleModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
         IfFailThrow(ptr.SkipExactlyOne());
 
-        ULONG argCnt = 0; // Get number of parameters
+        uint32_t argCnt = 0; // Get number of parameters
         IfFailThrow(ptr.GetData(&argCnt));
         pSigBuilder->AppendData(argCnt);
 
@@ -1559,7 +1371,7 @@ void EncodeTypeInDictionarySignature(
             case ELEMENT_TYPE_VAR:
             case ELEMENT_TYPE_MVAR:
                 {
-                    ULONG varNum;
+                    uint32_t varNum;
                     // Skip variable number
                     IfFailThrow(ptr.GetData(&varNum));
                     pSigBuilder->AppendData(varNum);
@@ -1583,30 +1395,30 @@ void EncodeTypeInDictionarySignature(
                     EncodeTypeInDictionarySignature(pInfoModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
                     IfFailThrow(ptr.SkipExactlyOne());
 
-                    ULONG rank = 0; // Get rank
+                    uint32_t rank = 0; // Get rank
                     IfFailThrow(ptr.GetData(&rank));
                     pSigBuilder->AppendData(rank);
 
                     if (rank)
                     {
-                        ULONG nsizes = 0;
+                        uint32_t nsizes = 0;
                         IfFailThrow(ptr.GetData(&nsizes));
                         pSigBuilder->AppendData(nsizes);
 
                         while (nsizes--)
                         {
-                            ULONG data = 0;
+                            uint32_t data = 0;
                             IfFailThrow(ptr.GetData(&data));
                             pSigBuilder->AppendData(data);
                         }
 
-                        ULONG nlbounds = 0;
+                        uint32_t nlbounds = 0;
                         IfFailThrow(ptr.GetData(&nlbounds));
                         pSigBuilder->AppendData(nlbounds);
 
                         while (nlbounds--)
                         {
-                            ULONG data = 0;
+                            uint32_t data = 0;
                             IfFailThrow(ptr.GetData(&data));
                             pSigBuilder->AppendData(data);
                         }
@@ -1633,13 +1445,13 @@ void CEECompileInfo::EncodeGenericSignature(
 
     SigPointer ptr((PCCOR_SIGNATURE)signature);
 
-    ULONG entryKind; // DictionaryEntryKind
+    uint32_t entryKind; // DictionaryEntryKind
     IfFailThrow(ptr.GetData(&entryKind));
     pSigBuilder->AppendData(entryKind);
 
     if (!fMethod)
     {
-        ULONG dictionaryIndex = 0;
+        uint32_t dictionaryIndex = 0;
         IfFailThrow(ptr.GetData(&dictionaryIndex));
 
         pSigBuilder->AppendData(dictionaryIndex);
@@ -1650,7 +1462,7 @@ void CEECompileInfo::EncodeGenericSignature(
     case DeclaringTypeHandleSlot:
         EncodeTypeInDictionarySignature(pInfoModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
         IfFailThrow(ptr.SkipExactlyOne());
-        // fall through
+        FALLTHROUGH;
 
     case TypeHandleSlot:
         EncodeTypeInDictionarySignature(pInfoModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
@@ -1660,7 +1472,7 @@ void CEECompileInfo::EncodeGenericSignature(
     case ConstrainedMethodEntrySlot:
         EncodeTypeInDictionarySignature(pInfoModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
         IfFailThrow(ptr.SkipExactlyOne());
-        // fall through
+        FALLTHROUGH;
 
     case MethodDescSlot:
     case MethodEntrySlot:
@@ -1669,7 +1481,7 @@ void CEECompileInfo::EncodeGenericSignature(
             EncodeTypeInDictionarySignature(pInfoModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
             IfFailThrow(ptr.SkipExactlyOne());
 
-            ULONG methodFlags;
+            uint32_t methodFlags;
             IfFailThrow(ptr.GetData(&methodFlags));
             pSigBuilder->AppendData(methodFlags);
 
@@ -1679,13 +1491,13 @@ void CEECompileInfo::EncodeGenericSignature(
                 IfFailThrow(ptr.SkipExactlyOne());
             }
 
-            ULONG tokenOrSlot;
+            uint32_t tokenOrSlot;
             IfFailThrow(ptr.GetData(&tokenOrSlot));
             pSigBuilder->AppendData(tokenOrSlot);
 
             if (methodFlags & ENCODE_METHOD_SIG_MethodInstantiation)
             {
-                DWORD nGenericMethodArgs;
+                uint32_t nGenericMethodArgs;
                 IfFailThrow(ptr.GetData(&nGenericMethodArgs));
                 pSigBuilder->AppendData(nGenericMethodArgs);
 
@@ -1703,7 +1515,7 @@ void CEECompileInfo::EncodeGenericSignature(
             EncodeTypeInDictionarySignature(pInfoModule, ptr, pSigBuilder, encodeContext, pfnEncodeModule);
             IfFailThrow(ptr.SkipExactlyOne());
 
-            DWORD fieldIndex;
+            uint32_t fieldIndex;
             IfFailThrow(ptr.GetData(&fieldIndex));
             pSigBuilder->AppendData(fieldIndex);
         }
@@ -1713,7 +1525,7 @@ void CEECompileInfo::EncodeGenericSignature(
         _ASSERTE(false);
     }
 
-    ULONG dictionarySlot;
+    uint32_t dictionarySlot;
     IfFailThrow(ptr.GetData(&dictionarySlot));
     pSigBuilder->AppendData(dictionarySlot);
 }
@@ -4797,7 +4609,7 @@ static BOOL CanSatisfyConstraints(Instantiation typicalInst, Instantiation candi
 
 
 //
-// This method has duplicated logic from coreclr\src\System.Private.CoreLib\src\System\Collections\Generic\ComparerHelpers.cs
+// This method has duplicated logic from coreclr\System.Private.CoreLib\src\System\Collections\Generic\ComparerHelpers.cs
 //
 static void SpecializeComparer(SString& ss, Instantiation& inst)
 {
@@ -4851,7 +4663,7 @@ static void SpecializeComparer(SString& ss, Instantiation& inst)
 }
 
 //
-// This method has duplicated logic from coreclr\src\System.Private.CoreLib\src\System\Collections\Generic\ComparerHelpers.cs
+// This method has duplicated logic from coreclr\System.Private.CoreLib\src\System\Collections\Generic\ComparerHelpers.cs
 // and matching logic in jitinterface.cpp
 //
 static void SpecializeEqualityComparer(SString& ss, Instantiation& inst)
@@ -5423,7 +5235,7 @@ void CEEPreloader::ExpandTypeDependencies(TypeHandle th)
     MethodTable::InterfaceMapIterator intIterator = pMT->IterateInterfaceMap();
     while (intIterator.Next())
     {
-        TriageTypeForZap(intIterator.GetInterface(), TRUE);
+        TriageTypeForZap(intIterator.GetInterfaceApprox(), TRUE);
     }
 
     // Make sure approx types for all fields are saved
@@ -5611,7 +5423,7 @@ void CEEPreloader::TriageTypeFromSoftBoundModule(TypeHandle th, Module * pSoftBo
         MethodTable::InterfaceMapIterator intIterator = pMT->IterateInterfaceMap();
         while (intIterator.Next())
         {
-            TriageTypeFromSoftBoundModule(intIterator.GetInterface(), pSoftBoundModule);
+            TriageTypeFromSoftBoundModule(intIterator.GetInterfaceApprox(), pSoftBoundModule);
         }
 
         // It does not seem worth it to reject the remaining items
@@ -5931,7 +5743,7 @@ void CEEPreloader::GenerateMethodStubs(
         {
             NDirectMethodDesc* pNMD = (NDirectMethodDesc*)pMD;
             PInvokeStaticSigInfo sigInfo;
-            NDirect::PopulateNDirectMethodDesc(pNMD, &sigInfo);
+            NDirect::InitializeSigInfoAndPopulateNDirectMethodDesc(pNMD, &sigInfo);
             pStubMD = NDirect::GetILStubMethodDesc((NDirectMethodDesc*)pMD, &sigInfo, dwNGenStubFlags);
         }
 #ifdef FEATURE_COMINTEROP
@@ -6675,8 +6487,6 @@ HRESULT CompilationDomain::AddDependency(AssemblySpec *pRefSpec,
         spec.ConvertPublicKeyToToken();
         pRefSpec = &spec;
     }
-
-    _ASSERTE(pRefSpec->HasUniqueIdentity());
 
     //
     // See if we've already added the contents of the ref

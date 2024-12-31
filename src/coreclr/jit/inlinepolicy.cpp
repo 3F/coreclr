@@ -84,7 +84,27 @@ InlinePolicy* InlinePolicy::GetPolicy(Compiler* compiler, bool isPrejitRoot)
         return new (compiler, CMK_Inlining) ModelPolicy(compiler, isPrejitRoot);
     }
 
-    // Use the default policy by default
+    // Optionally install the ProfilePolicy, if the method has profile data.
+    //
+    bool enableProfilePolicy = JitConfig.JitInlinePolicyProfile() != 0;
+    bool hasProfileData      = compiler->fgIsUsingProfileWeights();
+
+    if (enableProfilePolicy && hasProfileData)
+    {
+        return new (compiler, CMK_Inlining) ProfilePolicy(compiler, isPrejitRoot);
+    }
+
+    const bool isPrejit   = compiler->opts.jitFlags->IsSet(JitFlags::JIT_FLAG_PREJIT);
+    const bool isSpeedOpt = compiler->opts.jitFlags->IsSet(JitFlags::JIT_FLAG_SPEED_OPT);
+
+    if ((JitConfig.JitExtDefaultPolicy() != 0))
+    {
+        if (isPrejitRoot || !isPrejit || (isPrejit && isSpeedOpt))
+        {
+            return new (compiler, CMK_Inlining) ExtendedDefaultPolicy(compiler, isPrejitRoot);
+        }
+    }
+
     return new (compiler, CMK_Inlining) DefaultPolicy(compiler, isPrejitRoot);
 }
 
@@ -282,6 +302,10 @@ void DefaultPolicy::NoteBool(InlineObservation obs, bool value)
                 m_IsFromPromotableValueClass = value;
                 break;
 
+            case InlineObservation::CALLSITE_IN_TRY_REGION:
+                m_CallsiteIsInTryRegion = value;
+                break;
+
             case InlineObservation::CALLEE_HAS_SIMD:
                 m_HasSimd = value;
                 break;
@@ -302,7 +326,6 @@ void DefaultPolicy::NoteBool(InlineObservation obs, bool value)
                 m_ArgFeedsRangeCheck++;
                 break;
 
-            case InlineObservation::CALLEE_HAS_SWITCH:
             case InlineObservation::CALLEE_UNSUPPORTED_OPCODE:
                 propagate = true;
                 break;
@@ -369,41 +392,15 @@ void DefaultPolicy::NoteBool(InlineObservation obs, bool value)
                 // "reestablishes" candidacy rather than alters
                 // candidacy ... so instead we bail out here.
                 //
-                if (!m_IsPrejitRoot)
+                bool overBudget = this->BudgetCheck();
+
+                if (overBudget)
                 {
-                    InlineStrategy* strategy   = m_RootCompiler->m_inlineStrategy;
-                    const bool      overBudget = strategy->BudgetCheck(m_CodeSize);
-
-                    if (overBudget)
-                    {
-                        // If the candidate is a forceinline and the callsite is
-                        // not too deep, allow the inline even if it goes over budget.
-                        //
-                        // For now, "not too deep" means a top-level inline. Note
-                        // depth 0 is used for the root method, so inline candidate depth
-                        // will be 1 or more.
-                        //
-                        assert(m_IsForceInlineKnown);
-                        assert(m_CallsiteDepth > 0);
-                        const bool allowOverBudget = m_IsForceInline && (m_CallsiteDepth == 1);
-
-                        if (allowOverBudget)
-                        {
-                            JITDUMP("Allowing over-budget top-level forceinline\n");
-                        }
-                        else
-                        {
-                            SetFailure(InlineObservation::CALLSITE_OVER_BUDGET);
-                        }
-                    }
+                    SetFailure(InlineObservation::CALLSITE_OVER_BUDGET);
+                    return;
                 }
-
                 break;
             }
-
-            case InlineObservation::CALLSITE_IN_TRY_REGION:
-                m_CallsiteIsInTryRegion = true;
-                break;
 
             case InlineObservation::CALLSITE_IN_LOOP:
                 m_CallsiteIsInLoop = true;
@@ -459,6 +456,53 @@ void DefaultPolicy::NoteBool(InlineObservation obs, bool value)
     {
         NoteInternal(obs);
     }
+}
+
+//------------------------------------------------------------------------
+// BudgetCheck: see if this inline would exceed the current budget
+//
+// Returns:
+//   True if inline would exceed the budget.
+//
+bool DefaultPolicy::BudgetCheck() const
+{
+    // Only relevant if we're actually inlining.
+    //
+    if (m_IsPrejitRoot)
+    {
+        return false;
+    }
+
+    // The strategy tracks the amout of inlining done so far,
+    // so it performs the actual check.
+    //
+    InlineStrategy* strategy   = m_RootCompiler->m_inlineStrategy;
+    const bool      overBudget = strategy->BudgetCheck(m_CodeSize);
+
+    if (overBudget)
+    {
+        // If the candidate is a forceinline and the callsite is
+        // not too deep, allow the inline even if it goes over budget.
+        //
+        // For now, "not too deep" means a top-level inline. Note
+        // depth 0 is used for the root method, so inline candidate depth
+        // will be 1 or more.
+        //
+        assert(m_IsForceInlineKnown);
+        assert(m_CallsiteDepth > 0);
+        const bool allowOverBudget = m_IsForceInline && (m_CallsiteDepth == 1);
+
+        if (allowOverBudget)
+        {
+            JITDUMP("Allowing over-budget top-level forceinline\n");
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 //------------------------------------------------------------------------
@@ -608,6 +652,18 @@ void DefaultPolicy::NoteInt(InlineObservation obs, int value)
             // Ignore all other information
             break;
     }
+}
+
+//------------------------------------------------------------------------
+// NoteDouble: handle an observed double value
+//
+// Arguments:
+//    obs      - the current obsevation
+//    value    - the value being observed
+
+void DefaultPolicy::NoteDouble(InlineObservation obs, double value)
+{
+    assert(obs == InlineObservation::CALLSITE_PROFILE_FREQUENCY);
 }
 
 //------------------------------------------------------------------------
@@ -923,6 +979,42 @@ int DefaultPolicy::CodeSizeEstimate()
     }
 }
 
+#if defined(DEBUG) || defined(INLINE_DATA)
+//------------------------------------------------------------------------
+// OnDumpXml: Dump DefaultPolicy data as XML
+//
+// Arguments:
+//    file     - stream to output to
+//    indent   - indent level
+
+void DefaultPolicy::OnDumpXml(FILE* file, unsigned indent) const
+{
+    XATTR_R8(m_Multiplier);
+    XATTR_I4(m_CodeSize);
+    XATTR_I4(m_CallsiteFrequency);
+    XATTR_I4(m_CallsiteDepth);
+    XATTR_I4(m_InstructionCount);
+    XATTR_I4(m_LoadStoreCount);
+    XATTR_I4(m_ArgFeedsTest);
+    XATTR_I4(m_ArgFeedsConstantTest);
+    XATTR_I4(m_ArgFeedsRangeCheck);
+    XATTR_I4(m_ConstantArgFeedsConstantTest);
+    XATTR_I4(m_CalleeNativeSizeEstimate);
+    XATTR_I4(m_CallsiteNativeSizeEstimate);
+    XATTR_B(m_IsForceInline);
+    XATTR_B(m_IsForceInlineKnown);
+    XATTR_B(m_IsInstanceCtor);
+    XATTR_B(m_IsFromPromotableValueClass);
+    XATTR_B(m_HasSimd);
+    XATTR_B(m_LooksLikeWrapperMethod);
+    XATTR_B(m_MethodIsMostlyLoadStore);
+    XATTR_B(m_CallsiteIsInTryRegion);
+    XATTR_B(m_CallsiteIsInLoop);
+    XATTR_B(m_IsNoReturn);
+    XATTR_B(m_IsNoReturnKnown);
+}
+#endif
+
 //------------------------------------------------------------------------
 // PropagateNeverToRuntime: determine if a never result should cause the
 // method to be marked as un-inlinable.
@@ -1012,15 +1104,11 @@ void RandomPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
     assert(m_Observation == InlineObservation::CALLEE_IS_DISCRETIONARY_INLINE);
 
     // Budget check.
-    if (!m_IsPrejitRoot)
+    const bool overBudget = this->BudgetCheck();
+    if (overBudget)
     {
-        InlineStrategy* strategy   = m_RootCompiler->m_inlineStrategy;
-        bool            overBudget = strategy->BudgetCheck(m_CodeSize);
-        if (overBudget)
-        {
-            SetFailure(InlineObservation::CALLSITE_OVER_BUDGET);
-            return;
-        }
+        SetFailure(InlineObservation::CALLSITE_OVER_BUDGET);
+        return;
     }
 
     // If we're also dumping inline data, make additional observations
@@ -1119,6 +1207,586 @@ void RandomPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
 #endif
 
 //------------------------------------------------------------------------
+// NoteInt: handle an observed boolean value
+//
+// Arguments:
+//    obs      - the current obsevation
+//    value    - the value being observed
+
+void ExtendedDefaultPolicy::NoteBool(InlineObservation obs, bool value)
+{
+    switch (obs)
+    {
+        case InlineObservation::CALLEE_RETURNS_STRUCT:
+            m_ReturnsStructByValue = value;
+            break;
+
+        case InlineObservation::CALLEE_CLASS_VALUETYPE:
+            m_IsFromValueClass = value;
+            break;
+
+        case InlineObservation::CALLSITE_NONGENERIC_CALLS_GENERIC:
+            m_NonGenericCallsGeneric = value;
+            break;
+
+        case InlineObservation::CALLEE_BINARY_EXRP_WITH_CNS:
+            m_BinaryExprWithCns++;
+            break;
+
+        case InlineObservation::CALLEE_ARG_STRUCT:
+            m_ArgIsStructByValue++;
+            break;
+
+        case InlineObservation::CALLEE_ARG_STRUCT_FIELD_ACCESS:
+            m_FldAccessOverArgStruct++;
+            break;
+
+        case InlineObservation::CALLEE_ARG_FEEDS_CAST:
+            m_ArgCasted++;
+            break;
+
+        case InlineObservation::CALLEE_FOLDABLE_BOX:
+            m_FoldableBox++;
+            break;
+
+        case InlineObservation::CALLEE_INTRINSIC:
+            m_Intrinsic++;
+            break;
+
+        case InlineObservation::CALLEE_BACKWARD_JUMP:
+            m_BackwardJump++;
+            break;
+
+        case InlineObservation::CALLEE_THROW_BLOCK:
+            m_ThrowBlock++;
+            break;
+
+        case InlineObservation::CALLSITE_ARG_EXACT_CLS:
+            m_ArgIsExactCls++;
+            break;
+
+        case InlineObservation::CALLSITE_ARG_BOXED:
+            m_ArgIsBoxedAtCallsite++;
+            break;
+
+        case InlineObservation::CALLSITE_ARG_CONST:
+            m_ArgIsConst++;
+            break;
+
+        case InlineObservation::CALLSITE_ARG_EXACT_CLS_SIG_IS_NOT:
+            m_ArgIsExactClsSigIsNot++;
+            break;
+
+        case InlineObservation::CALLSITE_FOLDABLE_INTRINSIC:
+            m_FoldableIntrinsic++;
+            break;
+
+        case InlineObservation::CALLSITE_FOLDABLE_EXPR:
+            m_FoldableExpr++;
+            break;
+
+        case InlineObservation::CALLSITE_FOLDABLE_EXPR_UN:
+            m_FoldableExprUn++;
+            break;
+
+        case InlineObservation::CALLSITE_FOLDABLE_BRANCH:
+            m_FoldableBranch++;
+            break;
+
+        case InlineObservation::CALLSITE_FOLDABLE_SWITCH:
+            m_FoldableSwitch++;
+            break;
+
+        case InlineObservation::CALLEE_HAS_SWITCH:
+            m_Switch++;
+            break;
+
+        case InlineObservation::CALLSITE_DIV_BY_CNS:
+            m_DivByCns++;
+            break;
+
+        case InlineObservation::CALLSITE_HAS_PROFILE:
+            m_HasProfile = value;
+            break;
+
+        case InlineObservation::CALLSITE_IN_NORETURN_REGION:
+            m_IsCallsiteInNoReturnRegion = value;
+            break;
+
+        default:
+            DefaultPolicy::NoteBool(obs, value);
+            break;
+    }
+}
+
+//------------------------------------------------------------------------
+// NoteInt: handle an observed integer value
+//
+// Arguments:
+//    obs      - the current obsevation
+//    value    - the value being observed
+
+void ExtendedDefaultPolicy::NoteInt(InlineObservation obs, int value)
+{
+    switch (obs)
+    {
+        case InlineObservation::CALLEE_IL_CODE_SIZE:
+        {
+            assert(m_IsForceInlineKnown);
+            assert(value != 0);
+            m_CodeSize           = static_cast<unsigned>(value);
+            unsigned maxCodeSize = static_cast<unsigned>(JitConfig.JitExtDefaultPolicyMaxIL());
+
+            // TODO: Enable for PgoSource::Static as well if it's not the generic profile we bundle.
+            if (m_HasProfile && (m_RootCompiler->fgHaveTrustedProfileData()))
+            {
+                maxCodeSize = static_cast<unsigned>(JitConfig.JitExtDefaultPolicyMaxILProf());
+            }
+
+            if (m_IsForceInline)
+            {
+                // Candidate based on force inline
+                SetCandidate(InlineObservation::CALLEE_IS_FORCE_INLINE);
+            }
+            else if (m_CodeSize <= InlineStrategy::ALWAYS_INLINE_SIZE)
+            {
+                // Candidate based on small size
+                SetCandidate(InlineObservation::CALLEE_BELOW_ALWAYS_INLINE_SIZE);
+            }
+            else if (m_CodeSize <= maxCodeSize)
+            {
+                // Candidate, pending profitability evaluation
+                SetCandidate(InlineObservation::CALLEE_IS_DISCRETIONARY_INLINE);
+            }
+            else
+            {
+                // Callee too big, not a candidate
+                SetNever(InlineObservation::CALLEE_TOO_MUCH_IL);
+            }
+            break;
+        }
+        case InlineObservation::CALLEE_NUMBER_OF_BASIC_BLOCKS:
+        {
+            if (!m_IsForceInline && m_IsNoReturn && (value == 1))
+            {
+                SetNever(InlineObservation::CALLEE_DOES_NOT_RETURN);
+            }
+            else if (!m_IsForceInline && !m_HasProfile)
+            {
+                unsigned bbLimit = (unsigned)JitConfig.JitExtDefaultPolicyMaxBB();
+                if (m_IsPrejitRoot)
+                {
+                    // We're not able to recognize arg-specific foldable branches
+                    // in prejit-root mode.
+                    bbLimit += 5 + m_Switch * 10;
+                }
+                bbLimit += m_FoldableBranch + m_FoldableSwitch * 10;
+                if ((unsigned)value > bbLimit)
+                {
+                    SetNever(InlineObservation::CALLEE_TOO_MANY_BASIC_BLOCKS);
+                }
+            }
+            break;
+        }
+        default:
+            DefaultPolicy::NoteInt(obs, value);
+            break;
+    }
+}
+
+//------------------------------------------------------------------------
+// NoteInt: handle an observed double value
+//
+// Arguments:
+//    obs      - the current obsevation
+//    value    - the value being observed
+
+void ExtendedDefaultPolicy::NoteDouble(InlineObservation obs, double value)
+{
+    // So far, CALLSITE_PROFILE_FREQUENCY is the only "double" property.
+    assert(obs == InlineObservation::CALLSITE_PROFILE_FREQUENCY);
+    m_ProfileFrequency = value;
+}
+
+//------------------------------------------------------------------------
+// DetermineMultiplier: determine benefit multiplier for this inline
+//
+// Notes: uses the accumulated set of observations to compute a
+//    profitability boost for the inline candidate.
+
+double ExtendedDefaultPolicy::DetermineMultiplier()
+{
+    double multiplier = 0.0;
+
+    if (m_IsInstanceCtor)
+    {
+        multiplier += 1.5;
+        JITDUMP("\nmultiplier in instance constructors increased to %g.", multiplier);
+    }
+
+    if (m_IsFromValueClass)
+    {
+        multiplier += 3.0;
+        JITDUMP("\nmultiplier in methods of struct increased to %g.", multiplier);
+    }
+
+    if (m_ReturnsStructByValue)
+    {
+        // For structs-passed-by-value we might avoid expensive copy operations if we inline.
+        multiplier += 2.0;
+        JITDUMP("\nInline candidate returns a struct by value.  Multiplier increased to %g.", multiplier);
+    }
+    else if (m_ArgIsStructByValue > 0)
+    {
+        // Same here
+        multiplier += 2.0;
+        JITDUMP("\n%d arguments are structs passed by value.  Multiplier increased to %g.", m_ArgIsStructByValue,
+                multiplier);
+    }
+    else if (m_FldAccessOverArgStruct > 0)
+    {
+        multiplier += 1.0;
+        // Such ldfld/stfld are cheap for promotable structs
+        JITDUMP("\n%d ldfld or stfld over arguments which are structs.  Multiplier increased to %g.",
+                m_FldAccessOverArgStruct, multiplier);
+    }
+
+    if (m_LooksLikeWrapperMethod)
+    {
+        multiplier += 1.0;
+        JITDUMP("\nInline candidate looks like a wrapper method.  Multiplier increased to %g.", multiplier);
+    }
+
+    if (m_MethodIsMostlyLoadStore)
+    {
+        multiplier += 3.0;
+        JITDUMP("\nInline candidate is mostly loads and stores.  Multiplier increased to %g.", multiplier);
+    }
+
+    if (m_ArgFeedsRangeCheck > 0)
+    {
+        multiplier += 1.0;
+        JITDUMP("\nInline candidate has arg that feeds range check.  Multiplier increased to %g.", multiplier);
+    }
+
+    if (m_NonGenericCallsGeneric)
+    {
+        multiplier += 2.0;
+        JITDUMP("\nInline candidate is generic and caller is not.  Multiplier increased to %g.", multiplier);
+    }
+
+    if (m_FoldableBranch > 0)
+    {
+        // Examples:
+        //
+        //  if (typeof(T) == typeof(int)) {
+        //  if (Avx2.IsSupported) {
+        //  if (arg0 / 10 > 100) { // where arg0 is a constant at the callsite
+        //  if (Math.Abs(arg0) > 10) { // same here
+        //  etc.
+        //
+        multiplier += 3.0 + m_FoldableBranch;
+        JITDUMP("\nInline candidate has %d foldable branches.  Multiplier increased to %g.", m_FoldableBranch,
+                multiplier);
+    }
+    else if (m_ConstantArgFeedsConstantTest > 0)
+    {
+        multiplier += 3.0;
+        JITDUMP("\nInline candidate has const arg that feeds a conditional.  Multiplier increased to %g.", multiplier);
+    }
+    else if ((m_ArgIsConst > 0) && (m_FoldableExpr < 1))
+    {
+        // TODO: handle 'if (SomeMethod(constArg))' patterns in fgFindJumpTargets
+        // The previous version of inliner optimistically assumed this is "has const arg that feeds a conditional"
+        multiplier += 3.0;
+        JITDUMP("\nCallsite passes a consant.  Multiplier increased to %g.", multiplier);
+    }
+
+    if ((m_FoldableBox > 0) && m_NonGenericCallsGeneric)
+    {
+        // We met some BOX+ISINST+BR or BOX+UNBOX patterns (see impBoxPatternMatch).
+        multiplier += 3.0;
+        JITDUMP("\nInline has %d foldable BOX ops.  Multiplier increased to %g.", m_FoldableBox, multiplier);
+    }
+
+#ifdef FEATURE_SIMD
+    if (m_HasSimd)
+    {
+        multiplier += JitConfig.JitInlineSIMDMultiplier();
+        JITDUMP("\nInline candidate has SIMD type args, locals or return value.  Multiplier increased to %g.",
+                multiplier);
+    }
+#endif
+
+    if (m_Intrinsic > 0)
+    {
+        // In most cases such intrinsics are lowered as single CPU instructions
+        multiplier += 1.0 + m_Intrinsic * 0.3;
+        JITDUMP("\nInline has %d intrinsics.  Multiplier increased to %g.", m_Intrinsic, multiplier);
+    }
+
+    if (m_ArgIsBoxedAtCallsite > 0)
+    {
+        // Callsite is going to box n arguments. We might avoid boxing after inlining.
+        // Example:
+        //
+        //  void DoNothing(object o) {} // o is unused, so the boxing is redundant
+        //
+        //  void Caller() => DoNothing(42); // 42 is going to be boxed at the call site.
+        //
+        multiplier += 0.5;
+        JITDUMP("\nCallsite is going to box %d arguments.  Multiplier increased to %g.", m_ArgIsBoxedAtCallsite,
+                multiplier);
+    }
+
+    if (m_ArgIsExactClsSigIsNot > 0)
+    {
+        // If we inline such a callee - we'll be able to devirtualize all the calls for such arguments
+        // Example:
+        //
+        //  int Callee(object o) => o.GetHashCode(); // virtual call
+        //
+        //  int Caller(string s) => Callee(s); // String is 'exact' (sealed)
+        //
+        multiplier += 2.5;
+        JITDUMP("\nCallsite passes %d arguments of exact classes while callee accepts non-exact ones.  Multiplier "
+                "increased to %g.",
+                m_ArgIsExactClsSigIsNot, multiplier);
+    }
+
+    if (m_FoldableIntrinsic > 0)
+    {
+        // Examples:
+        //
+        //   typeof(T1) == typeof(T2)
+        //   Math.Abs(constArg)
+        //   BitOperation.PopCount(10)
+        multiplier += 1.0 + m_FoldableIntrinsic;
+        JITDUMP("\nInline has %d foldable intrinsics.  Multiplier increased to %g.", m_FoldableIntrinsic, multiplier);
+    }
+
+    if (m_FoldableExpr > 0)
+    {
+        // E.g. add/mul/ceq, etc. over constant/constant arguments
+        multiplier += 1.0 + m_FoldableExpr;
+        JITDUMP("\nInline has %d foldable binary expressions.  Multiplier increased to %g.", m_FoldableExpr,
+                multiplier);
+    }
+
+    if (m_FoldableExprUn > 0)
+    {
+        // E.g. casts, negations, etc. over constants/constant arguments
+        multiplier += m_FoldableExprUn;
+        JITDUMP("\nInline has %d foldable unary expressions.  Multiplier increased to %g.", m_FoldableExprUn,
+                multiplier);
+    }
+
+    if (m_DivByCns > 0)
+    {
+        // E.g. callee has "x / arg0" where arg0 is a const at the call site -
+        // we'll avoid a very expensive DIV instruction after inlining.
+        multiplier += 3.0;
+        JITDUMP("\nInline has %d Div-by-constArg expressions.  Multiplier increased to %g.", m_DivByCns, multiplier);
+    }
+
+    if (m_BinaryExprWithCns > 0)
+    {
+        // In some cases we're not able to detect potentially foldable expressions, e.g.:
+        //
+        //   ldc.i4.0
+        //   call int SomeFoldableNonIntrinsicCall
+        //   ceq
+        //
+        // so at least we can note potential constant tests
+        multiplier += m_BinaryExprWithCns * 0.5;
+        JITDUMP("\nInline candidate has %d binary expressions with constants.  Multiplier increased to %g.",
+                m_BinaryExprWithCns, multiplier);
+
+        // For prejit roots we do not see the call sites. To be suitably optimistic
+        // assume that call sites may pass constants and make these m_BinaryExprWithCns
+        // foldable.
+        if (m_IsPrejitRoot)
+        {
+            multiplier += m_BinaryExprWithCns;
+        }
+    }
+
+    if (m_ArgFeedsConstantTest > 0)
+    {
+        multiplier += m_IsPrejitRoot ? 3.0 : 1.0;
+        JITDUMP("\nInline candidate has an arg that feeds a constant test.  Multiplier increased to %g.", multiplier);
+    }
+    else if (m_IsPrejitRoot && (m_ArgFeedsTest > 0))
+    {
+        multiplier += 3.0;
+        JITDUMP("\nPrejit root candidate has arg that feeds a conditional.  Multiplier increased to %g.", multiplier);
+    }
+
+    switch (m_CallsiteFrequency)
+    {
+        case InlineCallsiteFrequency::RARE:
+            // Note this one is not additive, it uses '=' instead of '+='
+            multiplier = 1.3;
+            JITDUMP("\nInline candidate callsite is rare.  Multiplier limited to %g.", multiplier);
+            break;
+        case InlineCallsiteFrequency::BORING:
+            multiplier += 1.3;
+            JITDUMP("\nInline candidate callsite is boring.  Multiplier increased to %g.", multiplier);
+            break;
+        case InlineCallsiteFrequency::WARM:
+            multiplier += 2.0;
+            JITDUMP("\nInline candidate callsite is warm.  Multiplier increased to %g.", multiplier);
+            break;
+        case InlineCallsiteFrequency::LOOP:
+            multiplier += 3.0;
+            JITDUMP("\nInline candidate callsite is in a loop.  Multiplier increased to %g.", multiplier);
+            break;
+        case InlineCallsiteFrequency::HOT:
+            multiplier += 3.0;
+            JITDUMP("\nInline candidate callsite is hot.  Multiplier increased to %g.", multiplier);
+            break;
+        default:
+            assert(!"Unexpected callsite frequency");
+            break;
+    }
+
+    if (m_FoldableSwitch > 0)
+    {
+        multiplier += 6.0;
+        JITDUMP("\nInline candidate has %d foldable switches.  Multiplier increased to %g.", m_FoldableSwitch,
+                multiplier);
+    }
+    else if (m_Switch > 0)
+    {
+        if (m_IsPrejitRoot)
+        {
+            // Assume the switches can be foldable in PrejitRoot mode.
+            multiplier += 6.0;
+            JITDUMP("\nPrejit root candidate has %d switches.  Multiplier increased to %g.", m_Switch, multiplier);
+        }
+        else
+        {
+            // TODO: Investigate cases where it makes sense to inline non-foldable switches
+            multiplier = 0.0;
+            JITDUMP("\nInline candidate has %d switches.  Multiplier limited to %g.", m_Switch, multiplier);
+        }
+    }
+
+    if (m_HasProfile)
+    {
+        // There are cases when Profile Data can be misleading or polluted:
+        //  1) We don't support context-sensitive instrumentation
+        //  2) The static profile that we ship can be slightly irrelevant for the current app
+        //  3) We don't support deoptimizations so we can't re-collect profiles if something changes
+        //  4) Sometimes, it still makes sense to inline methods in cold blocks to improve type/esacape analysis
+        //     for the whole caller.
+        //
+        const double profileTrustCoef = (double)JitConfig.JitExtDefaultPolicyProfTrust() / 10.0;
+        const double profileScale     = (double)JitConfig.JitExtDefaultPolicyProfScale() / 10.0;
+
+        if (m_RootCompiler->fgHaveTrustedProfileData())
+        {
+            multiplier *= (1.0 - profileTrustCoef) + min(m_ProfileFrequency, 1.0) * profileScale;
+        }
+        else
+        {
+            multiplier *= min(m_ProfileFrequency, 1.0) * profileScale;
+        }
+        JITDUMP("\nCallsite has profile data: %g.  Multiplier limited to %g.", m_ProfileFrequency, multiplier);
+    }
+
+    // Slow down if there are already too many locals
+    if (m_RootCompiler->lvaTableCnt > 64)
+    {
+        // E.g. MaxLocalsToTrack = 1024 and lvaTableCnt = 512 -> multiplier *= 0.5;
+        const double lclFullness = min(1.0, (double)m_RootCompiler->lvaTableCnt / JitConfig.JitMaxLocalsToTrack());
+        multiplier *= (1.0 - lclFullness);
+        JITDUMP("\nCaller has %d locals.  Multiplier decreased to %g.", m_RootCompiler->lvaTableCnt, multiplier);
+    }
+
+    if (m_BackwardJump)
+    {
+        // TODO: investigate in which cases we should [never] inline callees with loops.
+        // For now let's add some friction.
+        multiplier *= 0.7;
+        JITDUMP("\nInline has %d backward jumps (loops?).  Multiplier decreased to %g.", m_BackwardJump, multiplier);
+    }
+
+    if (m_IsCallsiteInNoReturnRegion)
+    {
+        // E.g.
+        //
+        //   throw new ArgumentException(SR.GetMessage());
+        //
+        // ^ Here we have two calls inside a BBJ_THROW block
+        // Unfortunately, we're not able to detect ThrowHelpers calls yet.
+
+        // Try to avoid inlining such methods for now.
+        multiplier = 1.0;
+        JITDUMP("\nCallsite is in a no-return region.  Multiplier limited to %g.", multiplier);
+    }
+
+#ifdef DEBUG
+
+    int additionalMultiplier = JitConfig.JitInlineAdditionalMultiplier();
+
+    if (additionalMultiplier != 0)
+    {
+        multiplier += additionalMultiplier;
+        JITDUMP("\nmultiplier increased via JitInlineAdditionalMultiplier=%d to %g.", additionalMultiplier, multiplier);
+    }
+
+    if (m_RootCompiler->compInlineStress())
+    {
+        multiplier += 10;
+        JITDUMP("\nmultiplier increased via inline stress to %g.", multiplier);
+    }
+
+#endif // DEBUG
+
+    return multiplier;
+}
+
+#if defined(DEBUG) || defined(INLINE_DATA)
+//------------------------------------------------------------------------
+// DumpXml: Dump ExtendedDefaultPolicy data as XML
+//
+// Arguments:
+//    file     - stream to output to
+//    indent   - indent level
+
+void ExtendedDefaultPolicy::OnDumpXml(FILE* file, unsigned indent) const
+{
+    DefaultPolicy::OnDumpXml(file, indent);
+    XATTR_R8(m_ProfileFrequency)
+    XATTR_I4(m_BinaryExprWithCns)
+    XATTR_I4(m_ArgCasted)
+    XATTR_I4(m_ArgIsStructByValue)
+    XATTR_I4(m_FldAccessOverArgStruct)
+    XATTR_I4(m_FoldableBox)
+    XATTR_I4(m_Intrinsic)
+    XATTR_I4(m_BackwardJump)
+    XATTR_I4(m_ThrowBlock)
+    XATTR_I4(m_ArgIsExactCls)
+    XATTR_I4(m_ArgIsExactClsSigIsNot)
+    XATTR_I4(m_ArgIsConst)
+    XATTR_I4(m_ArgIsBoxedAtCallsite)
+    XATTR_I4(m_FoldableIntrinsic)
+    XATTR_I4(m_FoldableExpr)
+    XATTR_I4(m_FoldableExprUn)
+    XATTR_I4(m_FoldableBranch)
+    XATTR_I4(m_FoldableSwitch)
+    XATTR_I4(m_Switch)
+    XATTR_I4(m_DivByCns)
+    XATTR_B(m_ReturnsStructByValue)
+    XATTR_B(m_IsFromValueClass)
+    XATTR_B(m_NonGenericCallsGeneric)
+    XATTR_B(m_IsCallsiteInNoReturnRegion)
+    XATTR_B(m_HasProfile)
+}
+#endif
+
+//------------------------------------------------------------------------
 // DiscretionaryPolicy: construct a new DiscretionaryPolicy
 //
 // Arguments:
@@ -1128,6 +1796,7 @@ void RandomPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
 // clang-format off
 DiscretionaryPolicy::DiscretionaryPolicy(Compiler* compiler, bool isPrejitRoot)
     : DefaultPolicy(compiler, isPrejitRoot)
+    , m_ProfileFrequency(0.0)
     , m_BlockCount(0)
     , m_Maxstack(0)
     , m_ArgCount(0)
@@ -1168,6 +1837,7 @@ DiscretionaryPolicy::DiscretionaryPolicy(Compiler* compiler, bool isPrejitRoot)
     , m_CallSiteWeight(0)
     , m_ModelCodeSizeEstimate(0)
     , m_PerCallInstructionEstimate(0)
+    , m_HasProfile(false)
     , m_IsClassCtor(false)
     , m_IsSameThis(false)
     , m_CallerHasNewArray(false)
@@ -1212,6 +1882,10 @@ void DiscretionaryPolicy::NoteBool(InlineObservation obs, bool value)
         case InlineObservation::CALLSITE_RARE_GC_STRUCT:
             // This is redundant since this policy tracks call site
             // hotness for all candidates. So ignore.
+            break;
+
+        case InlineObservation::CALLSITE_HAS_PROFILE:
+            m_HasProfile = value;
             break;
 
         default:
@@ -1279,6 +1953,21 @@ void DiscretionaryPolicy::NoteInt(InlineObservation obs, int value)
             DefaultPolicy::NoteInt(obs, value);
             break;
     }
+}
+
+//------------------------------------------------------------------------
+// NoteDouble: handle an observed double value
+//
+// Arguments:
+//    obs      - the current obsevation
+//    value    - the value being observed
+
+void DiscretionaryPolicy::NoteDouble(InlineObservation obs, double value)
+{
+    assert(obs == InlineObservation::CALLSITE_PROFILE_FREQUENCY);
+    assert(value >= 0.0);
+
+    m_ProfileFrequency = value;
 }
 
 //------------------------------------------------------------------------
@@ -1536,6 +2225,7 @@ void DiscretionaryPolicy::ComputeOpcodeBin(OPCODE opcode)
 
         case CEE_RET:
             m_ReturnCount++;
+            break;
 
         default:
             break;
@@ -1549,10 +2239,17 @@ void DiscretionaryPolicy::ComputeOpcodeBin(OPCODE opcode)
 bool DiscretionaryPolicy::PropagateNeverToRuntime() const
 {
     // Propagate most failures, but don't propagate when the inline
-    // was viable but unprofitable.
-    bool propagate = (m_Observation != InlineObservation::CALLEE_NOT_PROFITABLE_INLINE);
+    // was viable but unprofitable, or does not return..
+    //
+    switch (m_Observation)
+    {
+        case InlineObservation::CALLEE_NOT_PROFITABLE_INLINE:
+        case InlineObservation::CALLEE_DOES_NOT_RETURN:
+            return false;
 
-    return propagate;
+        default:
+            return true;
+    }
 }
 
 //------------------------------------------------------------------------
@@ -2012,6 +2709,11 @@ void ModelPolicy::NoteInt(InlineObservation obs, int value)
     // Let underlying policy do its thing.
     DiscretionaryPolicy::NoteInt(obs, value);
 
+    if (InlDecisionIsFailure(m_Decision))
+    {
+        return;
+    }
+
     // Fail fast for inlinees that are too large to ever inline.
     // The value of 120 is model-dependent; see notes above.
     if (!m_IsForceInline && (obs == InlineObservation::CALLEE_IL_CODE_SIZE) && (value >= 120))
@@ -2019,18 +2721,6 @@ void ModelPolicy::NoteInt(InlineObservation obs, int value)
         // Callee too big, not a candidate
         SetNever(InlineObservation::CALLEE_TOO_MUCH_IL);
         return;
-    }
-
-    // Safeguard against overly deep inlines
-    if (obs == InlineObservation::CALLSITE_DEPTH)
-    {
-        unsigned depthLimit = m_RootCompiler->m_inlineStrategy->GetMaxInlineDepth();
-
-        if (m_CallsiteDepth > depthLimit)
-        {
-            SetFailure(InlineObservation::CALLSITE_IS_TOO_DEEP);
-            return;
-        }
     }
 }
 
@@ -2165,6 +2855,204 @@ void ModelPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
     }
 }
 
+//------------------------------------------------------------------------/
+// ProfilePolicy: construct a new ProfilePolicy
+//
+// Arguments:
+//    compiler -- compiler instance doing the inlining (root compiler)
+//    isPrejitRoot -- true if this compiler is prejitting the root method
+
+ProfilePolicy::ProfilePolicy(Compiler* compiler, bool isPrejitRoot) : DiscretionaryPolicy(compiler, isPrejitRoot)
+{
+    // Empty
+}
+
+//------------------------------------------------------------------------
+// NoteInt: handle an observed integer value
+//
+// Arguments:
+//    obs      - the current obsevation
+//    value    - the value being observed
+//
+// Notes:
+//    The ILSize threshold used here should be large enough that
+//    it does not generally influence inlining decisions -- it only
+//    helps to make them faster.
+//
+//    The value used below is just a guess and needs refinement.
+
+void ProfilePolicy::NoteInt(InlineObservation obs, int value)
+{
+    // Let underlying policy do its thing.
+    DiscretionaryPolicy::NoteInt(obs, value);
+
+    if (InlDecisionIsFailure(m_Decision))
+    {
+        return;
+    }
+
+    // Fail fast for inlinees that are too large to ever inline.
+    //
+    if (!m_IsForceInline && (obs == InlineObservation::CALLEE_IL_CODE_SIZE) && (value >= 1000))
+    {
+        // Callee too big, not a candidate
+        SetNever(InlineObservation::CALLEE_TOO_MUCH_IL);
+        return;
+    }
+
+    // This observation happens after we determine profitability
+    // so we need to special case it here.
+    //
+    if (obs == InlineObservation::CALLEE_NUMBER_OF_BASIC_BLOCKS)
+    {
+        // Fail if this is a throw helper.
+        //
+        assert(m_IsForceInlineKnown);
+        assert(m_IsNoReturnKnown);
+        assert(value > 0);
+
+        if (!m_IsForceInline && m_IsNoReturn && (value == 1))
+        {
+            SetNever(InlineObservation::CALLEE_DOES_NOT_RETURN);
+            return;
+        }
+
+        // If we're mimicing the default policy because there's no PGO
+        // data for this call, also fail if thereare too many basic blocks.
+        //
+        if (!m_HasProfile && !m_IsForceInline && (value > MAX_BASIC_BLOCKS))
+        {
+            SetNever(InlineObservation::CALLEE_TOO_MANY_BASIC_BLOCKS);
+            return;
+        }
+    }
+}
+
+//------------------------------------------------------------------------
+// DetermineProfitability: determine if this inline is profitable
+//
+// Arguments:
+//    methodInfo -- method info for the callee
+//
+// Notes:
+//    There are currently two parameters that are ad-hoc: the
+//    "global importance" weight and the size/speed threshold. Ideally this
+//    policy would have just one tunable parameter, the threshold,
+//    which describes how willing we are to trade size for speed.
+
+void ProfilePolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
+{
+    // We expect to have profile data, otherwise we should not
+    // have used this policy.
+    //
+    if (!m_HasProfile)
+    {
+        // Todo: investigate these cases more carefully.
+        //
+        SetFailure(InlineObservation::CALLSITE_NOT_PROFITABLE_INLINE);
+        return;
+    }
+
+    // Do some homework
+    MethodInfoObservations(methodInfo);
+    EstimateCodeSize();
+    EstimatePerformanceImpact();
+
+    // Preliminary inline model.
+    //
+    // If code size is estimated to increase, look at
+    // the profitability model for guidance.
+    //
+    // If code size will decrease, just inline.
+    //
+    if (m_ModelCodeSizeEstimate <= 0)
+    {
+        // Inline will likely decrease code size
+        JITLOG_THIS(m_RootCompiler, (LL_INFO100000, "Inline profitable, will decrease code size by %g bytes\n",
+                                     (double)-m_ModelCodeSizeEstimate / SIZE_SCALE));
+
+        if (m_IsPrejitRoot)
+        {
+            SetCandidate(InlineObservation::CALLEE_IS_SIZE_DECREASING_INLINE);
+        }
+        else
+        {
+            SetCandidate(InlineObservation::CALLSITE_IS_SIZE_DECREASING_INLINE);
+        }
+
+        return;
+    }
+
+    JITDUMP("Have profile data for call site...\n");
+
+    // This is a (projected) size increasing inline, and we have profile
+    // data available at the call site.
+    //
+    // We estimate that this inline will increase code size.  Only
+    // inline if the performance win is sufficiently large to
+    // justify bigger code.
+
+    // First compute the number of instruction executions saved
+    // via inlining per call to the callee per byte of code size
+    // impact.
+    //
+    // The per call instruction estimate is negative if the inline
+    // will reduce instruction count. Flip the sign here to make
+    // positive be better and negative worse.
+    double perCallBenefit = -((double)m_PerCallInstructionEstimate / (double)m_ModelCodeSizeEstimate);
+
+    // Multiply by the call frequency to scale the benefit by
+    // the local importance.
+    //
+    double localBenefit = perCallBenefit * m_ProfileFrequency;
+
+    // Account for "global importance"
+    //
+    double globalImportance = 1.0;
+    double benefit          = globalImportance * localBenefit;
+
+    // Compare this to the threshold, and inline if greater.
+    //
+    // The threshold is interpretable as a speed/size tradeoff,
+    // roughly the number benefit units needed for one extra byte of code.
+    // to spend to get one unit of benefit.
+    //
+    // Default is 65/245 = 0.25
+    //
+    double threshold    = JitConfig.JitInlinePolicyProfileThreshold() / 256.0;
+    bool   shouldInline = (benefit > threshold);
+
+    JITLOG_THIS(m_RootCompiler,
+                (LL_INFO100000, "Inline %s profitable: benefit=%g (perCall=%g, local=%g, global=%g, size=%g)\n",
+                 shouldInline ? "is" : "is not", benefit, perCallBenefit, localBenefit, globalImportance,
+                 (double)m_PerCallInstructionEstimate / SIZE_SCALE, (double)m_ModelCodeSizeEstimate / SIZE_SCALE));
+
+    if (!shouldInline)
+    {
+        // Fail the inline
+        if (m_IsPrejitRoot)
+        {
+            SetNever(InlineObservation::CALLEE_NOT_PROFITABLE_INLINE);
+        }
+        else
+        {
+            SetFailure(InlineObservation::CALLSITE_NOT_PROFITABLE_INLINE);
+        }
+    }
+    else
+    {
+        // Update candidacy
+        if (m_IsPrejitRoot)
+        {
+            SetCandidate(InlineObservation::CALLEE_IS_PROFITABLE_INLINE);
+        }
+        else
+        {
+            SetCandidate(InlineObservation::CALLSITE_IS_PROFITABLE_INLINE);
+        }
+    }
+}
+
 #if defined(DEBUG) || defined(INLINE_DATA)
 
 //------------------------------------------------------------------------/
@@ -2177,6 +3065,19 @@ void ModelPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
 FullPolicy::FullPolicy(Compiler* compiler, bool isPrejitRoot) : DiscretionaryPolicy(compiler, isPrejitRoot)
 {
     // Empty
+}
+
+//------------------------------------------------------------------------
+// BudgetCheck: see if this inline would exceed the current budget
+//
+// Returns:
+//   True if inline would exceed the budget.
+//
+bool FullPolicy::BudgetCheck() const
+{
+    // There are no budget restrictions for the full policy.
+    //
+    return false;
 }
 
 //------------------------------------------------------------------------
@@ -2481,7 +3382,7 @@ bool ReplayPolicy::FindContext(InlineContext* context)
     //
     // Token and Hash we're looking for.
     mdMethodDef contextToken  = m_RootCompiler->info.compCompHnd->getMethodDefFromMethod(context->GetCallee());
-    unsigned    contextHash   = m_RootCompiler->info.compCompHnd->getMethodHash(context->GetCallee());
+    unsigned    contextHash   = m_RootCompiler->compMethodHash(context->GetCallee());
     unsigned    contextOffset = (unsigned)context->GetOffset();
 
     return FindInline(contextToken, contextHash, contextOffset);
@@ -2665,7 +3566,7 @@ bool ReplayPolicy::FindInline(CORINFO_METHOD_HANDLE callee)
 {
     // Token and Hash we're looking for
     mdMethodDef calleeToken = m_RootCompiler->info.compCompHnd->getMethodDefFromMethod(callee);
-    unsigned    calleeHash  = m_RootCompiler->info.compCompHnd->getMethodHash(callee);
+    unsigned    calleeHash  = m_RootCompiler->compMethodHash(callee);
 
     // Abstract this or just pass through raw bits
     // See matching code in xml writer

@@ -84,12 +84,14 @@ private:
     PTR_Assembly *m_pNativeMetadataAssemblyRefMap;
     
     IMAGE_DATA_DIRECTORY *m_pComponentAssemblies;
+    IMAGE_DATA_DIRECTORY *m_pComponentAssemblyMvids;
     uint32_t m_componentAssemblyCount;
     uint32_t m_manifestAssemblyCount;
     SHash<AssemblyNameIndexHashTraits> m_assemblySimpleNameToIndexMap;
     
     Crst m_eagerFixupsLock;
     bool m_eagerFixupsHaveRun;
+    bool m_readyToRunCodeDisabled;
 
 private:
     NativeImage(AssemblyLoadContext *pAssemblyLoadContext, PEImageLayout *peImageLayout, LPCUTF8 imageFileName);
@@ -104,7 +106,8 @@ public:
         Module *componentModule,
         LPCUTF8 nativeImageFileName,
         AssemblyLoadContext *pAssemblyLoadContext,
-        LoaderAllocator *pLoaderAllocator);
+        LoaderAllocator *pLoaderAllocator,
+        /* out */ bool *isNewNativeImage);
 
     Crst *EagerFixupsLock() { return &m_eagerFixupsLock; }
     bool EagerFixupsHaveRun() const { return m_eagerFixupsHaveRun; }
@@ -118,10 +121,24 @@ public:
     PTR_Assembly *GetManifestMetadataAssemblyRefMap() { return m_pNativeMetadataAssemblyRefMap; }
     AssemblyLoadContext *GetAssemblyLoadContext() const { return m_pAssemblyLoadContext; }
 
-    Assembly *LoadManifestAssembly(uint32_t rowid);
+    Assembly *LoadManifestAssembly(uint32_t rowid, DomainAssembly *pParentAssembly);
     
     PTR_READYTORUN_CORE_HEADER GetComponentAssemblyHeader(LPCUTF8 assemblySimpleName);
-    
+
+    void CheckAssemblyMvid(Assembly *assembly) const;
+
+    void DisableAllR2RCode()
+    {
+        LIMITED_METHOD_CONTRACT;
+        m_readyToRunCodeDisabled = true;
+    }
+
+    bool ReadyToRunCodeDisabled()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_readyToRunCodeDisabled;
+    }
+
 private:
     IMDInternalImport *LoadManifestMetadata();
 };

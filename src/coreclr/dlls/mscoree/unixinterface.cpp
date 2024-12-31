@@ -18,8 +18,28 @@
 #include "../../vm/gdbjithelpers.h"
 #endif // FEATURE_GDBJIT
 #include "bundle.h"
+#include "pinvokeoverride.h"
 
 #define ASSERTE_ALL_BUILDS(expr) _ASSERTE_ALL_BUILDS(__FILE__, (expr))
+
+#ifdef TARGET_UNIX
+#define NO_HOSTING_API_RETURN_ADDRESS ((void*)ULONG_PTR_MAX)
+void* g_hostingApiReturnAddress = NO_HOSTING_API_RETURN_ADDRESS;
+
+class HostingApiFrameHolder
+{
+public:
+    HostingApiFrameHolder(void* returnAddress)
+    {
+        g_hostingApiReturnAddress = returnAddress;
+    }
+
+    ~HostingApiFrameHolder()
+    {
+        g_hostingApiReturnAddress = NO_HOSTING_API_RETURN_ADDRESS;
+    }
+};
+#endif // TARGET_UNIX
 
 // Holder for const wide strings
 typedef NewArrayHolder<const WCHAR> ConstWStringHolder;
@@ -119,7 +139,8 @@ static void ConvertConfigPropertiesToUnicode(
     int propertyCount,
     LPCWSTR** propertyKeysWRef,
     LPCWSTR** propertyValuesWRef,
-    BundleProbe** bundleProbe,
+    BundleProbeFn** bundleProbe,
+    PInvokeOverrideFn** pinvokeOverride,
     bool* hostPolicyEmbedded)
 {
     LPCWSTR* propertyKeysW = new (nothrow) LPCWSTR[propertyCount];
@@ -137,7 +158,13 @@ static void ConvertConfigPropertiesToUnicode(
         {
             // If this application is a single-file bundle, the bundle-probe callback 
             // is passed in as the value of "BUNDLE_PROBE" property (encoded as a string).
-            *bundleProbe = (BundleProbe*)_wcstoui64(propertyValuesW[propertyIndex], nullptr, 0);
+            *bundleProbe = (BundleProbeFn*)_wcstoui64(propertyValuesW[propertyIndex], nullptr, 0);
+        }
+        else if (strcmp(propertyKeys[propertyIndex], "PINVOKE_OVERRIDE") == 0)
+        {
+            // If host provides a PInvoke override (typically in a single-file bundle),
+            // the override callback is passed in as the value of "PINVOKE_OVERRIDE" property (encoded as a string).
+            *pinvokeOverride = (PInvokeOverrideFn*)_wcstoui64(propertyValuesW[propertyIndex], nullptr, 0);
         }
         else if (strcmp(propertyKeys[propertyIndex], "HOSTPOLICY_EMBEDDED") == 0)
         {
@@ -171,6 +198,7 @@ extern "C" int coreclr_create_delegate(void*, unsigned int, const char*, const c
 //  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
 //
 extern "C"
+NOINLINE
 DLLEXPORT
 int coreclr_initialize(
             const char* exePath,
@@ -185,8 +213,13 @@ int coreclr_initialize(
 
     LPCWSTR* propertyKeysW;
     LPCWSTR* propertyValuesW;
-    BundleProbe* bundleProbe = nullptr;
+    BundleProbeFn* bundleProbe = nullptr;
     bool hostPolicyEmbedded = false;
+    PInvokeOverrideFn* pinvokeOverride = nullptr;
+
+#ifdef TARGET_UNIX
+    HostingApiFrameHolder apiFrameHolder(_ReturnAddress());
+#endif
 
     ConvertConfigPropertiesToUnicode(
         propertyKeys,
@@ -195,6 +228,7 @@ int coreclr_initialize(
         &propertyKeysW,
         &propertyValuesW,
         &bundleProbe,
+        &pinvokeOverride,
         &hostPolicyEmbedded);
 
 #ifdef TARGET_UNIX
@@ -211,6 +245,11 @@ int coreclr_initialize(
 
     g_hostpolicy_embedded = hostPolicyEmbedded;
 
+    if (pinvokeOverride != nullptr)
+    {
+        PInvokeOverride::SetPInvokeOverride(pinvokeOverride, PInvokeOverride::Source::RuntimeConfiguration);
+    }
+
     ReleaseHolder<ICLRRuntimeHost4> host;
 
     hr = CorHost2::CreateObject(IID_ICLRRuntimeHost4, (void**)&host);
@@ -220,7 +259,7 @@ int coreclr_initialize(
 
     if (bundleProbe != nullptr)
     {
-        static Bundle bundle(StringToUnicode(exePath), bundleProbe);
+        static Bundle bundle(exePath, bundleProbe);
         Bundle::AppBundle = &bundle;
     }
 
@@ -406,6 +445,7 @@ int coreclr_create_delegate(
 //  HRESULT indicating status of the operation. S_OK if the assembly was successfully executed
 //
 extern "C"
+NOINLINE
 DLLEXPORT
 int coreclr_execute_assembly(
             void* hostHandle,
@@ -420,6 +460,10 @@ int coreclr_execute_assembly(
         return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
     }
     *exitCode = -1;
+
+#ifdef TARGET_UNIX
+    HostingApiFrameHolder apiFrameHolder(_ReturnAddress());
+#endif
 
     ICLRRuntimeHost4* host = reinterpret_cast<ICLRRuntimeHost4*>(hostHandle);
 

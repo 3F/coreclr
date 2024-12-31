@@ -62,7 +62,6 @@ void CallDescrWorkerWithHandler(
 
 #endif
 
-
     BEGIN_CALL_TO_MANAGEDEX(fCriticalCall ? EEToManagedCriticalCall : EEToManagedDefault);
 
     CallDescrWorker(pCallDescrData);
@@ -103,7 +102,6 @@ void CallDescrWorker(CallDescrData * pCallDescrData)
     DWORD_PTR ObjRefTable[OBJREF_TABSIZE];
 
     curThread = GetThread();
-    _ASSERTE(curThread != NULL);
 
     static_assert_no_msg(sizeof(curThread->dangerousObjRefs) == sizeof(ObjRefTable));
     memcpy(ObjRefTable, curThread->dangerousObjRefs, sizeof(ObjRefTable));
@@ -514,7 +512,8 @@ void MethodDescCallSite::CallTargetWorker(const ARG_SLOT *pArguments, ARG_SLOT *
     CallDescrData callDescrData;
 
     callDescrData.pSrc = pTransitionBlock + sizeof(TransitionBlock);
-    callDescrData.numStackSlots = nStackBytes / STACK_ELEM_SIZE;
+    _ASSERTE((nStackBytes % TARGET_POINTER_SIZE) == 0);
+    callDescrData.numStackSlots = nStackBytes / TARGET_POINTER_SIZE;
 #ifdef CALLDESCR_ARGREGS
     callDescrData.pArgumentRegisters = (ArgumentRegisters*)(pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters());
 #endif

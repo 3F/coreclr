@@ -176,6 +176,10 @@
 #include "stacksampler.h"
 #endif
 
+#ifndef CROSSGEN_COMPILE
+#include "win32threadpool.h"
+#endif
+
 #include <shlwapi.h>
 
 #include "bbsweep.h"
@@ -201,15 +205,12 @@
 #include "interpreter.h"
 #endif // FEATURE_INTERPRETER
 
-#include "../binder/inc/coreclrbindercommon.h"
-
-
 #ifdef FEATURE_PERFMAP
 #include "perfmap.h"
 #endif
 
-#include "diagnosticserver.h"
-#include "eventpipe.h"
+#include "diagnosticserveradapter.h"
+#include "eventpipeadapter.h"
 
 #ifndef TARGET_UNIX
 // Included for referencing __security_cookie
@@ -301,12 +302,8 @@ HRESULT EnsureEEStarted()
     {
         BEGIN_ENTRYPOINT_NOTHROW;
 
-#ifndef TARGET_UNIX
-        // The sooner we do this, the sooner we avoid probing registry entries.
-        // (Perf Optimization for VSWhidbey:113373.)
-        REGUTIL::InitOptionalConfigCache();
-#endif
-
+        // Initialize our configuration.
+        CLRConfig::Initialize();
 
         BOOL bStarted=FALSE;
 
@@ -492,15 +489,9 @@ void InitGSCookie()
 
     volatile GSCookie * pGSCookiePtr = GetProcessGSCookiePtr();
 
-#ifdef TARGET_UNIX
-    // On Unix, the GS cookie is stored in a read only data segment
-    DWORD newProtection = PAGE_READWRITE;
-#else // TARGET_UNIX
-    DWORD newProtection = PAGE_EXECUTE_READWRITE;
-#endif // !TARGET_UNIX
-
+    // The GS cookie is stored in a read only data segment
     DWORD oldProtection;
-    if(!ClrVirtualProtect((LPVOID)pGSCookiePtr, sizeof(GSCookie), newProtection, &oldProtection))
+    if(!ClrVirtualProtect((LPVOID)pGSCookiePtr, sizeof(GSCookie), PAGE_READWRITE, &oldProtection))
     {
         ThrowLastError();
     }
@@ -589,13 +580,18 @@ do { \
 
 #ifndef CROSSGEN_COMPILE
 #ifdef TARGET_UNIX
-void EESocketCleanupHelper()
+void EESocketCleanupHelper(bool isExecutingOnAltStack)
 {
     CONTRACTL
     {
         GC_NOTRIGGER;
         MODE_ANY;
     } CONTRACTL_END;
+
+    if (isExecutingOnAltStack)
+    {
+        GetThread()->SetExecutingOnAltStack();
+    }
 
     // Close the debugger transport socket first
     if (g_pDebugInterface != NULL)
@@ -605,11 +601,16 @@ void EESocketCleanupHelper()
 
     // Close the diagnostic server socket.
 #ifdef FEATURE_PERFTRACING
-    DiagnosticServer::Shutdown();
+    DiagnosticServerAdapter::Shutdown();
 #endif // FEATURE_PERFTRACING
 }
 #endif // TARGET_UNIX
 #endif // CROSSGEN_COMPILE
+
+void FatalErrorHandler(UINT errorCode, LPCWSTR pszMessage)
+{
+    EEPOLICY_HANDLE_FATAL_ERROR_WITH_MESSAGE(errorCode, pszMessage);
+}
 
 void EEStartupHelper()
 {
@@ -634,6 +635,15 @@ void EEStartupHelper()
         g_fEEInit = true;
 
 #ifndef CROSSGEN_COMPILE
+
+        // We cache the SystemInfo for anyone to use throughout the life of the EE.
+        GetSystemInfo(&g_SystemInfo);
+
+        // Set callbacks so that LoadStringRC knows which language our
+        // threads are in so that it can return the proper localized string.
+    // TODO: This shouldn't rely on the LCID (id), but only the name
+        SetResourceCultureCallbacks(GetThreadUICultureNames,
+        GetThreadUICultureId);
 
 #ifndef TARGET_UNIX
         ::SetConsoleCtrlHandler(DbgCtrlCHandler, TRUE/*add*/);
@@ -665,6 +675,11 @@ void EEStartupHelper()
         // This needs to be done before the EE has started
         InitializeStartupFlags();
 
+        IfFailGo(ExecutableAllocator::StaticInitialize(FatalErrorHandler));
+
+        Thread::StaticInitialize();
+        ThreadpoolMgr::StaticInitialize();
+
         MethodDescBackpatchInfoTracker::StaticInitialize();
         CodeVersionManager::StaticInitialize();
         TieredCompilationManager::StaticInitialize();
@@ -676,7 +691,7 @@ void EEStartupHelper()
 
 #ifdef FEATURE_PERFTRACING
         // Initialize the event pipe.
-        EventPipe::Initialize();
+        EventPipeAdapter::Initialize();
 #endif // FEATURE_PERFTRACING
         GenAnalysis::Initialize();
 
@@ -685,19 +700,20 @@ void EEStartupHelper()
 #endif // TARGET_UNIX
 
 #ifdef STRESS_LOG
-        if (REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::UNSUPPORTED_StressLog, g_pConfig->StressLog ()) != 0) {
-            unsigned facilities = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_LogFacility, LF_ALL);
-            unsigned level = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::EXTERNAL_LogLevel, LL_INFO1000);
-            unsigned bytesPerThread = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::UNSUPPORTED_StressLogSize, STRESSLOG_CHUNK_SIZE * 4);
-            unsigned totalBytes = REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::UNSUPPORTED_TotalStressLogSize, STRESSLOG_CHUNK_SIZE * 1024);
-            StressLog::Initialize(facilities, level, bytesPerThread, totalBytes, GetModuleInst());
+        if (CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_StressLog, g_pConfig->StressLog()) != 0) {
+            unsigned facilities = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_LogFacility, LF_ALL);
+            unsigned level = CLRConfig::GetConfigValue(CLRConfig::EXTERNAL_LogLevel, LL_INFO1000);
+            unsigned bytesPerThread = CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_StressLogSize, STRESSLOG_CHUNK_SIZE * 4);
+            unsigned totalBytes = CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_TotalStressLogSize, STRESSLOG_CHUNK_SIZE * 1024);
+            CLRConfigStringHolder logFilename = CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_StressLogFilename);
+            StressLog::Initialize(facilities, level, bytesPerThread, totalBytes, GetClrModuleBase(), logFilename);
             g_pStressLog = &StressLog::theLog;
         }
 #endif
 
 #ifdef FEATURE_PERFTRACING
-        DiagnosticServer::Initialize();
-        DiagnosticServer::PauseForDiagnosticsMonitor();
+        DiagnosticServerAdapter::Initialize();
+        DiagnosticServerAdapter::PauseForDiagnosticsMonitor();
 #endif // FEATURE_PERFTRACING
 
 #ifdef FEATURE_GDBJIT
@@ -741,9 +757,6 @@ void EEStartupHelper()
 #endif // !TARGET_UNIX
         InitEventStore();
 #endif
-
-        // Initialize the default Assembly Binder and the binder infrastructure
-        IfFailGoLog(CCoreCLRBinderHelper::Init());
 
         if (g_pConfig != NULL)
         {
@@ -789,7 +802,7 @@ void EEStartupHelper()
 #ifndef CROSSGEN_COMPILE
 
         // Cross-process named objects are not supported in PAL
-        // (see CorUnix::InternalCreateEvent - src/pal/src/synchobj/event.cpp.272)
+        // (see CorUnix::InternalCreateEvent - src/pal/src/synchobj/event.cpp)
 #if !defined(TARGET_UNIX)
         // Initialize the sweeper thread.
         if (g_pConfig->GetZapBBInstr() != NULL)
@@ -815,11 +828,11 @@ void EEStartupHelper()
 #ifndef TARGET_UNIX
         {
             // Record mscorwks geometry
-            PEDecoder pe(g_hThisInst);
+            PEDecoder pe(GetClrModuleBase());
 
             g_runtimeLoadedBaseAddress = (SIZE_T)pe.GetBase();
             g_runtimeVirtualSize = (SIZE_T)pe.GetVirtualSize();
-            InitCodeAllocHint(g_runtimeLoadedBaseAddress, g_runtimeVirtualSize, GetRandomInt(64));
+            ExecutableAllocator::InitCodeAllocHint(g_runtimeLoadedBaseAddress, g_runtimeVirtualSize, GetRandomInt(64));
         }
 #endif // !TARGET_UNIX
 
@@ -839,7 +852,7 @@ void EEStartupHelper()
 #ifndef CROSSGEN_COMPILE
 
         InitializeGarbageCollector();
-        
+
         if (!GCHandleUtilities::GetGCHandleManager()->Initialize())
         {
             IfFailGo(E_OUTOFMEMORY);
@@ -946,7 +959,7 @@ void EEStartupHelper()
         // Finish setting up rest of EventPipe - specifically enable SampleProfiler if it was requested at startup.
         // SampleProfiler needs to cooperate with the GC which hasn't fully finished setting up in the first part of the
         // EventPipe initialization, so this is done after the GC has been fully initialized.
-        EventPipe::FinishInitialize();
+        EventPipeAdapter::FinishInitialize();
 #endif // FEATURE_PERFTRACING
 
         // This isn't done as part of InitializeGarbageCollector() above because thread
@@ -971,6 +984,8 @@ void EEStartupHelper()
 #endif
 
 #endif // CROSSGEN_COMPILE
+
+        Assembly::Initialize();
 
         SystemDomain::System()->Init();
 
@@ -1013,7 +1028,7 @@ void EEStartupHelper()
                                                 g_MiniMetaDataBuffMaxSize, MEM_COMMIT, PAGE_READWRITE);
 #endif // FEATURE_MINIMETADATA_IN_TRIAGEDUMPS
 
-#endif // CROSSGEN_COMPILE
+#endif // !CROSSGEN_COMPILE
 
         g_fEEStarted = TRUE;
         g_EEStartupStatus = S_OK;
@@ -1039,7 +1054,6 @@ void EEStartupHelper()
 
         // Perform CoreLib consistency check if requested
         g_CoreLib.CheckExtended();
-
 #endif // _DEBUG
 
 #endif // !CROSSGEN_COMPILE
@@ -1179,7 +1193,7 @@ void WaitForEndOfShutdown()
     // We are shutting down.  GC triggers does not have any effect now.
     CONTRACT_VIOLATION(GCViolation);
 
-    Thread *pThread = GetThread();
+    Thread *pThread = GetThreadNULLOk();
     // After a thread is blocked in WaitForEndOfShutdown, the thread should not enter runtime again,
     // and block at WaitForEndOfShutdown again.
     if (pThread)
@@ -1209,19 +1223,30 @@ void STDMETHODCALLTYPE EEShutDownHelper(BOOL fIsDllUnloading)
     // Used later for a callback.
     CEEInfo ceeInf;
 
+#ifdef FEATURE_PGO
+    EX_TRY
+    {
+        PgoManager::Shutdown();
+    }
+    EX_CATCH
+    {
+    }
+    EX_END_CATCH(SwallowAllExceptions);
+#endif
+
     if (!fIsDllUnloading)
     {
         ETW::EnumerationLog::ProcessShutdown();
 
 #ifdef FEATURE_PERFTRACING
-        EventPipe::Shutdown();
-        DiagnosticServer::Shutdown();
+        EventPipeAdapter::Shutdown();
+        DiagnosticServerAdapter::Shutdown();
 #endif // FEATURE_PERFTRACING
     }
 
 #if defined(FEATURE_COMINTEROP)
     // Get the current thread.
-    Thread * pThisThread = GetThread();
+    Thread * pThisThread = GetThreadNULLOk();
 #endif
 
     // If the process is detaching then set the global state.
@@ -1322,10 +1347,6 @@ void STDMETHODCALLTYPE EEShutDownHelper(BOOL fIsDllUnloading)
         PerfMap::Destroy();
 #endif
 
-#ifdef FEATURE_PGO
-        PgoManager::Shutdown();
-#endif
-
         {
             // If we're doing basic block profiling, we need to write the log files to disk.
             static BOOL fIBCLoggingDone = FALSE;
@@ -1386,10 +1407,10 @@ void STDMETHODCALLTYPE EEShutDownHelper(BOOL fIsDllUnloading)
             // Don't call back in to the profiler if we are being torn down, it might be unloaded
             if (!fIsDllUnloading)
             {
-                BEGIN_PIN_PROFILER(CORProfilerPresent());
+                BEGIN_PROFILER_CALLBACK(CORProfilerPresent());
                 GCX_PREEMP();
-                g_profControlBlock.pProfInterface->Shutdown();
-                END_PIN_PROFILER();
+                (&g_profControlBlock)->Shutdown();
+                END_PROFILER_CALLBACK();
             }
 
             g_fEEShutDown |= ShutDown_Profiler;
@@ -1684,7 +1705,7 @@ void STDMETHODCALLTYPE EEShutDown(BOOL fIsDllUnloading)
 #endif
     }
 
-    if (GetThread())
+    if (GetThreadNULLOk())
     {
         GCX_COOP();
         EEShutDownHelper(fIsDllUnloading);
@@ -1779,6 +1800,8 @@ LONG DllMainFilter(PEXCEPTION_POINTERS p, PVOID pv)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+#if !defined(CORECLR_EMBEDDED)
+
 //*****************************************************************************
 // This is the part of the old-style DllMain that initializes the
 // stuff that the EE team works on. It's called from the real DllMain
@@ -1814,21 +1837,6 @@ BOOL STDMETHODCALLTYPE EEDllMain( // TRUE on success, FALSE on error.
 
     switch (pParam->dwReason)
         {
-            case DLL_PROCESS_ATTACH:
-            {
-                // We cache the SystemInfo for anyone to use throughout the
-                // life of the DLL.
-                GetSystemInfo(&g_SystemInfo);
-
-                // Set callbacks so that LoadStringRC knows which language our
-                // threads are in so that it can return the proper localized string.
-            // TODO: This shouldn't rely on the LCID (id), but only the name
-                SetResourceCultureCallbacks(GetThreadUICultureNames,
-                                            GetThreadUICultureId);
-
-                break;
-            }
-
             case DLL_PROCESS_DETACH:
             {
                 // lpReserved is NULL if we're here because someone called FreeLibrary
@@ -1855,35 +1863,6 @@ BOOL STDMETHODCALLTYPE EEDllMain( // TRUE on success, FALSE on error.
                 }
                 break;
             }
-
-            case DLL_THREAD_DETACH:
-            {
-                // Don't destroy threads here if we're in shutdown (shutdown will
-                // clean up for us instead).
-
-                Thread* thread = GetThread();
-                if (thread)
-                {
-#ifdef FEATURE_COMINTEROP
-                    // reset the CoInitialize state
-                    // so we don't call CoUninitialize during thread detach
-                    thread->ResetCoInitialized();
-#endif // FEATURE_COMINTEROP
-                    // For case where thread calls ExitThread directly, we need to reset the
-                    // frame pointer. Otherwise stackwalk would AV. We need to do it in cooperative mode.
-                    // We need to set m_GCOnTransitionsOK so this thread won't trigger GC when toggle GC mode
-                    if (thread->m_pFrame != FRAME_TOP)
-                    {
-#ifdef _DEBUG
-                        thread->m_GCOnTransitionsOK = FALSE;
-#endif
-                        GCX_COOP_NO_DTOR();
-                        thread->m_pFrame = FRAME_TOP;
-                        GCX_COOP_NO_DTOR_END();
-                    }
-                    thread->DetachThread(TRUE);
-                }
-            }
         }
 
     }
@@ -1892,11 +1871,59 @@ BOOL STDMETHODCALLTYPE EEDllMain( // TRUE on success, FALSE on error.
     }
     PAL_ENDTRY;
 
-    if (dwReason == DLL_THREAD_DETACH || dwReason == DLL_PROCESS_DETACH)
-    {
-        ThreadDetaching();
-    }
     return TRUE;
+}
+
+#endif // !defined(CORECLR_EMBEDDED)
+
+struct TlsDestructionMonitor
+{
+    bool m_activated = false;
+
+    void Activate()
+    {
+        m_activated = true;
+    }
+
+    ~TlsDestructionMonitor()
+    {
+        if (m_activated)
+        {
+            Thread* thread = GetThreadNULLOk();
+            if (thread)
+            {
+#ifdef FEATURE_COMINTEROP
+                // reset the CoInitialize state
+                // so we don't call CoUninitialize during thread detach
+                thread->ResetCoInitialized();
+#endif // FEATURE_COMINTEROP
+                // For case where thread calls ExitThread directly, we need to reset the
+                // frame pointer. Otherwise stackwalk would AV. We need to do it in cooperative mode.
+                // We need to set m_GCOnTransitionsOK so this thread won't trigger GC when toggle GC mode
+                if (thread->m_pFrame != FRAME_TOP)
+                {
+#ifdef _DEBUG
+                    thread->m_GCOnTransitionsOK = FALSE;
+#endif
+                    GCX_COOP_NO_DTOR();
+                    thread->m_pFrame = FRAME_TOP;
+                    GCX_COOP_NO_DTOR_END();
+                }
+                thread->DetachThread(TRUE);
+            }
+
+            ThreadDetaching();
+        }
+    }
+};
+
+// This thread local object is used to detect thread shutdown. Its destructor
+// is called when a thread is being shut down.
+thread_local TlsDestructionMonitor tls_destructionMonitor;
+
+void EnsureTlsDestructionMonitor()
+{
+    tls_destructionMonitor.Activate();
 }
 
 #ifdef DEBUGGING_SUPPORTED
@@ -1974,6 +2001,12 @@ static void InitializeDebugger(void)
         }
     }
 
+    static ConfigDWORD debuggerDisablesCodeVersioning;
+    if( (debuggerDisablesCodeVersioning.val(CLRConfig::EXTERNAL_DebuggerLaunchDisablesCodeVersioning) != 0) && CORDebuggerAttached())
+    {
+        LOG((LF_CORDB, LL_INFO10, "Debugger is active at startup, disabling code versioning to prevent a potential deadlock.\n"));
+        g_pConfig->DisableDefaultCodeVersioning();
+    }
 
     LOG((LF_CORDB, LL_INFO10, "Left-side debugging services setup.\n"));
 
@@ -2046,7 +2079,7 @@ static HRESULT GetThreadUICultureNames(__inout StringArrayList* pCultureNames)
         InlineSString<LOCALE_NAME_MAX_LENGTH> sParentCulture;
 
 #if 0 // Enable and test if/once the unmanaged runtime is localized
-        Thread * pThread = GetThread();
+        Thread * pThread = GetThreadNULLOk();
 
         // When fatal errors have occured our invariants around GC modes may be broken and attempting to transition to co-op may hang
         // indefinately. We want to ensure a clean exit so rather than take the risk of hang we take a risk of the error resource not
@@ -2175,7 +2208,7 @@ static int GetThreadUICultureId(__out LocaleIDValue* pLocale)
 
     int Result = 0;
 
-    Thread * pThread = GetThread();
+    Thread * pThread = GetThreadNULLOk();
 
 #if 0 // Enable and test if/once the unmanaged runtime is localized
     // When fatal errors have occured our invariants around GC modes may be broken and attempting to transition to co-op may hang

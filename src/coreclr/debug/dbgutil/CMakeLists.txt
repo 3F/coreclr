@@ -2,11 +2,11 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 if(CLR_CMAKE_HOST_WIN32)
   #use static crt
-  add_definitions(-MT)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
 endif(CLR_CMAKE_HOST_WIN32)
 
 if(CLR_CMAKE_HOST_WIN32 OR CLR_CMAKE_HOST_OSX)
-  include_directories(${CLR_DIR}/src/inc/llvm)
+  include_directories(${CLR_DIR}/inc/llvm)
 endif(CLR_CMAKE_HOST_WIN32 OR CLR_CMAKE_HOST_OSX)
 
 add_definitions(-DPAL_STDCPP_COMPAT)
@@ -25,10 +25,10 @@ if(CLR_CMAKE_TARGET_LINUX)
     )
 endif(CLR_CMAKE_TARGET_LINUX)
 
-if(CLR_CMAKE_HOST_OSX)
+if(CLR_CMAKE_TARGET_OSX)
     list(APPEND DBGUTIL_SOURCES
         machoreader.cpp
     )
-endif(CLR_CMAKE_HOST_OSX)
+endif(CLR_CMAKE_TARGET_OSX)
 
 add_library_clr(dbgutil STATIC ${DBGUTIL_SOURCES})

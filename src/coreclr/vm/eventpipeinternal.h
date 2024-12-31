@@ -47,7 +47,7 @@ public:
         __in_z LPCWSTR outputFile,
         EventPipeSerializationFormat format,
         UINT32 circularBufferSizeInMB,
-        EventPipeProviderConfiguration *pProviders,
+        /* COR_PRF_EVENTPIPE_PROVIDER_CONFIG */ LPCVOID pProviders,
         UINT32 numProviders);
 
     //!
@@ -55,7 +55,7 @@ public:
     //!
     static void QCALLTYPE Disable(UINT64 sessionID);
 
-    static bool QCALLTYPE GetSessionInfo(UINT64 sessionID, EventPipeSessionInfo *pSessionInfo);
+    static BOOL QCALLTYPE GetSessionInfo(UINT64 sessionID, EventPipeSessionInfo *pSessionInfo);
 
     static INT_PTR QCALLTYPE CreateProvider(
         __in_z LPCWSTR providerName,
@@ -86,7 +86,7 @@ public:
         UINT32 eventDataCount,
         LPCGUID pActivityId, LPCGUID pRelatedActivityId);
 
-    static bool QCALLTYPE GetNextEvent(
+    static BOOL QCALLTYPE GetNextEvent(
         UINT64 sessionID,
         EventPipeEventInstanceData *pInstance);
 

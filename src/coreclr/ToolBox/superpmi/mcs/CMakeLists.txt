@@ -5,7 +5,7 @@ add_definitions(-DSELF_NO_HOST)
 
 if(CLR_CMAKE_HOST_WIN32)
   #use static crt
-  add_definitions(-MT)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
 endif(CLR_CMAKE_HOST_WIN32)
 
 include_directories(.)
@@ -21,9 +21,11 @@ set(MCS_SOURCES
     verbdumpmap.cpp
     verbdumptoc.cpp
     verbfracture.cpp
+    verbjitflags.cpp
     verbildump.cpp
     verbinteg.cpp
     verbmerge.cpp
+    verbprintjiteeversion.cpp
     verbremovedup.cpp
     verbstat.cpp
     verbstrip.cpp
@@ -45,10 +47,10 @@ set(MCS_SOURCES
     ../superpmi-shared/spmidumphelper.cpp
 )
 
-_add_executable(mcs
+add_executable_clr(mcs
     ${MCS_SOURCES}
 )
-target_precompile_header(TARGET mcs HEADER standardpch.h)
+target_precompile_headers(mcs PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:standardpch.h>")
 
 if(CLR_CMAKE_HOST_UNIX)
     target_link_libraries(mcs
@@ -64,7 +66,6 @@ else()
         ${STATIC_MT_CPP_LIB}
     )
 
-    _install (FILES ${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>/mcs.pdb DESTINATION PDB)
 endif(CLR_CMAKE_HOST_UNIX)
 
-_install (TARGETS mcs DESTINATION .)
+install_clr(TARGETS mcs DESTINATIONS .)

@@ -96,25 +96,10 @@ DumpDataTarget::GetImageBase(
     int length = WideCharToMultiByte(CP_ACP, 0, moduleName, -1, tempModuleName, sizeof(tempModuleName), NULL, NULL);
     if (length > 0)
     {
-        for (const MemoryRegion& image : m_crashInfo.ModuleMappings())
-        {
-            const char *name = strrchr(image.FileName().c_str(), '/');
-            if (name != nullptr)
-            {
-                name++;
-            }
-            else
-            {
-                name = image.FileName().c_str();
-            }
-            if (strcmp(name, tempModuleName) == 0)
-            {
-                *baseAddress = image.StartAddress();
-                return S_OK;
-            }
-        }
+        *baseAddress = m_crashInfo.GetBaseAddressFromName(tempModuleName);
     }
-    return E_FAIL;
+
+    return *baseAddress != 0 ? S_OK : E_FAIL;
 }
 
 HRESULT STDMETHODCALLTYPE
@@ -127,6 +112,7 @@ DumpDataTarget::ReadVirtual(
     size_t read = 0;
     if (!m_crashInfo.ReadProcessMemory((void*)(ULONG_PTR)address, buffer, size, &read))
     {
+        TRACE("DumpDataTarget::ReadVirtual %p %d FAILED\n", (void*)address, size);
         *done = 0;
         return E_FAIL;
     }

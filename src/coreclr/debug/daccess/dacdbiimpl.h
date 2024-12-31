@@ -365,6 +365,8 @@ public:
 
     HRESULT IsModuleMapped(VMPTR_Module pModule, OUT BOOL *isModuleMapped);
 
+    bool MetadataUpdatesApplied();
+
     // retrieves the list of COM interfaces implemented by vmObject, as it is known at
     // the time of the call (the list may change as new interface types become available
     // in the runtime)
@@ -733,7 +735,7 @@ public:
 
     void GetModuleForDomainFile(VMPTR_DomainFile vmDomainFile, OUT VMPTR_Module * pModule);
 
-    // Yields true if the adddress is a CLR stub.
+    // Yields true if the address is a CLR stub.
     BOOL IsTransitionStub(CORDB_ADDRESS address);
 
     // Get the "type" of address.
@@ -780,6 +782,9 @@ public:
 
     // Return the object handle for the managed Thread object corresponding to the specified thread.
     VMPTR_OBJECTHANDLE GetThreadObject(VMPTR_Thread vmThread);
+
+    // Get the alocated bytes for this thread.
+    void GetThreadAllocInfo(VMPTR_Thread vmThread, DacThreadAllocInfo* threadAllocInfo);
 
     // Set and reset the TSNC_DebuggerUserSuspend bit on the state of the specified thread
     // according to the CorDebugThreadState.

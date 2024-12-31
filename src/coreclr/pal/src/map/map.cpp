@@ -102,11 +102,9 @@ MAPmmapAndRecord(
     LPVOID *ppvBaseAddress
     );
 
-#if !HAVE_MMAP_DEV_ZERO
 /* We need MAP_ANON. However on some platforms like HP-UX, it is defined as MAP_ANONYMOUS */
 #if !defined(MAP_ANON) && defined(MAP_ANONYMOUS)
 #define MAP_ANON MAP_ANONYMOUS
-#endif
 #endif
 
 void
@@ -166,7 +164,6 @@ CFileMappingImmutableDataCopyRoutine(
     void *pImmDataTarget
     )
 {
-    PAL_ERROR palError = NO_ERROR;
     CFileMappingImmutableData *pImmutableData = (CFileMappingImmutableData *) pImmData;
     CFileMappingImmutableData *pImmutableDataTarget = (CFileMappingImmutableData *) pImmDataTarget;
 
@@ -181,7 +178,6 @@ CFileMappingImmutableDataCleanupRoutine(
     void *pImmData
     )
 {
-    PAL_ERROR palError = NO_ERROR;
     CFileMappingImmutableData *pImmutableData = (CFileMappingImmutableData *) pImmData;
 
     free(pImmutableData->lpFileName);
@@ -308,73 +304,6 @@ FileMappingInitializationRoutine(
 ExitFileMappingInitializationRoutine:
 
     return palError;
-}
-
-/*++
-Function:
-  CreateFileMappingA
-
-Note:
-  File mapping are used to do inter-process communication.
-
-See MSDN doc.
---*/
-HANDLE
-PALAPI
-CreateFileMappingA(
-                   IN HANDLE hFile,
-                   IN LPSECURITY_ATTRIBUTES lpFileMappingAttributes,
-                   IN DWORD flProtect,
-                   IN DWORD dwMaximumSizeHigh,
-                   IN DWORD dwMaximumSizeLow,
-                   IN LPCSTR lpName)
-{
-    HANDLE hFileMapping = NULL;
-    CPalThread *pThread = NULL;
-    PAL_ERROR palError = NO_ERROR;
-
-    PERF_ENTRY(CreateFileMappingA);
-    ENTRY("CreateFileMappingA(hFile=%p, lpAttributes=%p, flProtect=%#x, "
-          "dwMaxSizeH=%d, dwMaxSizeL=%d, lpName=%p (%s))\n",
-          hFile, lpFileMappingAttributes, flProtect,
-          dwMaximumSizeHigh, dwMaximumSizeLow,
-          lpName?lpName:"NULL",
-          lpName?lpName:"NULL");
-
-    pThread = InternalGetCurrentThread();
-
-    if (lpName != nullptr)
-    {
-        ASSERT("lpName: Cross-process named objects are not supported in PAL");
-        palError = ERROR_NOT_SUPPORTED;
-    }
-    else
-    {
-        palError = InternalCreateFileMapping(
-            pThread,
-            hFile,
-            lpFileMappingAttributes,
-            flProtect,
-            dwMaximumSizeHigh,
-            dwMaximumSizeLow,
-            NULL,
-            &hFileMapping
-            );
-    }
-
-
-    //
-    // We always need to set last error, even on success:
-    // we need to protect ourselves from the situation
-    // where last error is set to ERROR_ALREADY_EXISTS on
-    // entry to the function
-    //
-
-    pThread->SetLastError(palError);
-
-    LOGEXIT( "CreateFileMappingA returns HANDLE %p. \n", hFileMapping );
-    PERF_EXIT(CreateFileMappingA);
-    return hFileMapping;
 }
 
 /*++
@@ -546,22 +475,7 @@ CorUnix::InternalCreateFileMapping(
             goto ExitInternalCreateFileMapping;
         }
 
-#if HAVE_MMAP_DEV_ZERO
-
-        UnixFd = InternalOpen(pImmutableData->lpFileName, O_RDWR | O_CLOEXEC);
-        if ( -1 == UnixFd )
-        {
-            ERROR( "Unable to open the file.\n");
-            palError = ERROR_INTERNAL_ERROR;
-            goto ExitInternalCreateFileMapping;
-        }
-
-#else //!HAVE_MMAP_DEV_ZERO
-
         UnixFd = -1;  /* will pass MAP_ANON to mmap() instead */
-
-#endif //!HAVE_MMAP_DEV_ZERO
-
     }
     else
     {
@@ -830,50 +744,6 @@ ExitInternalCreateFileMapping:
 
     return palError;
 }
-
-/*++
-Function:
-  OpenFileMappingA
-
-See MSDN doc.
---*/
-HANDLE
-PALAPI
-OpenFileMappingA(
-         IN DWORD dwDesiredAccess,
-         IN BOOL bInheritHandle,
-         IN LPCSTR lpName)
-{
-    HANDLE hFileMapping = NULL;
-    CPalThread *pThread = NULL;
-    PAL_ERROR palError = NO_ERROR;
-
-    PERF_ENTRY(OpenFileMappingA);
-    ENTRY("OpenFileMappingA(dwDesiredAccess=%u, bInheritHandle=%d, lpName=%p (%s)\n",
-          dwDesiredAccess, bInheritHandle, lpName?lpName:"NULL", lpName?lpName:"NULL");
-
-    pThread = InternalGetCurrentThread();
-
-    if (lpName == nullptr)
-    {
-        ERROR("name is NULL\n");
-        palError = ERROR_INVALID_PARAMETER;
-    }
-    else
-    {
-        ASSERT("lpName: Cross-process named objects are not supported in PAL");
-        palError = ERROR_NOT_SUPPORTED;
-    }
-
-    if (NO_ERROR != palError)
-    {
-        pThread->SetLastError(palError);
-    }
-    LOGEXIT( "OpenFileMappingA returning %p\n", hFileMapping );
-    PERF_EXIT(OpenFileMappingA);
-    return hFileMapping;
-}
-
 
 /*++
 Function:
@@ -1170,13 +1040,11 @@ CorUnix::InternalMapViewOfFile(
     if (FILE_MAP_COPY == dwDesiredAccess)
     {
         int flags = MAP_PRIVATE;
-
-#if !HAVE_MMAP_DEV_ZERO
         if (pProcessLocalData->UnixFd == -1)
         {
             flags |= MAP_ANON;
         }
-#endif
+
         pvBaseAddress = mmap(
             NULL,
             dwNumberOfBytesToMap,
@@ -1192,13 +1060,10 @@ CorUnix::InternalMapViewOfFile(
         if (prot != -1)
         {
             int flags = MAP_SHARED;
-
-#if !HAVE_MMAP_DEV_ZERO
             if (pProcessLocalData->UnixFd == -1)
             {
                 flags |= MAP_ANON;
             }
-#endif
 
             pvBaseAddress = mmap(
                 NULL,
@@ -2173,21 +2038,55 @@ MAPmmapAndRecord(
     // Ensure address and offset arguments mmap() are page-aligned.
     _ASSERTE(OffsetWithinPage(offset - adjust) == 0);
     _ASSERTE(OffsetWithinPage((off_t)pvBaseAddress) == 0);
-    
+
 #ifdef __APPLE__
     if ((prot & PROT_EXEC) != 0 && IsRunningOnMojaveHardenedRuntime())
     {
         // Mojave hardened runtime doesn't allow executable mappings of a file. So we have to create an
         // anonymous mapping and read the file contents into it instead.
 
+#if defined(HOST_ARM64)
+        // Set the requested mapping with forced PROT_WRITE, mmap the file, and copy its contents there.
+        // Once PROT_WRITE and PROT_EXEC are set together, Apple Silicon will require the use of
+        // PAL_JitWriteProtect to switch between executable and writable.
+        LPVOID pvMappedFile = mmap(NULL, len + adjust, PROT_READ, MAP_PRIVATE, fd, offset - adjust);
+        if (MAP_FAILED == pvMappedFile)
+        {
+            ERROR_(LOADER)("mmap failed with code %d: %s.\n", errno, strerror(errno));
+            palError = FILEGetLastErrorFromErrno();
+        }
+        else
+        {
+            if (-1 == mprotect(pvBaseAddress, len + adjust, prot | PROT_WRITE))
+            {
+                ERROR_(LOADER)("mprotect failed with code %d: %s.\n", errno, strerror(errno));
+                palError = FILEGetLastErrorFromErrno();
+            }
+            else
+            {
+                PAL_JitWriteProtect(true);
+                memcpy(pvBaseAddress, pvMappedFile, len + adjust);
+                PAL_JitWriteProtect(false);
+            }
+            if (-1 == munmap(pvMappedFile, len + adjust))
+            {
+                ERROR_(LOADER)("Unable to unmap the file. Expect trouble.\n");
+                if (NO_ERROR == palError)
+                    palError = FILEGetLastErrorFromErrno();
+            }
+        }
+#else
         // Set the requested mapping with forced PROT_WRITE to ensure data from the file can be read there,
-        // read the data in and finally remove the forced PROT_WRITE
+        // read the data in and finally remove the forced PROT_WRITE. On Intel we can still switch the
+        // protection later with mprotect.
         if ((mprotect(pvBaseAddress, len + adjust, prot | PROT_WRITE) == -1) ||
             (pread(fd, pvBaseAddress, len + adjust, offset - adjust) == -1) ||
             (((prot & PROT_WRITE) == 0) && mprotect(pvBaseAddress, len + adjust, prot) == -1))
         {
             palError = FILEGetLastErrorFromErrno();
         }
+#endif
+
     }
     else
 #endif

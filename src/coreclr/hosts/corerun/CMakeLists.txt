@@ -1,29 +1,21 @@
-project(CoreRun)
+project(corerun)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
-set(CoreRun_SOURCES corerun.cpp logger.cpp)
-set(CoreRun_RESOURCES native.rc)
+if(CLR_CMAKE_HOST_WIN32)
+    add_definitions(-DFX_VER_INTERNALNAME_STR=corerun.exe)
+else(CLR_CMAKE_HOST_WIN32)
+    include_directories("${CLR_SRC_NATIVE_DIR}/common")
+    include(configure.cmake)
+endif(CLR_CMAKE_HOST_WIN32)
 
-add_definitions(-DFX_VER_INTERNALNAME_STR=CoreRun.exe)
+add_executable_clr(corerun
+  corerun.cpp
+  native.rc
+)
 
-if(CLR_CMAKE_HOST_UNIX)
-    # This does not compile on Linux yet
-    if(CAN_BE_COMPILED_ON_LINUX)
-        _add_executable(CoreRun
-          ${CoreRun_SOURCES}
-          ${CoreRun_RESOURCES}
-        )
-    endif(CAN_BE_COMPILED_ON_LINUX)
-
-else()
-    _add_executable(CoreRun
-      ${CoreRun_SOURCES}
-      ${CoreRun_RESOURCES}
-    )
-
-    target_link_libraries(CoreRun
-        utilcodestaticnohost
+if(CLR_CMAKE_HOST_WIN32)
+    target_link_libraries(corerun
         advapi32.lib
         oleaut32.lib
         uuid.lib
@@ -31,8 +23,13 @@ else()
         ${STATIC_MT_CRT_LIB}
         ${STATIC_MT_VCRT_LIB}
     )
+else(CLR_CMAKE_HOST_WIN32)
+    target_link_libraries(corerun ${CMAKE_DL_LIBS})
 
-    # Can't compile on linux yet so only add for windows
-    install_clr(TARGETS CoreRun)
+    # Android implements pthread natively
+    if(NOT CLR_CMAKE_TARGET_ANDROID)
+        target_link_libraries(corerun pthread)
+    endif()
+endif(CLR_CMAKE_HOST_WIN32)
 
-endif(CLR_CMAKE_HOST_UNIX)
+install_clr(TARGETS corerun DESTINATIONS . COMPONENT runtime)

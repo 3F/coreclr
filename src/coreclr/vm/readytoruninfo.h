@@ -66,12 +66,13 @@ class ReadyToRunInfo
     PTR_CORCOMPILE_IMPORT_SECTION   m_pImportSections;
     DWORD                           m_nImportSections;
 
-    bool                            m_readyToRunCodeDisabled;
+    bool                            m_readyToRunCodeDisabled; // Is 
 
     NativeFormat::NativeReader      m_nativeReader;
     NativeFormat::NativeArray       m_methodDefEntryPoints;
     NativeFormat::NativeHashtable   m_instMethodEntryPoints;
     NativeFormat::NativeHashtable   m_availableTypesHashtable;
+    NativeFormat::NativeHashtable   m_pgoInstrumentationDataHashtable;
 
     NativeFormat::NativeHashtable   m_pMetaDataHashtable;
     NativeFormat::NativeCuckooFilter m_attributesPresence;
@@ -82,7 +83,7 @@ class ReadyToRunInfo
     PTR_PersistentInlineTrackingMapR2R m_pPersistentInlineTrackingMap;
 
 public:
-    ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader, NativeImage * pNativeImage, AllocMemTracker *pamTracker);
+    ReadyToRunInfo(Module * pModule, LoaderAllocator* pLoaderAllocator, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader, NativeImage * pNativeImage, AllocMemTracker *pamTracker);
 
     static BOOL IsReadyToRunEnabled();
 
@@ -104,6 +105,7 @@ public:
     PCODE GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig, BOOL fFixups);
 
     PTR_MethodDesc GetMethodDescForEntryPoint(PCODE entryPoint);
+    bool GetPgoInstrumentationData(MethodDesc * pMD, BYTE** pAllocatedMemory, ICorJitInfo::PgoInstrumentationSchema**ppSchema, UINT *pcSchema, BYTE** pInstrumentationData);
 
     BOOL HasHashtableOfTypes();
     BOOL TryLookupTypeTokenFromName(const NameHandle *pName, mdToken * pFoundTypeToken);
@@ -123,7 +125,13 @@ public:
     void DisableAllR2RCode()
     {
         LIMITED_METHOD_CONTRACT;
-        m_readyToRunCodeDisabled = TRUE;
+        m_readyToRunCodeDisabled = true;
+    }
+
+    bool ReadyToRunCodeDisabled()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_readyToRunCodeDisabled;
     }
 
     BOOL HasNonShareablePInvokeStubs()
@@ -226,7 +234,7 @@ private:
 class DynamicHelpers
 {
 private:
-    static void EmitHelperWithArg(BYTE*& pCode, LoaderAllocator * pAllocator, TADDR arg, PCODE target);
+    static void EmitHelperWithArg(BYTE*& pCode, size_t rxOffset, LoaderAllocator * pAllocator, TADDR arg, PCODE target);
 public:
     static PCODE CreateHelper(LoaderAllocator * pAllocator, TADDR arg, PCODE target);
     static PCODE CreateHelperWithArg(LoaderAllocator * pAllocator, TADDR arg, PCODE target);

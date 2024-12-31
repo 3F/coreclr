@@ -16,7 +16,7 @@
 // PLEASE READ!
 //
 // There are strict rules for how to implement ICorProfilerInfo* methods.  Please read
-// https://github.com/dotnet/runtime/blob/master/docs/design/coreclr/botr/profilability.md
+// https://github.com/dotnet/runtime/blob/main/docs/design/coreclr/botr/profilability.md
 // to understand the rules and why they exist.
 //
 // As a reminder, here is a short summary of your responsibilities.  Every PUBLIC
@@ -138,11 +138,7 @@
 #include "metadataexports.h"
 
 #ifdef FEATURE_PERFTRACING
-#include "eventpipeprovider.h"
-#include "eventpipemetadatagenerator.h"
-#include "eventpipeeventpayload.h"
-#include "eventpipesession.h"
-#include "eventpipesessionprovider.h"
+#include "eventpipeadapter.h"
 #endif // FEATURE_PERFTRACING
 
 //---------------------------------------------------------------------------------------
@@ -181,7 +177,7 @@ enum ProfToClrEntrypointFlags
     do                                                                                     \
     {                                                                                      \
         if ((((p2eeFlags) & kP2EEAllowableAfterAttach) == 0) &&                            \
-            (g_profControlBlock.pProfInterface->IsLoadedViaAttach()))                      \
+            (m_pProfilerInfo->pProfInterface->IsLoadedViaAttach()))                      \
         {                                                                                  \
             LOG((LF_CORPROF,                                                               \
                  LL_ERROR,                                                                 \
@@ -218,10 +214,10 @@ enum ProfToClrEntrypointFlags
     do                                                                                      \
     {                                                                                       \
         INCONTRACT(AssertTriggersContract(((p2eeFlags) & kP2EETriggers)));                  \
-        _ASSERTE(g_profControlBlock.curProfStatus.Get() != kProfStatusNone);                \
+        _ASSERTE(m_pProfilerInfo->curProfStatus.Get() != kProfStatusNone);                \
         LOG(logParams);                                                                     \
         /* If profiler was neutered, disallow call */                                       \
-        if (g_profControlBlock.curProfStatus.Get() == kProfStatusDetaching)                 \
+        if (m_pProfilerInfo->curProfStatus.Get() == kProfStatusDetaching)                 \
         {                                                                                   \
             LOG((LF_CORPROF,                                                                \
                  LL_ERROR,                                                                  \
@@ -260,8 +256,8 @@ enum ProfToClrEntrypointFlags
     do                                                                                          \
     {                                                                                           \
         PROFILER_TO_CLR_ENTRYPOINT_ASYNC(logParams);                                            \
-        if (g_profControlBlock.curProfStatus.Get() != kProfStatusInitializingForStartupLoad &&  \
-            g_profControlBlock.curProfStatus.Get() != kProfStatusInitializingForAttachLoad)     \
+        if (m_pProfilerInfo->curProfStatus.Get() != kProfStatusInitializingForStartupLoad &&  \
+            m_pProfilerInfo->curProfStatus.Get() != kProfStatusInitializingForAttachLoad)     \
         {                                                                                       \
             return CORPROF_E_CALL_ONLY_FROM_INIT;                                               \
         }                                                                                       \
@@ -626,13 +622,13 @@ void __stdcall ProfilerObjectAllocatedCallback(OBJECTREF objref, ClassID classId
     // Notify the profiler of the allocation
 
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackAllocations() || CORProfilerTrackLargeAllocations());
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackAllocations() || CORProfilerTrackLargeAllocations());
         // Note that for generic code we always return uninstantiated ClassIDs and FunctionIDs.
         // Thus we strip any instantiations of the ClassID (which is really a type handle) here.
-        g_profControlBlock.pProfInterface->ObjectAllocated(
+        g_profControlBlock.ObjectAllocated(
                 (ObjectID) OBJECTREFToObject(objref),
                 classId);
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 #endif // PROFILING_SUPPORTED
 }
@@ -665,18 +661,18 @@ void __stdcall GarbageCollectionStartedCallback(int generation, BOOL induced)
 
     // Notify the profiler of start of the collection
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackGC() || CORProfilerTrackBasicGC());
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackGC() || CORProfilerTrackBasicGC());
         BOOL generationCollected[COR_PRF_GC_PINNED_OBJECT_HEAP+1];
         if (generation == COR_PRF_GC_GEN_2)
             generation = COR_PRF_GC_PINNED_OBJECT_HEAP;
         for (int gen = 0; gen <= COR_PRF_GC_PINNED_OBJECT_HEAP; gen++)
             generationCollected[gen] = gen <= generation;
 
-        g_profControlBlock.pProfInterface->GarbageCollectionStarted(
+        g_profControlBlock.GarbageCollectionStarted(
             COR_PRF_GC_PINNED_OBJECT_HEAP+1,
             generationCollected,
             induced ? COR_PRF_GC_INDUCED : COR_PRF_GC_OTHER);
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 #endif // PROFILING_SUPPORTED
 }
@@ -699,9 +695,9 @@ void __stdcall GarbageCollectionFinishedCallback()
 #ifdef PROFILING_SUPPORTED
     // Notify the profiler of end of the collection
     {
-        BEGIN_PIN_PROFILER(CORProfilerTrackGC() || CORProfilerTrackBasicGC());
-        g_profControlBlock.pProfInterface->GarbageCollectionFinished();
-        END_PIN_PROFILER();
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackGC() || CORProfilerTrackBasicGC());
+        g_profControlBlock.GarbageCollectionFinished();
+        END_PROFILER_CALLBACK();
     }
 
     // Mark that GC is finished.
@@ -723,20 +719,132 @@ struct GenerationDesc
     BYTE *rangeEndReserved;
 };
 
-struct GenerationTable
+class GenerationTable
 {
+public:
+    GenerationTable();
+    void AddRecord(int generation, BYTE* rangeStart, BYTE* rangeEnd, BYTE* rangeEndReserved);
+    void AddRecordNoLock(int generation, BYTE* rangeStart, BYTE* rangeEnd, BYTE* rangeEndReserved);
+    void Refresh();
+    HRESULT GetGenerationBounds(ULONG cObjectRanges, ULONG* pcObjectRanges, COR_PRF_GC_GENERATION_RANGE* ranges);
+private:
+    Crst mutex;
     ULONG count;
     ULONG capacity;
     static const ULONG defaultCapacity = 5; // that's the minimum for Gen0-2 + LOH + POH
-    GenerationTable *prev;
     GenerationDesc *genDescTable;
-#ifdef  _DEBUG
-    ULONG magic;
-#define GENERATION_TABLE_MAGIC 0x34781256
-#define GENERATION_TABLE_BAD_MAGIC 0x55aa55aa
-#endif
 };
 
+GenerationTable::GenerationTable() : mutex(CrstLeafLock, CRST_UNSAFE_ANYMODE)
+{
+    count = 0;
+    capacity = GenerationTable::defaultCapacity;
+    genDescTable = new (nothrow) GenerationDesc[capacity];
+    if (genDescTable == NULL)
+    {
+        capacity = 0;
+    }
+}
+
+void GenerationTable::AddRecord(int generation, BYTE* rangeStart, BYTE* rangeEnd, BYTE* rangeEndReserved)
+{
+    CONTRACT_VOID
+    {
+        NOTHROW;
+        GC_NOTRIGGER;
+        MODE_ANY; // can be called even on GC threads
+        PRECONDITION(0 <= generation && generation <= 4);
+        PRECONDITION(CheckPointer(rangeStart));
+        PRECONDITION(CheckPointer(rangeEnd));
+        PRECONDITION(CheckPointer(rangeEndReserved));
+    } CONTRACT_END;
+
+    CrstHolder holder(&mutex);
+
+    // Because the segment/region are added to the heap before they are reported to the profiler,
+    // it is possible that the region is added to the heap, a racing GenerationTable refresh happened,
+    // that refresh would contain the new region, and then it get reported again here. 
+    // This check will make sure we never add duplicated record to the table.
+    for (ULONG i = 0; i < count; i++)
+    {
+        if (genDescTable[i].rangeStart == rangeStart)
+        {
+            _ASSERTE (genDescTable[i].generation == generation);
+            _ASSERTE (genDescTable[i].rangeEnd == rangeEnd);
+            _ASSERTE (genDescTable[i].rangeEndReserved == rangeEndReserved);
+            RETURN;
+        }
+    }
+    AddRecordNoLock(generation, rangeStart, rangeEnd, rangeEndReserved);
+    RETURN;
+}
+
+void GenerationTable::AddRecordNoLock(int generation, BYTE* rangeStart, BYTE* rangeEnd, BYTE* rangeEndReserved)
+{
+    CONTRACT_VOID
+    {
+        NOTHROW;
+        GC_NOTRIGGER;
+        MODE_ANY; // can be called even on GC threads
+        PRECONDITION(0 <= generation && generation <= 4);
+        PRECONDITION(CheckPointer(rangeStart));
+        PRECONDITION(CheckPointer(rangeEnd));
+        PRECONDITION(CheckPointer(rangeEndReserved));
+    } CONTRACT_END;
+
+    _ASSERTE (mutex.OwnedByCurrentThread());
+    if (count >= capacity)
+    {
+        ULONG newCapacity = capacity == 0 ? GenerationTable::defaultCapacity : capacity * 2;
+        GenerationDesc *newGenDescTable = new (nothrow) GenerationDesc[newCapacity];
+        if (newGenDescTable == NULL)
+        {
+            count = capacity = 0;
+            delete[] genDescTable;
+            genDescTable = nullptr;
+            RETURN;
+        }
+        memcpy(newGenDescTable, genDescTable, sizeof(genDescTable[0]) * count);
+        delete[] genDescTable;
+        genDescTable = newGenDescTable;
+        capacity = newCapacity;
+    }
+    _ASSERTE(count < capacity);
+
+    genDescTable[count].generation = generation;
+    genDescTable[count].rangeStart = rangeStart;
+    genDescTable[count].rangeEnd = rangeEnd;
+    genDescTable[count].rangeEndReserved = rangeEndReserved;
+
+    count = count + 1;
+    RETURN;
+}
+
+HRESULT GenerationTable::GetGenerationBounds(ULONG cObjectRanges, ULONG* pcObjectRanges, COR_PRF_GC_GENERATION_RANGE* ranges)
+{
+    if ((cObjectRanges > 0) && (ranges == nullptr))
+    {
+        return E_INVALIDARG;
+    }
+    CrstHolder holder(&mutex);
+    if (genDescTable == nullptr)
+    {
+        return E_FAIL;
+    }
+    ULONG copy = min(count, cObjectRanges);
+    for (ULONG i = 0; i < copy; i++)
+    {
+        ranges[i].generation          = (COR_PRF_GC_GENERATION)genDescTable[i].generation;
+        ranges[i].rangeStart          = (ObjectID)genDescTable[i].rangeStart;
+        ranges[i].rangeLength         = genDescTable[i].rangeEnd         - genDescTable[i].rangeStart;
+        ranges[i].rangeLengthReserved = genDescTable[i].rangeEndReserved - genDescTable[i].rangeStart;
+    }
+    if (pcObjectRanges != nullptr)
+    {
+        *pcObjectRanges = count;
+    }
+    return S_OK;
+}
 
 //---------------------------------------------------------------------------------------
 //
@@ -773,45 +881,23 @@ static void GenWalkFunc(void * context,
     } CONTRACT_END;
 
     GenerationTable *generationTable = (GenerationTable *)context;
+    generationTable->AddRecordNoLock(generation, rangeStart, rangeEnd, rangeEndReserved);
+    RETURN;
+}
 
-    _ASSERTE(generationTable->magic == GENERATION_TABLE_MAGIC);
-
-    ULONG count = generationTable->count;
-    if (count >= generationTable->capacity)
-    {
-        ULONG newCapacity = generationTable->capacity == 0 ? GenerationTable::defaultCapacity : generationTable->capacity * 2;
-        GenerationDesc *newGenDescTable = new (nothrow) GenerationDesc[newCapacity];
-        if (newGenDescTable == NULL)
-        {
-            // if we can't allocate a bigger table, we'll have to ignore this call
-            RETURN;
-        }
-        memcpy(newGenDescTable, generationTable->genDescTable, sizeof(generationTable->genDescTable[0]) * generationTable->count);
-        delete[] generationTable->genDescTable;
-        generationTable->genDescTable = newGenDescTable;
-        generationTable->capacity = newCapacity;
-    }
-    _ASSERTE(count < generationTable->capacity);
-
-    GenerationDesc *genDescTable = generationTable->genDescTable;
-
-    genDescTable[count].generation = generation;
-    genDescTable[count].rangeStart = rangeStart;
-    genDescTable[count].rangeEnd = rangeEnd;
-    genDescTable[count].rangeEndReserved = rangeEndReserved;
-
-    generationTable->count = count + 1;
+void GenerationTable::Refresh()
+{
+    // fill in the values by calling back into the gc, which will report
+    // the ranges by calling GenWalkFunc for each one
+    CrstHolder holder(&mutex);    
+    IGCHeap *hp = GCHeapUtilities::GetGCHeap();
+    this->count = 0;
+    hp->DiagDescrGenerations(GenWalkFunc, this);
 }
 
 // This is the table of generation bounds updated by the gc
-// and read by the profiler. So this is a single writer,
-// multiple readers scenario.
+// and read by the profiler. 
 static GenerationTable *s_currentGenerationTable;
-
-// The generation table is updated atomically by replacing the
-// pointer to it. The only tricky part is knowing when
-// the old table can be deleted.
-static Volatile<LONG> s_generationTableLock;
 
 // This is just so we can assert there's a single writer
 #ifdef  ENABLE_CONTRACTS
@@ -841,67 +927,41 @@ void __stdcall UpdateGenerationBounds()
     // Notify the profiler of start of the collection
     if (CORProfilerTrackGC() || CORProfilerTrackBasicGC())
     {
-        // generate a new generation table
-        GenerationTable *newGenerationTable = new (nothrow) GenerationTable();
-        if (newGenerationTable == NULL)
-            RETURN;
-        newGenerationTable->count = 0;
-        newGenerationTable->capacity = GenerationTable::defaultCapacity;
-        // if there is already a current table, use its count as a guess for the capacity
-        if (s_currentGenerationTable != NULL)
-            newGenerationTable->capacity = s_currentGenerationTable->count;
-        newGenerationTable->prev = NULL;
-        newGenerationTable->genDescTable = new (nothrow) GenerationDesc[newGenerationTable->capacity];
-        if (newGenerationTable->genDescTable == NULL)
-            newGenerationTable->capacity = 0;
 
-#ifdef  _DEBUG
-        newGenerationTable->magic = GENERATION_TABLE_MAGIC;
-#endif
-        // fill in the values by calling back into the gc, which will report
-        // the ranges by calling GenWalkFunc for each one
-        IGCHeap *hp = GCHeapUtilities::GetGCHeap();
-        hp->DiagDescrGenerations(GenWalkFunc, newGenerationTable);
-
-        // remember the old table and plug in the new one
-        GenerationTable *oldGenerationTable = s_currentGenerationTable;
-        s_currentGenerationTable = newGenerationTable;
-
-        // WARNING: tricky code!
-        //
-        // We sample the generation table lock *after* plugging in the new table
-        // We do so using an interlocked operation so the cpu can't reorder
-        // the write to the s_currentGenerationTable with the increment.
-        // If the interlocked increment returns 1, we know nobody can be using
-        // the old table (readers increment the lock before using the table,
-        // and decrement it afterwards). Any new readers coming in
-        // will use the new table. So it's safe to delete the old
-        // table.
-        // On the other hand, if the interlocked increment returns
-        // something other than one, we put the old table on a list
-        // dangling off of the new one. Next time around, we'll try again
-        // deleting any old tables.
-        if (FastInterlockIncrement(&s_generationTableLock) == 1)
+        if (s_currentGenerationTable == nullptr)
         {
-            // We know nobody can be using any of the old tables
-            while (oldGenerationTable != NULL)
+            EX_TRY
             {
-                _ASSERTE(oldGenerationTable->magic == GENERATION_TABLE_MAGIC);
-#ifdef  _DEBUG
-                oldGenerationTable->magic = GENERATION_TABLE_BAD_MAGIC;
-#endif
-                GenerationTable *temp = oldGenerationTable;
-                oldGenerationTable = oldGenerationTable->prev;
-                delete[] temp->genDescTable;
-                delete temp;
+                s_currentGenerationTable = new (nothrow) GenerationTable();
             }
+            EX_CATCH
+            {
+            }
+            EX_END_CATCH(SwallowAllExceptions)
         }
-        else
+
+        if (s_currentGenerationTable == nullptr)
         {
-            // put the old table on a list
-            newGenerationTable->prev = oldGenerationTable;
+            RETURN;
         }
-        FastInterlockDecrement(&s_generationTableLock);
+        s_currentGenerationTable->Refresh();        
+    }
+#endif // PROFILING_SUPPORTED
+    RETURN;
+}
+
+void __stdcall ProfilerAddNewRegion(int generation, uint8_t* rangeStart, uint8_t* rangeEnd, uint8_t* rangeEndReserved)
+{
+    CONTRACT_VOID
+    {
+        NOTHROW;
+        GC_NOTRIGGER;
+        MODE_ANY; // can be called even on GC threads
+    } CONTRACT_END;
+#ifdef PROFILING_SUPPORTED
+    if (CORProfilerTrackGC() || CORProfilerTrackBasicGC())
+    {
+        s_currentGenerationTable->AddRecord(generation, rangeStart, rangeEnd, rangeEndReserved);
     }
 #endif // PROFILING_SUPPORTED
     RETURN;
@@ -1135,7 +1195,7 @@ bool HeapWalkHelper(Object * pBO, void * pvContext)
         // It is not safe and could be overflowed to downcast size_t to ULONG on WIN64.
         // However, we have to do this dangerous downcast here to comply with the existing Profiling COM interface.
         // We are currently evaluating ways to fix this potential overflow issue.
-        hr = g_profControlBlock.pProfInterface->ObjectReference(
+        hr = g_profControlBlock.ObjectReference(
             (ObjectID) pBO,
             SafeGetClassIDFromObject(pBO),
             (ULONG) cNumRefs,
@@ -1214,13 +1274,13 @@ bool AllocByClassHelper(Object * pBO, void * pv)
     _ASSERTE(pv != NULL);
 
     {
-        BEGIN_PIN_PROFILER(CORProfilerPresent());
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackGC());
         // Pass along the call
-        g_profControlBlock.pProfInterface->AllocByClass(
+        g_profControlBlock.AllocByClass(
             (ObjectID) pBO,
             SafeGetClassIDFromObject(pBO),
             pv);
-        END_PIN_PROFILER();
+        END_PROFILER_CALLBACK();
     }
 
     return TRUE;
@@ -1279,6 +1339,7 @@ void ScanRootsHelper(Object* pObj, Object ** ppRoot, ScanContext *pSC, uint32_t 
 
     case    kEtwGCRootKindHandle:
         _ASSERT(!"Shouldn't see handle here");
+        break;
 
     case    kEtwGCRootKindFinalizer:
     default:
@@ -1289,8 +1350,7 @@ void ScanRootsHelper(Object* pObj, Object ** ppRoot, ScanContext *pSC, uint32_t 
     if (pPSC->fProfilerPinned)
     {
         // Let the profiling code know about this root reference
-        g_profControlBlock.pProfInterface->
-            RootReference2((BYTE *)pObj, pPSC->dwEtwRootKind, (EtwGCRootFlags)dwEtwRootFlags, (BYTE *)rootID, &((pPSC)->pHeapId));
+        g_profControlBlock.RootReference2((BYTE *)pObj, pPSC->dwEtwRootKind, (EtwGCRootFlags)dwEtwRootFlags, (BYTE *)rootID, &((pPSC)->pHeapId));
     }
 #endif
 
@@ -1452,9 +1512,9 @@ HRESULT ProfToEEInterfaceImpl::SetEventMask(DWORD dwEventMask)
         "**PROF: SetEventMask 0x%08x.\n",
         dwEventMask));
 
-    _ASSERTE(CORProfilerPresentOrInitializing());
+    _ASSERTE(CORProfilerPresent());
 
-    return g_profControlBlock.pProfInterface->SetEventMask(dwEventMask, 0 /* No high bits */);
+    return m_pProfilerInfo->pProfInterface->SetEventMask(dwEventMask, 0 /* No high bits */);
 }
 
 HRESULT ProfToEEInterfaceImpl::SetEventMask2(DWORD dwEventsLow, DWORD dwEventsHigh)
@@ -1484,9 +1544,9 @@ HRESULT ProfToEEInterfaceImpl::SetEventMask2(DWORD dwEventsLow, DWORD dwEventsHi
         "**PROF: SetEventMask2 0x%08x, 0x%08x.\n",
         dwEventsLow, dwEventsHigh));
 
-    _ASSERTE(CORProfilerPresentOrInitializing());
+    _ASSERTE(CORProfilerPresent());
 
-    return g_profControlBlock.pProfInterface->SetEventMask(dwEventsLow, dwEventsHigh);
+    return m_pProfilerInfo->pProfInterface->SetEventMask(dwEventsLow, dwEventsHigh);
 }
 
 
@@ -2574,7 +2634,7 @@ HRESULT ProfToEEInterfaceImpl::GetEventMask(DWORD * pdwEvents)
         return E_INVALIDARG;
     }
 
-    *pdwEvents = g_profControlBlock.dwEventMask;
+    *pdwEvents = m_pProfilerInfo->eventMask.GetEventMask();
     return S_OK;
 }
 
@@ -2611,8 +2671,8 @@ HRESULT ProfToEEInterfaceImpl::GetEventMask2(DWORD *pdwEventsLow, DWORD *pdwEven
         return E_INVALIDARG;
     }
 
-    *pdwEventsLow = g_profControlBlock.dwEventMask;
-    *pdwEventsHigh = g_profControlBlock.dwEventMaskHigh;
+    *pdwEventsLow = m_pProfilerInfo->eventMask.GetEventMask();
+    *pdwEventsHigh = m_pProfilerInfo->eventMask.GetEventMaskHigh();
     return S_OK;
 }
 
@@ -3003,7 +3063,7 @@ HRESULT ProfToEEInterfaceImpl::GetRVAStaticAddress(ClassID classId,
         return E_INVALIDARG;
     }
 
-    if (GetThread() == NULL)
+    if (GetThreadNULLOk() == NULL)
     {
         return CORPROF_E_NOT_MANAGED_THREAD;
     }
@@ -3085,7 +3145,7 @@ HRESULT ProfToEEInterfaceImpl::GetRVAStaticAddress(ClassID classId,
  * Returns:
  *    S_OK on success,
  *    E_INVALIDARG if not an app domain static,
- *    CORPROF_E_DATAINCOMPLETE if not yet initialized or the module is being unloaded. 
+ *    CORPROF_E_DATAINCOMPLETE if not yet initialized or the module is being unloaded.
  *
  */
 HRESULT ProfToEEInterfaceImpl::GetAppDomainStaticAddress(ClassID classId,
@@ -3278,12 +3338,12 @@ HRESULT ProfToEEInterfaceImpl::GetThreadStaticAddress(ClassID classId,
     //
     // Verify the value of threadId, which must be the current thread ID or NULL, which means using curernt thread ID.
     //
-    if ((threadId != NULL) && (threadId != ((ThreadID)GetThread())))
+    if ((threadId != NULL) && (threadId != ((ThreadID)GetThreadNULLOk())))
     {
         return E_INVALIDARG;
     }
 
-    threadId = reinterpret_cast<ThreadID>(GetThread());
+    threadId = reinterpret_cast<ThreadID>(GetThreadNULLOk());
     AppDomainID appDomainId = reinterpret_cast<AppDomainID>(GetAppDomain());
 
     //
@@ -3355,12 +3415,12 @@ HRESULT ProfToEEInterfaceImpl::GetThreadStaticAddress2(ClassID classId,
 
     if (threadId == NULL)
     {
-        if (GetThread() == NULL)
+        if (GetThreadNULLOk() == NULL)
         {
             return CORPROF_E_NOT_MANAGED_THREAD;
         }
 
-        threadId = reinterpret_cast<ThreadID>(GetThread());
+        threadId = reinterpret_cast<ThreadID>(GetThreadNULLOk());
     }
 
     //
@@ -4121,7 +4181,7 @@ HRESULT ProfToEEInterfaceImpl::GetModuleInfo2(ModuleID     moduleId,
         // Return the parent assembly for this module if desired.
         if (pAssemblyId != NULL)
         {
-            // Lie and say the assembly isn't avaialable until we are loaded (even though it is.)
+            // Lie and say the assembly isn't available until we are loaded (even though it is.)
             // This is for backward compatibilty - we may want to change it
             if (pModule->IsProfilerNotified())
             {
@@ -4465,6 +4525,11 @@ HRESULT ProfToEEInterfaceImpl::SetILFunctionBody(ModuleID    moduleId,
         return E_INVALIDARG;
     }
 
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
     Module      *pModule;               // Working pointer for real class.
     HRESULT     hr = S_OK;
 
@@ -4481,7 +4546,7 @@ HRESULT ProfToEEInterfaceImpl::SetILFunctionBody(ModuleID    moduleId,
     }
 
     // Remember the profiler is doing this, as that means we must never detach it!
-    g_profControlBlock.pProfInterface->SetUnrevertiblyModifiedILFlag();
+    g_profControlBlock.mainProfilerInfo.pProfInterface->SetUnrevertiblyModifiedILFlag();
 
     // This action is not temporary!
     // If the profiler want to be able to revert, they need to use
@@ -5754,7 +5819,12 @@ HRESULT ProfToEEInterfaceImpl::SetEnterLeaveFunctionHooks(FunctionEnter * pFuncE
                                         pFuncLeave,
                                         pFuncTailcall));
 
-    return g_profControlBlock.pProfInterface->SetEnterLeaveFunctionHooks(pFuncEnter, pFuncLeave, pFuncTailcall);
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
+    return g_profControlBlock.mainProfilerInfo.pProfInterface->SetEnterLeaveFunctionHooks(pFuncEnter, pFuncLeave, pFuncTailcall);
 }
 
 
@@ -5790,8 +5860,13 @@ HRESULT ProfToEEInterfaceImpl::SetEnterLeaveFunctionHooks2(FunctionEnter2 * pFun
                                         pFuncLeave,
                                         pFuncTailcall));
 
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
     return
-        g_profControlBlock.pProfInterface->SetEnterLeaveFunctionHooks2(pFuncEnter, pFuncLeave, pFuncTailcall);
+        g_profControlBlock.mainProfilerInfo.pProfInterface->SetEnterLeaveFunctionHooks2(pFuncEnter, pFuncLeave, pFuncTailcall);
 }
 
 
@@ -5827,8 +5902,13 @@ HRESULT ProfToEEInterfaceImpl::SetEnterLeaveFunctionHooks3(FunctionEnter3 * pFun
                                         pFuncLeave3,
                                         pFuncTailcall3));
 
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
     return
-        g_profControlBlock.pProfInterface->SetEnterLeaveFunctionHooks3(pFuncEnter3,
+        g_profControlBlock.mainProfilerInfo.pProfInterface->SetEnterLeaveFunctionHooks3(pFuncEnter3,
                                                                        pFuncLeave3,
                                                                        pFuncTailcall3);
 }
@@ -5867,8 +5947,13 @@ HRESULT ProfToEEInterfaceImpl::SetEnterLeaveFunctionHooks3WithInfo(FunctionEnter
                                         pFuncLeave3WithInfo,
                                         pFuncTailcall3WithInfo));
 
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
     return
-        g_profControlBlock.pProfInterface->SetEnterLeaveFunctionHooks3WithInfo(pFuncEnter3WithInfo,
+        g_profControlBlock.mainProfilerInfo.pProfInterface->SetEnterLeaveFunctionHooks3WithInfo(pFuncEnter3WithInfo,
                                                                                pFuncLeave3WithInfo,
                                                                                pFuncTailcall3WithInfo);
 }
@@ -5901,7 +5986,12 @@ HRESULT ProfToEEInterfaceImpl::SetFunctionIDMapper(FunctionIDMapper *pFunc)
                                       "**PROF: SetFunctionIDMapper 0x%p.\n",
                                       pFunc));
 
-    g_profControlBlock.pProfInterface->SetFunctionIDMapper(pFunc);
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
+    g_profControlBlock.mainProfilerInfo.pProfInterface->SetFunctionIDMapper(pFunc);
 
     return (S_OK);
 }
@@ -5934,7 +6024,12 @@ HRESULT ProfToEEInterfaceImpl::SetFunctionIDMapper2(FunctionIDMapper2 *pFunc, vo
                                       pFunc,
                                       clientData));
 
-    g_profControlBlock.pProfInterface->SetFunctionIDMapper2(pFunc, clientData);
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
+    g_profControlBlock.mainProfilerInfo.pProfInterface->SetFunctionIDMapper2(pFunc, clientData);
 
     return (S_OK);
 }
@@ -6712,7 +6807,12 @@ HRESULT ProfToEEInterfaceImpl::RequestReJITWithInliners(
          LL_INFO1000,
          "**PROF: RequestReJITWithInliners.\n"));
 
-    if (!g_profControlBlock.pProfInterface->IsCallback4Supported())
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
+    if (!m_pProfilerInfo->pProfInterface->IsCallback4Supported())
     {
         return CORPROF_E_CALLBACK4_REQUIRED;
     }
@@ -6740,7 +6840,7 @@ HRESULT ProfToEEInterfaceImpl::RequestReJITWithInliners(
     }
 
     // Remember the profiler is doing this, as that means we must never detach it!
-    g_profControlBlock.pProfInterface->SetUnrevertiblyModifiedILFlag();
+    g_profControlBlock.mainProfilerInfo.pProfInterface->SetUnrevertiblyModifiedILFlag();
 
     HRESULT hr = SetupThreadForReJIT();
     if (FAILED(hr))
@@ -7052,14 +7152,6 @@ HRESULT ProfToEEInterfaceImpl::EventPipeStartSession(
         "**PROF: EventPipeStartSession.\n"));
 
 #ifdef FEATURE_PERFTRACING
-
-    static_assert(offsetof(EventPipeProviderConfiguration, m_pProviderName) == offsetof(COR_PRF_EVENTPIPE_PROVIDER_CONFIG, providerName)
-                  && offsetof(EventPipeProviderConfiguration, m_keywords) == offsetof(COR_PRF_EVENTPIPE_PROVIDER_CONFIG, keywords)
-                  && offsetof(EventPipeProviderConfiguration, m_loggingLevel) == offsetof(COR_PRF_EVENTPIPE_PROVIDER_CONFIG, loggingLevel)
-                  && offsetof(EventPipeProviderConfiguration, m_pFilterData) == offsetof(COR_PRF_EVENTPIPE_PROVIDER_CONFIG, filterData)
-                  && sizeof(EventPipeProviderConfiguration) == sizeof(COR_PRF_EVENTPIPE_PROVIDER_CONFIG),
-        "Layouts of EventPipeProviderConfiguration type and COR_PRF_EVENTPIPE_PROVIDER_CONFIG type do not match!");
-
     if (cProviderConfigs == 0
         || pProviderConfigs == NULL
         || pSession == NULL)
@@ -7070,19 +7162,19 @@ HRESULT ProfToEEInterfaceImpl::EventPipeStartSession(
     HRESULT hr = S_OK;
     EX_TRY
     {
-        EventPipeProviderConfiguration *pProviders = reinterpret_cast<EventPipeProviderConfiguration *>(pProviderConfigs);
-        UINT64 sessionID = EventPipe::Enable(NULL,
+        EventPipeProviderConfigurationAdapter providerConfigsAdapter(pProviderConfigs, cProviderConfigs);
+        UINT64 sessionID = EventPipeAdapter::Enable(NULL,
                                              0, // We don't use a circular buffer since it's synchronous
-                                             pProviders,
-                                             cProviderConfigs,
-                                             EventPipeSessionType::Synchronous,
-                                             EventPipeSerializationFormat::NetTraceV4,
+                                             providerConfigsAdapter,
+                                             EP_SESSION_TYPE_SYNCHRONOUS,
+                                             EP_SERIALIZATION_FORMAT_NETTRACE_V4,
                                              requestRundown,
                                              NULL,
-                                             &ProfToEEInterfaceImpl::EventPipeCallbackHelper);
+                                             reinterpret_cast<EventPipeSessionSynchronousCallback>(&ProfToEEInterfaceImpl::EventPipeCallbackHelper),
+                                             reinterpret_cast<void *>(m_pProfilerInfo));
         if (sessionID != 0)
         {
-            EventPipe::StartStreaming(sessionID);
+            EventPipeAdapter::StartStreaming(sessionID);
 
             *pSession = sessionID;
         }
@@ -7127,20 +7219,16 @@ HRESULT ProfToEEInterfaceImpl::EventPipeAddProviderToSession(
     HRESULT hr = S_OK;
     EX_TRY
     {
-        EventPipeSession *pSession = EventPipe::GetSession(session);
+        EventPipeSession *pSession = EventPipeAdapter::GetSession(session);
         if (pSession == NULL)
         {
             hr = E_INVALIDARG;
         }
         else
         {
-            EventPipeSessionProvider *pProvider = new EventPipeSessionProvider(
-                    providerConfig.providerName,
-                    providerConfig.keywords,
-                    (EventPipeEventLevel)providerConfig.loggingLevel,
-                    providerConfig.filterData);
-
-            EventPipe::AddProviderToSession(pProvider, pSession);
+            EventPipeProviderConfigurationAdapter adapter(&providerConfig, 1);
+            EventPipeSessionProvider *pProvider = EventPipeAdapter::CreateSessionProvider(adapter);
+            EventPipeAdapter::AddProviderToSession(pProvider, pSession);
         }
     }
     EX_CATCH_HRESULT(hr);
@@ -7172,7 +7260,7 @@ HRESULT ProfToEEInterfaceImpl::EventPipeStopSession(
     HRESULT hr = S_OK;
     EX_TRY
     {
-        EventPipe::Disable(session);
+        EventPipeAdapter::Disable(session);
     }
     EX_CATCH_HRESULT(hr);
 
@@ -7209,7 +7297,7 @@ HRESULT ProfToEEInterfaceImpl::EventPipeCreateProvider(
     HRESULT hr = S_OK;
     EX_TRY
     {
-        EventPipeProvider *pRealProvider = EventPipe::CreateProvider(providerName, NULL, NULL);
+        EventPipeProvider *pRealProvider = EventPipeAdapter::CreateProvider(providerName, nullptr);
         if (pRealProvider == NULL)
         {
             hr = E_FAIL;
@@ -7263,28 +7351,7 @@ HRESULT ProfToEEInterfaceImpl::EventPipeGetProviderInfo(
     HRESULT hr = S_OK;
     EX_TRY
     {
-        const SString &providerName = pRealProvider->GetProviderName();
-        ULONG numChars = providerName.GetCount() + 1;
-        if (pcchName != NULL)
-        {
-            *pcchName = numChars;
-        }
-
-        if (numChars >= cchName)
-        {
-            hr = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
-        }
-        else
-        {
-            size_t pos = 0;
-            for (SString::CIterator it = providerName.Begin(); it != providerName.End(); ++it)
-            {
-                szName[pos] = *it;
-                ++pos;
-            }
-
-            szName[pos] = '\0';
-        }
+        hr = EventPipeAdapter::GetProviderName (pRealProvider, cchName, pcchName, szName);
     }
     EX_CATCH_HRESULT(hr);
 
@@ -7335,7 +7402,7 @@ HRESULT ProfToEEInterfaceImpl::EventPipeDefineEvent(
 
     for (UINT32 i = 0; i < cParamDescs; ++i)
     {
-        if ((EventPipeParameterType)(pParamDescs[i].type) == EventPipeParameterType::Object)
+        if ((EventPipeParameterType)(pParamDescs[i].type) == EP_PARAMETER_TYPE_OBJECT)
         {
             // The native EventPipeMetadataGenerator only knows how to encode
             // primitive types, it would not handle Object correctly
@@ -7346,35 +7413,17 @@ HRESULT ProfToEEInterfaceImpl::EventPipeDefineEvent(
     HRESULT hr = S_OK;
     EX_TRY
     {
-        static_assert(offsetof(EventPipeParameterDesc, Type) == offsetof(COR_PRF_EVENTPIPE_PARAM_DESC, type)
-                      && offsetof(EventPipeParameterDesc, ElementType) == offsetof(COR_PRF_EVENTPIPE_PARAM_DESC, elementType)
-                      && offsetof(EventPipeParameterDesc, Name) == offsetof(COR_PRF_EVENTPIPE_PARAM_DESC, name)
-                      && sizeof(EventPipeParameterDesc) == sizeof(COR_PRF_EVENTPIPE_PARAM_DESC),
-            "Layouts of EventPipeParameterDesc type and COR_PRF_EVENTPIPE_PARAM_DESC type do not match!");
-        EventPipeParameterDesc *params = reinterpret_cast<EventPipeParameterDesc *>(pParamDescs);
-
-        size_t metadataLength;
-        NewArrayHolder<BYTE> pMetadata = EventPipeMetadataGenerator::GenerateEventMetadata(
+        EventPipeParameterDescAdapter adapter(pParamDescs, cParamDescs);
+        EventPipeEvent *pRealEvent = EventPipeAdapter::AddEvent(
+            pProvider,
             eventID,
             eventName,
             keywords,
             eventVersion,
             (EventPipeEventLevel)level,
             opcode,
-            params,
-            cParamDescs,
-            &metadataLength);
-
-        // Add the event.
-        EventPipeEvent *pRealEvent = pProvider->AddEvent(
-            eventID,
-            keywords,
-            eventVersion,
-            (EventPipeEventLevel)level,
-            needStack,
-            pMetadata,
-            (unsigned int)metadataLength);
-
+            adapter,
+            needStack);
         *pEvent = reinterpret_cast<EVENTPIPE_EVENT>(pRealEvent);
     }
     EX_CATCH_HRESULT(hr);
@@ -7413,13 +7462,8 @@ HRESULT ProfToEEInterfaceImpl::EventPipeWriteEvent(
         return E_INVALIDARG;
     }
 
-    static_assert(offsetof(EventData, Ptr) == offsetof(COR_PRF_EVENT_DATA, ptr)
-                    && offsetof(EventData, Size) == offsetof(COR_PRF_EVENT_DATA, size)
-                    && sizeof(EventData) == sizeof(COR_PRF_EVENT_DATA),
-        "Layouts of EventData type and COR_PRF_EVENT_DATA type do not match!");
-
-    EventData *pEventData = reinterpret_cast<EventData *>(data);
-    EventPipe::WriteEvent(*pEvent, pEventData, cData, pActivityId, pRelatedActivityId);
+    EventDataAdapter adapter(data, cData);
+    EventPipeAdapter::WriteEvent(pEvent, adapter, pActivityId, pRelatedActivityId);
 
     return S_OK;
 #else // FEATURE_PERFTRACING
@@ -7438,28 +7482,33 @@ void ProfToEEInterfaceImpl::EventPipeCallbackHelper(EventPipeProvider *provider,
                                                     LPCGUID pRelatedActivityId,
                                                     Thread *pEventThread,
                                                     ULONG numStackFrames,
-                                                    UINT_PTR stackFrames[])
+                                                    UINT_PTR stackFrames[],
+                                                    void *additionalData)
 {
-    // If we got here we know a profiler has started an EventPipe session
-    BEGIN_PIN_PROFILER(true);
-    // But, a profiler could always register for a session and then detach without
-    // closing the session. So check if we have an interface before proceeding.
-    if (g_profControlBlock.pProfInterface != nullptr)
+    _ASSERTE(additionalData != NULL);
+    ProfilerInfo *pProfilerInfo = reinterpret_cast<ProfilerInfo *>(additionalData);
+
+    _ASSERTE(pProfilerInfo->pProfInterface.Load() != NULL);
     {
-        g_profControlBlock.pProfInterface->EventPipeEventDelivered(provider,
-                                                                   eventId,
-                                                                   eventVersion,
-                                                                   cbMetadataBlob,
-                                                                   metadataBlob,
-                                                                   cbEventData,
-                                                                   eventData,
-                                                                   pActivityId,
-                                                                   pRelatedActivityId,
-                                                                   pEventThread,
-                                                                   numStackFrames,
-                                                                   stackFrames);
+        EvacuationCounterHolder holder(pProfilerInfo);
+        // But, a profiler could always register for a session and then detach without
+        // closing the session. So check if we have an interface before proceeding.
+        if (pProfilerInfo->pProfInterface.Load() != NULL)
+        {
+            pProfilerInfo->pProfInterface->EventPipeEventDelivered(provider,
+                                                                       eventId,
+                                                                       eventVersion,
+                                                                       cbMetadataBlob,
+                                                                       metadataBlob,
+                                                                       cbEventData,
+                                                                       eventData,
+                                                                       pActivityId,
+                                                                       pRelatedActivityId,
+                                                                       pEventThread,
+                                                                       numStackFrames,
+                                                                       stackFrames);
+        }
     }
-    END_PIN_PROFILER();
 };
 
 
@@ -8900,13 +8949,11 @@ HRESULT ProfToEEInterfaceImpl::GetGenerationBounds(ULONG cObjectRanges,
         // Yay!
         EE_THREAD_NOT_REQUIRED;
 
-        // Yay!
-        CANNOT_TAKE_LOCK;
-
+        // Lock is required to ensure this is synchronized with GC's updates.
+        CAN_TAKE_LOCK;
 
         PRECONDITION(CheckPointer(pcObjectRanges));
         PRECONDITION(cObjectRanges <= 0 || ranges != NULL);
-        PRECONDITION(s_generationTableLock >= 0);
     }
     CONTRACTL_END;
 
@@ -8915,31 +8962,12 @@ HRESULT ProfToEEInterfaceImpl::GetGenerationBounds(ULONG cObjectRanges,
         LL_INFO1000,
         "**PROF: GetGenerationBounds.\n"));
 
-    // Announce we are using the generation table now
-    CounterHolder genTableLock(&s_generationTableLock);
-
-    GenerationTable *generationTable = s_currentGenerationTable;
-
-    if (generationTable == NULL)
+    if (s_currentGenerationTable == NULL)
     {
         return E_FAIL;
     }
 
-    _ASSERTE(generationTable->magic == GENERATION_TABLE_MAGIC);
-
-    GenerationDesc *genDescTable = generationTable->genDescTable;
-    ULONG count = min(generationTable->count, cObjectRanges);
-    for (ULONG i = 0; i < count; i++)
-    {
-        ranges[i].generation          = (COR_PRF_GC_GENERATION)genDescTable[i].generation;
-        ranges[i].rangeStart          = (ObjectID)genDescTable[i].rangeStart;
-        ranges[i].rangeLength         = genDescTable[i].rangeEnd         - genDescTable[i].rangeStart;
-        ranges[i].rangeLengthReserved = genDescTable[i].rangeEndReserved - genDescTable[i].rangeStart;
-    }
-
-    *pcObjectRanges = generationTable->count;
-
-    return S_OK;
+    return s_currentGenerationTable->GetGenerationBounds(cObjectRanges, pcObjectRanges, ranges);
 }
 
 
@@ -8974,7 +9002,7 @@ HRESULT ProfToEEInterfaceImpl::GetNotifiedExceptionClauseInfo(COR_PRF_EX_CLAUSE_
     EHClauseInfo*         pCurrentEHClauseInfo = NULL;
 
     // notification requires that we are on a managed thread with an exception in flight
-    Thread *pThread = GetThread();
+    Thread *pThread = GetThreadNULLOk();
 
     // If pThread is null, then the thread has never run managed code
     if (pThread == NULL)
@@ -9035,7 +9063,6 @@ HRESULT ProfToEEInterfaceImpl::GetObjectGeneration(ObjectID objectId,
 
         PRECONDITION(objectId != NULL);
         PRECONDITION(CheckPointer(range));
-        PRECONDITION(s_generationTableLock >= 0);
     }
     CONTRACTL_END;
 
@@ -9045,38 +9072,24 @@ HRESULT ProfToEEInterfaceImpl::GetObjectGeneration(ObjectID objectId,
                                        "**PROF: GetObjectGeneration 0x%p.\n",
                                        objectId));
 
-    BEGIN_GETTHREAD_ALLOWED;
-    _ASSERTE((GetThread() == NULL) || (GetThread()->PreemptiveGCDisabled()));
-    END_GETTHREAD_ALLOWED;
+    
+    _ASSERTE((GetThreadNULLOk() == NULL) || (GetThreadNULLOk()->PreemptiveGCDisabled()));
 
-    // Announce we are using the generation table now
-    CounterHolder genTableLock(&s_generationTableLock);
+    IGCHeap *hp = GCHeapUtilities::GetGCHeap();
 
-    GenerationTable *generationTable = s_currentGenerationTable;
+    uint8_t* pStart;
+    uint8_t* pAllocated;
+    uint8_t* pReserved;
+    unsigned int generation = hp->GetGenerationWithRange((Object*)objectId, &pStart, &pAllocated, &pReserved);
 
-    if (generationTable == NULL)
-    {
-        return E_FAIL;
-    }
+    UINT_PTR rangeLength = pAllocated - pStart;
+    UINT_PTR rangeLengthReserved = pReserved - pStart;
 
-    _ASSERTE(generationTable->magic == GENERATION_TABLE_MAGIC);
-
-    GenerationDesc *genDescTable = generationTable->genDescTable;
-    ULONG count = generationTable->count;
-    for (ULONG i = 0; i < count; i++)
-    {
-        if (genDescTable[i].rangeStart <= (BYTE *)objectId && (BYTE *)objectId < genDescTable[i].rangeEndReserved)
-        {
-            range->generation          = (COR_PRF_GC_GENERATION)genDescTable[i].generation;
-            range->rangeStart          = (ObjectID)genDescTable[i].rangeStart;
-            range->rangeLength         = genDescTable[i].rangeEnd         - genDescTable[i].rangeStart;
-            range->rangeLengthReserved = genDescTable[i].rangeEndReserved - genDescTable[i].rangeStart;
-
-            return S_OK;
-        }
-    }
-
-    return E_FAIL;
+    range->generation = (COR_PRF_GC_GENERATION)generation;
+    range->rangeStart = (ObjectID)pStart;
+    range->rangeLength = rangeLength;
+    range->rangeLengthReserved = rangeLengthReserved;
+    return S_OK;
 }
 
 HRESULT ProfToEEInterfaceImpl::GetReJITIDs(
@@ -9133,20 +9146,17 @@ HRESULT ProfToEEInterfaceImpl::SetupThreadForReJIT()
 {
     LIMITED_METHOD_CONTRACT;
 
-    HRESULT hr = S_OK;
-    EX_TRY
+    Thread* pThread = GetThreadNULLOk();
+    if (pThread == NULL)
     {
-        if (GetThread() == NULL)
-        {
-            SetupThread();
-        }
-
-        Thread *pThread = GetThread();
-        pThread->SetProfilerCallbackStateFlags(COR_PRF_CALLBACKSTATE_REJIT_WAS_CALLED);
+        HRESULT hr = S_OK;
+        pThread = SetupThreadNoThrow(&hr);
+        if (pThread == NULL)
+            return hr;
     }
-    EX_CATCH_HRESULT(hr);
 
-    return hr;
+    pThread->SetProfilerCallbackStateFlags(COR_PRF_CALLBACKSTATE_REJIT_WAS_CALLED);
+    return S_OK;
 }
 
 HRESULT ProfToEEInterfaceImpl::RequestReJIT(ULONG       cFunctions,   // in
@@ -9158,7 +9168,7 @@ HRESULT ProfToEEInterfaceImpl::RequestReJIT(ULONG       cFunctions,   // in
         // Yay!
         NOTHROW;
 
-        // When we suspend the runtime we drop into premptive mode
+        // When we suspend the runtime we drop into preemptive mode
         GC_TRIGGERS;
 
         // Yay!
@@ -9179,7 +9189,12 @@ HRESULT ProfToEEInterfaceImpl::RequestReJIT(ULONG       cFunctions,   // in
          LL_INFO1000,
          "**PROF: RequestReJIT.\n"));
 
-    if (!g_profControlBlock.pProfInterface->IsCallback4Supported())
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
+    if (!m_pProfilerInfo->pProfInterface->IsCallback4Supported())
     {
         return CORPROF_E_CALLBACK4_REQUIRED;
     }
@@ -9196,7 +9211,7 @@ HRESULT ProfToEEInterfaceImpl::RequestReJIT(ULONG       cFunctions,   // in
     }
 
     // Remember the profiler is doing this, as that means we must never detach it!
-    g_profControlBlock.pProfInterface->SetUnrevertiblyModifiedILFlag();
+    g_profControlBlock.mainProfilerInfo.pProfInterface->SetUnrevertiblyModifiedILFlag();
 
     HRESULT hr = SetupThreadForReJIT();
     if (FAILED(hr))
@@ -9241,6 +9256,11 @@ HRESULT ProfToEEInterfaceImpl::RequestRevert(ULONG       cFunctions,  // in
          LL_INFO1000,
          "**PROF: RequestRevert.\n"));
 
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
     if (!CORProfilerEnableRejit())
     {
         return CORPROF_E_REJIT_NOT_ENABLED;
@@ -9253,7 +9273,7 @@ HRESULT ProfToEEInterfaceImpl::RequestRevert(ULONG       cFunctions,  // in
     }
 
     // Remember the profiler is doing this, as that means we must never detach it!
-    g_profControlBlock.pProfInterface->SetUnrevertiblyModifiedILFlag();
+    g_profControlBlock.mainProfilerInfo.pProfInterface->SetUnrevertiblyModifiedILFlag();
 
     // Initialize the status array
     if (rgHrStatuses != NULL)
@@ -9553,14 +9573,16 @@ HRESULT ProfToEEInterfaceImpl::RequestProfilerDetach(DWORD dwExpectedCompletionM
     }
     CONTRACTL_END;
 
-    PROFILER_TO_CLR_ENTRYPOINT_SYNC_EX(
+    PROFILER_TO_CLR_ENTRYPOINT_ASYNC_EX(
         kP2EEAllowableAfterAttach | kP2EETriggers,
         (LF_CORPROF,
         LL_INFO1000,
         "**PROF: RequestProfilerDetach.\n"));
 
 #ifdef FEATURE_PROFAPI_ATTACH_DETACH
-    return ProfilingAPIDetach::RequestProfilerDetach(dwExpectedCompletionMilliseconds);
+    ProfilerInfo *pProfilerInfo = g_profControlBlock.GetProfilerInfo(this);
+    _ASSERTE(pProfilerInfo != NULL);
+    return ProfilingAPIDetach::RequestProfilerDetach(pProfilerInfo, dwExpectedCompletionMilliseconds);
 #else // FEATURE_PROFAPI_ATTACH_DETACH
     return E_NOTIMPL;
 #endif // FEATURE_PROFAPI_ATTACH_DETACH
@@ -9773,7 +9795,12 @@ HRESULT ProfToEEInterfaceImpl::GetFunctionEnter3Info(FunctionID functionId,     
                                     LL_INFO1000,
                                     "**PROF: GetFunctionEnter3Info.\n"));
 
-    _ASSERTE(g_profControlBlock.pProfInterface->GetEnter3WithInfoHook() != NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter3WithInfoHook() != NULL);
+
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
 
     if (!CORProfilerELT3SlowPathEnterEnabled())
     {
@@ -9931,7 +9958,12 @@ HRESULT ProfToEEInterfaceImpl::GetFunctionLeave3Info(FunctionID functionId,     
                                     LL_INFO1000,
                                     "**PROF: GetFunctionLeave3Info.\n"));
 
-    _ASSERTE(g_profControlBlock.pProfInterface->GetLeave3WithInfoHook() != NULL);
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
+
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave3WithInfoHook() != NULL);
 
     if (!CORProfilerELT3SlowPathLeaveEnabled())
     {
@@ -10063,7 +10095,12 @@ HRESULT ProfToEEInterfaceImpl::GetFunctionTailcall3Info(FunctionID functionId,  
                                     LL_INFO1000,
                                     "**PROF: GetFunctionTailcall3Info.\n"));
 
-    _ASSERTE(g_profControlBlock.pProfInterface->GetTailcall3WithInfoHook() != NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall3WithInfoHook() != NULL);
+
+    if (!g_profControlBlock.IsMainProfiler(this))
+    {
+        return E_INVALIDARG;
+    }
 
     if (!CORProfilerELT3SlowPathTailcallEnabled())
     {
@@ -10162,7 +10199,7 @@ HRESULT ProfToEEInterfaceImpl::InitializeCurrentThread()
             LL_INFO10,
             "**PROF: InitializeCurrentThread.\n"));
 
-    SetupTLSForThread(GetThread());
+    SetupTLSForThread();
 
     return S_OK;
 }
@@ -10472,10 +10509,9 @@ void __stdcall ProfilerManagedToUnmanagedTransitionMD(MethodDesc *pMD,
     // Do not notify the profiler about QCalls
     if (pMD == NULL || !pMD->IsQCall())
     {
-        BEGIN_PIN_PROFILER(CORProfilerPresent());
-        g_profControlBlock.pProfInterface->ManagedToUnmanagedTransition(MethodDescToFunctionID(pMD),
-                                                                        reason);
-        END_PIN_PROFILER();
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackTransitions());
+        g_profControlBlock.ManagedToUnmanagedTransition(MethodDescToFunctionID(pMD), reason);
+        END_PROFILER_CALLBACK();
     }
 }
 
@@ -10507,10 +10543,9 @@ void __stdcall ProfilerUnmanagedToManagedTransitionMD(MethodDesc *pMD,
     // Do not notify the profiler about QCalls
     if (pMD == NULL || !pMD->IsQCall())
     {
-        BEGIN_PIN_PROFILER(CORProfilerPresent());
-        g_profControlBlock.pProfInterface->UnmanagedToManagedTransition(MethodDescToFunctionID(pMD),
-                                                                        reason);
-        END_PIN_PROFILER();
+        BEGIN_PROFILER_CALLBACK(CORProfilerTrackTransitions());
+        g_profControlBlock.UnmanagedToManagedTransition(MethodDescToFunctionID(pMD), reason);
+        END_PROFILER_CALLBACK();
     }
 }
 
@@ -10535,12 +10570,12 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
     // code:ProfControlBlock#TestOnlyELT
     if (g_profControlBlock.fTestOnlyForceEnterLeave)
     {
-        if ((g_profControlBlock.pProfInterface.Load() == NULL) ||
+        if ((g_profControlBlock.mainProfilerInfo.pProfInterface.Load() == NULL) ||
             (
-                (g_profControlBlock.pProfInterface->GetEnterHook()          == NULL) &&
-                (g_profControlBlock.pProfInterface->GetEnter2Hook()         == NULL) &&
-                (g_profControlBlock.pProfInterface->GetEnter3Hook()         == NULL) &&
-                (g_profControlBlock.pProfInterface->GetEnter3WithInfoHook() == NULL)
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnterHook()          == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter2Hook()         == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter3Hook()         == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter3WithInfoHook() == NULL)
             )
            )
         {
@@ -10550,7 +10585,7 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
 #endif // PROF_TEST_ONLY_FORCE_ELT
 
     // ELT3 Fast-Path hooks should be NULL when ELT intermediary is used.
-    _ASSERTE(g_profControlBlock.pProfInterface->GetEnter3Hook() == NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter3Hook() == NULL);
     _ASSERTE(GetThread()->PreemptiveGCDisabled());
     _ASSERTE(platformSpecificHandle != NULL);
 
@@ -10568,21 +10603,21 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
     //
     // CLR v4 Slow-Path ELT
     //
-    if (g_profControlBlock.pProfInterface->GetEnter3WithInfoHook() != NULL)
+    if (g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter3WithInfoHook() != NULL)
     {
         FunctionIDOrClientID functionIDOrClientID;
         functionIDOrClientID.clientID = clientData;
-        g_profControlBlock.pProfInterface->GetEnter3WithInfoHook()(
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter3WithInfoHook()(
             functionIDOrClientID,
             (COR_PRF_ELT_INFO)&eltInfo);
         goto LExit;
     }
 
-    if (g_profControlBlock.pProfInterface->GetEnter2Hook() != NULL)
+    if (g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter2Hook() != NULL)
     {
         // We have run out of heap memory, so the content of the mapping table becomes stale.
         // All Whidbey ETL hooks must be turned off.
-        if (!g_profControlBlock.pProfInterface->IsClientIDToFunctionIDMappingEnabled())
+        if (!g_profControlBlock.mainProfilerInfo.pProfInterface->IsClientIDToFunctionIDMappingEnabled())
         {
             goto LExit;
         }
@@ -10594,14 +10629,14 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
         // key to retrieve the corresponding clientID from the internal FunctionID hash table.
         FunctionID functionId = clientData;
         _ASSERTE(functionId != NULL);
-        clientData = g_profControlBlock.pProfInterface->LookupClientIDFromCache(functionId);
+        clientData = g_profControlBlock.mainProfilerInfo.pProfInterface->LookupClientIDFromCache(functionId);
 
         //
         // Whidbey Fast-Path ELT
         //
         if (CORProfilerELT2FastPathEnterEnabled())
         {
-            g_profControlBlock.pProfInterface->GetEnter2Hook()(
+            g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter2Hook()(
                 functionId,
                 clientData,
                 NULL,
@@ -10657,7 +10692,7 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
         HRESULT hr = ProfilingGetFunctionEnter3Info(functionId, (COR_PRF_ELT_INFO)&eltInfo, &frameInfo, &ulArgInfoSize, pArgumentInfo);
 
         _ASSERTE(hr == S_OK);
-        g_profControlBlock.pProfInterface->GetEnter2Hook()(functionId, clientData, frameInfo, pArgumentInfo);
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnter2Hook()(functionId, clientData, frameInfo, pArgumentInfo);
 
         goto LExit;
     }
@@ -10669,7 +10704,7 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
     // in the first place.  (Note that SetEnterLeaveFunctionHooks* will return
     // an error unless it's called in the profiler's Initialize(), so a profiler can't change
     // its mind about where the hooks are.)
-    _ASSERTE(g_profControlBlock.pProfInterface->GetEnterHook() != NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnterHook() != NULL);
 
     // Note that we cannot assert CORProfilerTrackEnterLeave() (i.e., profiler flag
     // COR_PRF_MONITOR_ENTERLEAVE), because the profiler may decide whether
@@ -10681,7 +10716,7 @@ HCIMPL2(EXTERN_C void, ProfileEnter, UINT_PTR clientData, void * platformSpecifi
     // Everett ELT
     //
     {
-        g_profControlBlock.pProfInterface->GetEnterHook()((FunctionID)clientData);
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetEnterHook()((FunctionID)clientData);
     }
 
 LExit:
@@ -10707,12 +10742,12 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
     // code:ProfControlBlock#TestOnlyELT
     if (g_profControlBlock.fTestOnlyForceEnterLeave)
     {
-        if ((g_profControlBlock.pProfInterface.Load() == NULL) ||
+        if ((g_profControlBlock.mainProfilerInfo.pProfInterface.Load() == NULL) ||
             (
-                (g_profControlBlock.pProfInterface->GetLeaveHook()          == NULL) &&
-                (g_profControlBlock.pProfInterface->GetLeave2Hook()         == NULL) &&
-                (g_profControlBlock.pProfInterface->GetLeave3Hook()         == NULL) &&
-                (g_profControlBlock.pProfInterface->GetLeave3WithInfoHook() == NULL)
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeaveHook()          == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave2Hook()         == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave3Hook()         == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave3WithInfoHook() == NULL)
             )
            )
         {
@@ -10722,7 +10757,7 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
 #endif // PROF_TEST_ONLY_FORCE_ELT
 
     // ELT3 Fast-Path hooks should be NULL when ELT intermediary is used.
-    _ASSERTE(g_profControlBlock.pProfInterface->GetLeave3Hook() == NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave3Hook() == NULL);
     _ASSERTE(GetThread()->PreemptiveGCDisabled());
     _ASSERTE(platformSpecificHandle != NULL);
 
@@ -10740,21 +10775,21 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
     //
     // CLR v4 Slow-Path ELT
     //
-    if (g_profControlBlock.pProfInterface->GetLeave3WithInfoHook() != NULL)
+    if (g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave3WithInfoHook() != NULL)
     {
         FunctionIDOrClientID functionIDOrClientID;
         functionIDOrClientID.clientID = clientData;
-        g_profControlBlock.pProfInterface->GetLeave3WithInfoHook()(
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave3WithInfoHook()(
             functionIDOrClientID,
             (COR_PRF_ELT_INFO)&eltInfo);
         goto LExit;
     }
 
-    if (g_profControlBlock.pProfInterface->GetLeave2Hook() != NULL)
+    if (g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave2Hook() != NULL)
     {
         // We have run out of heap memory, so the content of the mapping table becomes stale.
         // All Whidbey ETL hooks must be turned off.
-        if (!g_profControlBlock.pProfInterface->IsClientIDToFunctionIDMappingEnabled())
+        if (!g_profControlBlock.mainProfilerInfo.pProfInterface->IsClientIDToFunctionIDMappingEnabled())
         {
             goto LExit;
         }
@@ -10766,14 +10801,14 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
         // key to retrieve the corresponding clientID from the internal FunctionID hash table.
         FunctionID functionId = clientData;
         _ASSERTE(functionId != NULL);
-        clientData = g_profControlBlock.pProfInterface->LookupClientIDFromCache(functionId);
+        clientData = g_profControlBlock.mainProfilerInfo.pProfInterface->LookupClientIDFromCache(functionId);
 
         //
         // Whidbey Fast-Path ELT
         //
         if (CORProfilerELT2FastPathLeaveEnabled())
         {
-            g_profControlBlock.pProfInterface->GetLeave2Hook()(
+            g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave2Hook()(
                 functionId,
                 clientData,
                 NULL,
@@ -10790,7 +10825,7 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
         HRESULT hr = ProfilingGetFunctionLeave3Info(functionId, (COR_PRF_ELT_INFO)&eltInfo, &frameInfo, &argumentRange);
         _ASSERTE(hr == S_OK);
 
-        g_profControlBlock.pProfInterface->GetLeave2Hook()(functionId, clientData, frameInfo, &argumentRange);
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeave2Hook()(functionId, clientData, frameInfo, &argumentRange);
         goto LExit;
     }
 
@@ -10800,7 +10835,7 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
     // in the first place.  (Note that SetEnterLeaveFunctionHooks* will return
     // an error unless it's called in the profiler's Initialize(), so a profiler can't change
     // its mind about where the hooks are.)
-    _ASSERTE(g_profControlBlock.pProfInterface->GetLeaveHook() != NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeaveHook() != NULL);
 
     // Note that we cannot assert CORProfilerTrackEnterLeave() (i.e., profiler flag
     // COR_PRF_MONITOR_ENTERLEAVE), because the profiler may decide whether
@@ -10812,7 +10847,7 @@ HCIMPL2(EXTERN_C void, ProfileLeave, UINT_PTR clientData, void * platformSpecifi
     // Everett ELT
     //
     {
-        g_profControlBlock.pProfInterface->GetLeaveHook()((FunctionID)clientData);
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetLeaveHook()((FunctionID)clientData);
     }
 
 LExit:
@@ -10839,12 +10874,12 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
     // code:ProfControlBlock#TestOnlyELT
     if (g_profControlBlock.fTestOnlyForceEnterLeave)
     {
-        if ((g_profControlBlock.pProfInterface.Load() == NULL) ||
+        if ((g_profControlBlock.mainProfilerInfo.pProfInterface.Load() == NULL) ||
             (
-                (g_profControlBlock.pProfInterface->GetTailcallHook()          == NULL) &&
-                (g_profControlBlock.pProfInterface->GetTailcall2Hook()         == NULL) &&
-                (g_profControlBlock.pProfInterface->GetTailcall3Hook()         == NULL) &&
-                (g_profControlBlock.pProfInterface->GetTailcall3WithInfoHook() == NULL)
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcallHook()          == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall2Hook()         == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall3Hook()         == NULL) &&
+                (g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall3WithInfoHook() == NULL)
             )
            )
         {
@@ -10854,7 +10889,7 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
 #endif // PROF_TEST_ONLY_FORCE_ELT
 
     // ELT3 fast-path hooks should be NULL when ELT intermediary is used.
-    _ASSERTE(g_profControlBlock.pProfInterface->GetTailcall3Hook() == NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall3Hook() == NULL);
     _ASSERTE(GetThread()->PreemptiveGCDisabled());
     _ASSERTE(platformSpecificHandle != NULL);
 
@@ -10872,21 +10907,21 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
     //
     // CLR v4 Slow-Path ELT
     //
-    if (g_profControlBlock.pProfInterface->GetTailcall3WithInfoHook() != NULL)
+    if (g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall3WithInfoHook() != NULL)
     {
         FunctionIDOrClientID functionIDOrClientID;
         functionIDOrClientID.clientID = clientData;
-        g_profControlBlock.pProfInterface->GetTailcall3WithInfoHook()(
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall3WithInfoHook()(
             functionIDOrClientID,
             (COR_PRF_ELT_INFO)&eltInfo);
         goto LExit;
     }
 
-    if (g_profControlBlock.pProfInterface->GetTailcall2Hook() != NULL)
+    if (g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall2Hook() != NULL)
     {
         // We have run out of heap memory, so the content of the mapping table becomes stale.
         // All Whidbey ETL hooks must be turned off.
-        if (!g_profControlBlock.pProfInterface->IsClientIDToFunctionIDMappingEnabled())
+        if (!g_profControlBlock.mainProfilerInfo.pProfInterface->IsClientIDToFunctionIDMappingEnabled())
         {
             goto LExit;
         }
@@ -10898,14 +10933,14 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
         // key to retrieve the corresponding clientID from the internal FunctionID hash table.
         FunctionID functionId = clientData;
         _ASSERTE(functionId != NULL);
-        clientData = g_profControlBlock.pProfInterface->LookupClientIDFromCache(functionId);
+        clientData = g_profControlBlock.mainProfilerInfo.pProfInterface->LookupClientIDFromCache(functionId);
 
         //
         // Whidbey Fast-Path ELT
         //
         if (CORProfilerELT2FastPathTailcallEnabled())
         {
-            g_profControlBlock.pProfInterface->GetTailcall2Hook()(
+            g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall2Hook()(
                 functionId,
                 clientData,
                 NULL);
@@ -10920,7 +10955,7 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
         HRESULT hr = ProfilingGetFunctionTailcall3Info(functionId, (COR_PRF_ELT_INFO)&eltInfo, &frameInfo);
         _ASSERTE(hr == S_OK);
 
-        g_profControlBlock.pProfInterface->GetTailcall2Hook()(functionId, clientData, frameInfo);
+        g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcall2Hook()(functionId, clientData, frameInfo);
         goto LExit;
     }
 
@@ -10930,7 +10965,7 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
     // in the first place.  (Note that SetEnterLeaveFunctionHooks* will return
     // an error unless it's called in the profiler's Initialize(), so a profiler can't change
     // its mind about where the hooks are.)
-    _ASSERTE(g_profControlBlock.pProfInterface->GetTailcallHook() != NULL);
+    _ASSERTE(g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcallHook() != NULL);
 
     // Note that we cannot assert CORProfilerTrackEnterLeave() (i.e., profiler flag
     // COR_PRF_MONITOR_ENTERLEAVE), because the profiler may decide whether
@@ -10941,7 +10976,7 @@ HCIMPL2(EXTERN_C void, ProfileTailcall, UINT_PTR clientData, void * platformSpec
     //
     // Everett ELT
     //
-    g_profControlBlock.pProfInterface->GetTailcallHook()((FunctionID)clientData);
+    g_profControlBlock.mainProfilerInfo.pProfInterface->GetTailcallHook()((FunctionID)clientData);
 
 LExit:
 

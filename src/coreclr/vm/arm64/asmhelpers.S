@@ -16,6 +16,13 @@ LEAF_ENTRY GetCurrentSP, _TEXT
     ret lr
 LEAF_END GetCurrentSP, _TEXT
 
+// DWORD64 __stdcall GetDataCacheZeroIDReg(void)
+LEAF_ENTRY GetDataCacheZeroIDReg, _TEXT
+    mrs     x0, dczid_el0
+    and     x0, x0, 31
+    ret     lr
+LEAF_END GetDataCacheZeroIDReg, _TEXT
+
 //-----------------------------------------------------------------------------
 // This routine captures the machine state. It is used by helper method frame
 //-----------------------------------------------------------------------------
@@ -125,7 +132,7 @@ NESTED_ENTRY NDirectImportThunk, _TEXT, NoHandler
     SAVE_FLOAT_ARGUMENT_REGISTERS sp, 96
 
     mov x0, x12
-    bl NDirectImportWorker
+    bl C_FUNC(NDirectImportWorker)
     mov x12, x0
 
     // pop the stack and restore original register state
@@ -156,7 +163,7 @@ NESTED_ENTRY PrecodeFixupThunk, _TEXT, NoHandler
     ldr     x13, [x13, #SIZEOF__FixupPrecode]
     add     x12, x13, w14, uxtw #MethodDesc_ALIGNMENT_SHIFT
 
-    b ThePreStub
+    b       C_FUNC(ThePreStub)
 NESTED_END PrecodeFixupThunk, _TEXT
 // ------------------------------------------------------------------
 
@@ -167,7 +174,7 @@ NESTED_ENTRY ThePreStub, _TEXT, NoHandler
     add x0, sp, #__PWTB_TransitionBlock // pTransitionBlock
     mov x1, METHODDESC_REGISTER // pMethodDesc
 
-    bl  PreStubWorker
+    bl  C_FUNC(PreStubWorker)
 
     mov x9, x0
 
@@ -206,13 +213,7 @@ LEAF_END ThePreStubPatch, _TEXT
     LEAF_END_MARKED \name, _TEXT
 .endm
 
-// ------------------------------------------------------------------
-// Start of the writeable code region
-LEAF_ENTRY JIT_PatchedCodeStart, _TEXT
-    ret  lr
-LEAF_END JIT_PatchedCodeStart, _TEXT
-
-// void JIT_UpdateWriteBarrierState(bool skipEphemeralCheck)
+// void JIT_UpdateWriteBarrierState(bool skipEphemeralCheck, size_t writeableOffset)
 //
 // Update shadow copies of the various state info required for barrier
 //
@@ -231,6 +232,7 @@ WRITE_BARRIER_ENTRY JIT_UpdateWriteBarrierState
     // x12 will be used for pointers
 
     mov x8, x0
+    mov x9, x1 
 
     PREPARE_EXTERNAL_VAR g_card_table, x12
     ldr  x0, [x12]
@@ -268,7 +270,9 @@ LOCAL_LABEL(EphemeralCheckEnabled):
     ldr  x7, [x12]
 
     // Update wbs state
-    adr  x12, LOCAL_LABEL(wbs_begin)
+    PREPARE_EXTERNAL_VAR JIT_WriteBarrier_Table_Loc, x12
+    ldr  x12, [x12]
+    add  x12, x12, x9
 
     stp  x0, x1, [x12], 16
     stp  x2, x3, [x12], 16
@@ -277,34 +281,28 @@ LOCAL_LABEL(EphemeralCheckEnabled):
 
     EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 16
     EPILOG_RETURN
-
-    // Begin patchable literal pool
-    .balign 64  // Align to power of two at least as big as patchable literal pool so that it fits optimally in cache line
-LOCAL_LABEL(wbs_begin):
-LOCAL_LABEL(wbs_card_table):
-    .quad 0
-LOCAL_LABEL(wbs_card_bundle_table):
-    .quad 0
-LOCAL_LABEL(wbs_GCShadow):
-    .quad 0
-LOCAL_LABEL(wbs_sw_ww_table):
-    .quad 0
-LOCAL_LABEL(wbs_ephemeral_low):
-    .quad 0
-LOCAL_LABEL(wbs_ephemeral_high):
-    .quad 0
-LOCAL_LABEL(wbs_lowest_address):
-    .quad 0
-LOCAL_LABEL(wbs_highest_address):
-    .quad 0
 WRITE_BARRIER_END JIT_UpdateWriteBarrierState
 
+// ------------------------// ------------------------------------------------------------------
+// __declspec(naked) void F_CALL_CONV JIT_WriteBarrier_Callable(Object **dst, Object* val)
+LEAF_ENTRY  JIT_WriteBarrier_Callable, _TEXT
 
-// ------------------------------------------------------------------
-// End of the writeable code region
-LEAF_ENTRY JIT_PatchedCodeLast, _TEXT
+    // Setup args for JIT_WriteBarrier. x14 = dst ; x15 = val
+    mov     x14, x0                     // x14 = dst
+    mov     x15, x1                     // x15 = val
+
+    // Branch to the write barrier
+    PREPARE_EXTERNAL_VAR JIT_WriteBarrier_Loc, x17
+    ldr     x17, [x17]
+    br      x17
+LEAF_END JIT_WriteBarrier_Callable, _TEXT
+
+.balign 64  // Align to power of two at least as big as patchable literal pool so that it fits optimally in cache line
+//------------------------------------------
+// Start of the writeable code region
+LEAF_ENTRY JIT_PatchedCodeStart, _TEXT
     ret  lr
-LEAF_END JIT_PatchedCodeLast, _TEXT
+LEAF_END JIT_PatchedCodeStart, _TEXT
 
 // void JIT_ByRefWriteBarrier
 // On entry:
@@ -473,6 +471,35 @@ LOCAL_LABEL(Exit):
     ret  lr
 WRITE_BARRIER_END JIT_WriteBarrier
 
+    // Begin patchable literal pool
+    .balign 64  // Align to power of two at least as big as patchable literal pool so that it fits optimally in cache line
+WRITE_BARRIER_ENTRY JIT_WriteBarrier_Table
+LOCAL_LABEL(wbs_begin):
+LOCAL_LABEL(wbs_card_table):
+    .quad 0
+LOCAL_LABEL(wbs_card_bundle_table):
+    .quad 0
+LOCAL_LABEL(wbs_GCShadow):
+    .quad 0
+LOCAL_LABEL(wbs_sw_ww_table):
+    .quad 0
+LOCAL_LABEL(wbs_ephemeral_low):
+    .quad 0
+LOCAL_LABEL(wbs_ephemeral_high):
+    .quad 0
+LOCAL_LABEL(wbs_lowest_address):
+    .quad 0
+LOCAL_LABEL(wbs_highest_address):
+    .quad 0
+WRITE_BARRIER_END JIT_WriteBarrier_Table
+
+
+// ------------------------------------------------------------------
+// End of the writeable code region
+LEAF_ENTRY JIT_PatchedCodeLast, _TEXT
+    ret  lr
+LEAF_END JIT_PatchedCodeLast, _TEXT
+
 #ifdef FEATURE_PREJIT
 //------------------------------------------------
 // VirtualMethodFixupStub
@@ -610,9 +637,9 @@ NESTED_ENTRY ComCallPreStub, _TEXT, NoHandler
     str x12, [sp, #(ComCallPreStub_FrameOffset + UnmanagedToManagedFrame__m_pvDatum)]
     add x0, sp, #(ComCallPreStub_FrameOffset)
     add x1, sp, #(ComCallPreStub_ErrorReturnOffset)
-    bl ComPreStubWorker
+    bl C_FUNC(ComPreStubWorker)
 
-    cbz x0, ComCallPreStub_ErrorExit
+    cbz x0, LOCAL_LABEL(ComCallPreStub_ErrorExit)
 
     mov x12, x0
 
@@ -658,7 +685,7 @@ NESTED_END ComCallPreStub, _TEXT
 
     str x12, [sp, #(GenericComCallStub_FrameOffset + UnmanagedToManagedFrame__m_pvDatum)]
     add x1, sp, #GenericComCallStub_FrameOffset
-    bl COMToCLRWorker
+    bl C_FUNC(COMToCLRWorker)
 
     // pop the stack
     EPILOG_STACK_FREE GenericComCallStub_StackAlloc
@@ -685,7 +712,7 @@ NESTED_END ComCallPreStub, _TEXT
 
     PROLOG_SAVE_REG_PAIR           fp, lr, -16!
 
-    cbz x0, COMToCLRDispatchHelper_RegSetup
+    cbz x0, LOCAL_LABEL(COMToCLRDispatchHelper_RegSetup)
 
     add x9, x1, #SIZEOF__ComMethodFrame
     add x9, x9, x0, LSL #3
@@ -693,7 +720,7 @@ COMToCLRDispatchHelper_StackLoop
     ldr x8, [x9, #-8]!
     str x8, [sp, #-8]!
     sub x0, x0, #1
-    cbnz x0, COMToCLRDispatchHelper_StackLoop
+    cbnz x0, LOCAL_LABEL(COMToCLRDispatchHelper_StackLoop)
 
 COMToCLRDispatchHelper_RegSetup
 
@@ -766,7 +793,7 @@ NESTED_ENTRY OnHijackTripThread, _TEXT, NoHandler
     stp q2, q3, [sp, #144]
 
     mov x0, sp
-    bl OnHijackWorker
+    bl C_FUNC(OnHijackWorker)
 
     // restore any integral return value(s)
     ldp x0, x1, [sp, #96]
@@ -987,7 +1014,7 @@ LOCAL_LABEL(Promote):
     mov     x12, x9           // We pass the ResolveCacheElem to ResolveWorkerAsmStub instead of the DispatchToken
 
 LOCAL_LABEL(Fail):
-    b       ResolveWorkerAsmStub // call the ResolveWorkerAsmStub method to transition into the VM
+    b       C_FUNC(ResolveWorkerAsmStub) // call the ResolveWorkerAsmStub method to transition into the VM
 
 NESTED_END ResolveWorkerChainLookupAsmStub, _TEXT
 
@@ -1003,7 +1030,7 @@ NESTED_ENTRY ResolveWorkerAsmStub, _TEXT, NoHandler
     and x1, x11, #-4 // Indirection cell
     mov x2, x12 // DispatchToken
     and x3, x11, #3 // flag
-    bl VSD_ResolveWorker
+    bl C_FUNC(VSD_ResolveWorker)
     mov x9, x0
 
     EPILOG_WITH_TRANSITION_BLOCK_TAILCALL
@@ -1015,28 +1042,28 @@ NESTED_END ResolveWorkerAsmStub, _TEXT
 #ifdef FEATURE_READYTORUN
 
 NESTED_ENTRY DelayLoad_MethodCall_FakeProlog, _TEXT, NoHandler
-DelayLoad_MethodCall:
-    .global DelayLoad_MethodCall
+C_FUNC(DelayLoad_MethodCall):
+    .global C_FUNC(DelayLoad_MethodCall)
     PROLOG_WITH_TRANSITION_BLOCK
 
     add x0, sp, #__PWTB_TransitionBlock // pTransitionBlock
     mov x1, x11 // Indirection cell
     mov x2, x9 // sectionIndex
     mov x3, x10 // Module*
-    bl ExternalMethodFixupWorker
+    bl C_FUNC(ExternalMethodFixupWorker)
     mov x12, x0
 
     EPILOG_WITH_TRANSITION_BLOCK_TAILCALL
     // Share patch label
-    b ExternalMethodFixupPatchLabel
+    b C_FUNC(ExternalMethodFixupPatchLabel)
 
 NESTED_END DelayLoad_MethodCall_FakeProlog, _TEXT
 
 
 .macro DynamicHelper frameFlags, suffix
 NESTED_ENTRY DelayLoad_Helper\suffix\()_FakeProlog, _TEXT, NoHandler
-DelayLoad_Helper\suffix:
-    .global DelayLoad_Helper\suffix
+C_FUNC(DelayLoad_Helper\suffix):
+    .global C_FUNC(DelayLoad_Helper\suffix)
 
     PROLOG_WITH_TRANSITION_BLOCK
 
@@ -1045,7 +1072,7 @@ DelayLoad_Helper\suffix:
     mov x2, x9 // sectionIndex
     mov x3, x10 // Module*
     mov x4, \frameFlags
-    bl DynamicHelperWorker
+    bl C_FUNC(DynamicHelperWorker)
     cbnz x0, LOCAL_LABEL(FakeProlog\suffix\()_0)
     ldr x0, [sp, #__PWTB_ArgumentRegister_FirstArg]
     EPILOG_WITH_TRANSITION_BLOCK_RETURN
@@ -1176,19 +1203,6 @@ LEAF_ENTRY JIT_GetSharedGCStaticBaseNoCtor_SingleAppDomain, _TEXT
 LEAF_END JIT_GetSharedGCStaticBaseNoCtor_SingleAppDomain, _TEXT
 
 
-// ------------------------------------------------------------------
-// __declspec(naked) void F_CALL_CONV JIT_WriteBarrier_Callable(Object **dst, Object* val)
-LEAF_ENTRY  JIT_WriteBarrier_Callable, _TEXT
-
-    // Setup args for JIT_WriteBarrier. x14 = dst ; x15 = val
-    mov     x14, x0                     // x14 = dst
-    mov     x15, x1                     // x15 = val
-
-    // Branch to the write barrier (which is already correctly overwritten with
-    // single or multi-proc code based on the current CPU
-    b       C_FUNC(JIT_WriteBarrier)
-LEAF_END JIT_WriteBarrier_Callable, _TEXT
-
 #ifdef PROFILING_SUPPORTED
 
 // ------------------------------------------------------------------
@@ -1226,7 +1240,7 @@ NESTED_ENTRY \helper\()Naked, _TEXT, NoHandler
 
     mov     x0, x10
     mov     x1, sp
-    bl      \helper
+    bl      C_FUNC(\helper)
 
     RESTORE_ARGUMENT_REGISTERS sp, 16       // Restore x8 and argument registers.
     RESTORE_FLOAT_ARGUMENT_REGISTERS sp, 96 // Restore floating-point/SIMD registers.

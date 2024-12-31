@@ -28,7 +28,7 @@
 #ifdef USE_DAC_TABLE_RVA
 #include <dactablerva.h>
 #else
-extern bool TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* symbolName, uint64_t* symbolAddress);
+extern "C" bool TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, const char* symbolName, uint64_t* symbolAddress);
 #endif
 #endif
 
@@ -40,7 +40,6 @@ extern bool TryGetSymbol(ICorDebugDataTarget* dataTarget, uint64_t baseAddress, 
 
 CRITICAL_SECTION g_dacCritSec;
 ClrDataAccess* g_dacImpl;
-HINSTANCE g_thisModule;
 
 EXTERN_C
 #ifdef TARGET_UNIX
@@ -75,9 +74,6 @@ BOOL WINAPI DllMain(HANDLE instance, DWORD reason, LPVOID reserved)
 #endif
         InitializeCriticalSection(&g_dacCritSec);
 
-        // Save the module handle.
-        g_thisModule = (HINSTANCE)instance;
-
         g_procInitialized = true;
         break;
     }
@@ -93,12 +89,6 @@ BOOL WINAPI DllMain(HANDLE instance, DWORD reason, LPVOID reserved)
     }
 
     return TRUE;
-}
-
-HINSTANCE
-GetModuleInst(void)
-{
-    return g_thisModule;
 }
 
 HRESULT
@@ -3301,6 +3291,10 @@ ClrDataAccess::QueryInterface(THIS_
     {
         ifaceRet = static_cast<ISOSDacInterface10*>(this);
     }
+    else if (IsEqualIID(interfaceId, __uuidof(ISOSDacInterface11)))
+    {
+        ifaceRet = static_cast<ISOSDacInterface11*>(this);
+    }
     else
     {
         *iface = NULL;
@@ -5622,16 +5616,6 @@ ClrDataAccess::Initialize(void)
     // Do some validation
     IfFailRet(VerifyDlls());
 
-    // To support EH SxS, utilcode requires the base address of the runtime
-    // as part of its initialization so that functions like "WasThrownByUs" work correctly since
-    // they use the CLR base address to check if an exception was raised by a given instance of the runtime
-    // or not.
-    //
-    // Thus, when DAC is initialized, initialize utilcode with the base address of the runtime loaded in the
-    // target process. This is similar to work done in CorDB::SetTargetCLR for mscordbi.
-
-    g_hmodCoreCLR = (HINSTANCE)m_globalBase; // Base address of the runtime in the target process
-
     return S_OK;
 }
 
@@ -6093,9 +6077,22 @@ ClrDataAccess::GetMethodVarInfo(MethodDesc* methodDesc,
     SUPPORTS_DAC;
     COUNT_T countNativeVarInfo;
     NewHolder<ICorDebugInfo::NativeVarInfo> nativeVars(NULL);
+    TADDR nativeCodeStartAddr;
+    if (address != NULL)
+    {
+        NativeCodeVersion requestedNativeCodeVersion = ExecutionManager::GetNativeCodeVersion(address);
+        if (requestedNativeCodeVersion.IsNull() || requestedNativeCodeVersion.GetNativeCode() == NULL)
+        {
+            return E_INVALIDARG;
+        }
+        nativeCodeStartAddr = PCODEToPINSTR(requestedNativeCodeVersion.GetNativeCode());
+    }
+    else
+    {
+        nativeCodeStartAddr = PCODEToPINSTR(methodDesc->GetNativeCode());
+    }
 
     DebugInfoRequest request;
-    TADDR  nativeCodeStartAddr = PCODEToPINSTR(methodDesc->GetNativeCode());
     request.InitFromStartingAddr(methodDesc, nativeCodeStartAddr);
 
     BOOL success = DebugInfoManager::GetBoundariesAndVars(
@@ -6103,7 +6100,6 @@ ClrDataAccess::GetMethodVarInfo(MethodDesc* methodDesc,
         DebugInfoStoreNew, NULL, // allocator
         NULL, NULL,
         &countNativeVarInfo, &nativeVars);
-
 
     if (!success)
     {
@@ -6121,8 +6117,7 @@ ClrDataAccess::GetMethodVarInfo(MethodDesc* methodDesc,
 
     if (codeOffset)
     {
-        *codeOffset = (ULONG32)
-            (address - nativeCodeStartAddr);
+        *codeOffset = (ULONG32)(address - nativeCodeStartAddr);
     }
     return S_OK;
 }
@@ -6140,11 +6135,23 @@ ClrDataAccess::GetMethodNativeMap(MethodDesc* methodDesc,
 
     // Use the DebugInfoStore to get IL->Native maps.
     // It doesn't matter whether we're jitted, ngenned etc.
+    TADDR nativeCodeStartAddr;
+    if (address != NULL)
+    {
+        NativeCodeVersion requestedNativeCodeVersion = ExecutionManager::GetNativeCodeVersion(address);
+        if (requestedNativeCodeVersion.IsNull() || requestedNativeCodeVersion.GetNativeCode() == NULL)
+        {
+            return E_INVALIDARG;
+        }
+        nativeCodeStartAddr = PCODEToPINSTR(requestedNativeCodeVersion.GetNativeCode());
+    }
+    else
+    {
+        nativeCodeStartAddr = PCODEToPINSTR(methodDesc->GetNativeCode());
+    }
 
     DebugInfoRequest request;
-    TADDR  nativeCodeStartAddr = PCODEToPINSTR(methodDesc->GetNativeCode());
     request.InitFromStartingAddr(methodDesc, nativeCodeStartAddr);
-
 
     // Bounds info.
     ULONG32 countMapCopy;
@@ -6160,7 +6167,6 @@ ClrDataAccess::GetMethodNativeMap(MethodDesc* methodDesc,
     {
         return E_FAIL;
     }
-
 
     // Need to convert map formats.
     *numMap = countMapCopy;
@@ -6195,8 +6201,7 @@ ClrDataAccess::GetMethodNativeMap(MethodDesc* methodDesc,
     }
     if (codeOffset)
     {
-        *codeOffset = (ULONG32)
-            (address - nativeCodeStartAddr);
+        *codeOffset = (ULONG32)(address - nativeCodeStartAddr);
     }
 
     *mapAllocated = true;
@@ -6639,7 +6644,7 @@ bool ClrDataAccess::GetILImageNameFromNgenImage( LPCWSTR ilExtension,
         if (wszFileExtension != 0)
         {
             LPWSTR  wszNextFileExtension = wszFileExtension;
-            // Find last occurence
+            // Find last occurrence
             do
             {
                 wszFileExtension = wszNextFileExtension;
@@ -7104,7 +7109,7 @@ HRESULT ClrDataAccess::VerifyDlls()
         // Note that we check this knob every time because it may be handy to turn it on in
         // the environment mid-flight.
         DWORD dwAssertDefault = m_fEnableDllVerificationAsserts ? 1 : 0;
-        if (REGUTIL::GetConfigDWORD_DontUse_(CLRConfig::INTERNAL_DbgDACAssertOnMismatch, dwAssertDefault))
+        if (CLRConfig::GetConfigValue(CLRConfig::INTERNAL_DbgDACAssertOnMismatch, dwAssertDefault))
         {
             // Output a nice error message that contains the timestamps in string format.
             time_t actualTime = timestamp;
@@ -7258,7 +7263,7 @@ GetDacTableAddress(ICorDebugDataTarget* dataTarget, ULONG64 baseAddress, PULONG6
     // On MacOS, FreeBSD or NetBSD use the RVA include file
     *dacTableAddress = baseAddress + DAC_TABLE_RVA;
 #else
-    // On Linux try to get the dac table address via the export symbol
+    // On Linux/MacOS try to get the dac table address via the export symbol
     if (!TryGetSymbol(dataTarget, baseAddress, "g_dacTable", dacTableAddress))
     {
         return CORDBG_E_MISSING_DEBUGGER_EXPORTS;
@@ -8176,9 +8181,10 @@ void DacHandleWalker::GetRefCountedHandleInfo(
     if (pIsPegged)
         *pIsPegged = FALSE;
 
-#ifdef FEATURE_COMINTEROP
+#if defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS) || defined(FEATURE_OBJCMARSHAL)
     if (uType == HNDTYPE_REFCOUNTED)
     {
+#if defined(FEATURE_COMINTEROP)
         // get refcount from the CCW
         PTR_ComCallWrapper pWrap = ComCallWrapper::GetWrapperForObject(oref);
         if (pWrap != NULL)
@@ -8191,8 +8197,12 @@ void DacHandleWalker::GetRefCountedHandleInfo(
 
             return;
         }
+#endif
+#if defined(FEATURE_OBJCMARSHAL)
+        // [TODO] FEATURE_OBJCMARSHAL
+#endif // FEATURE_OBJCMARSHAL
     }
-#endif // FEATURE_COMINTEROP
+#endif // FEATURE_COMINTEROP || FEATURE_COMWRAPPERS || FEATURE_OBJCMARSHAL
 
     if (pRefCount)
         *pRefCount = 0;

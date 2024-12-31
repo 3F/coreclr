@@ -668,6 +668,7 @@ public:
         return GetMethodTable()->IsInterface();
     }
 
+    BOOL HasUnmanagedCallConvAttribute();
     BOOL HasUnmanagedCallersOnlyAttribute();
     BOOL ShouldSuppressGCTransition();
 
@@ -1078,11 +1079,6 @@ public:
     inline WORD GetSlot()
     {
         LIMITED_METHOD_DAC_CONTRACT;
-#ifndef DACCESS_COMPILE
-        // The DAC build uses this method to test for "sanity" of a MethodDesc, and
-        // doesn't need the assert.
-        _ASSERTE(! IsEnCAddedMethod() || !"Cannot get slot for method added via EnC");
-#endif // !DACCESS_COMPILE
 
         // Check if this MD is using the packed slot layout
         if (!RequiresFullSlotNumber())
@@ -1411,6 +1407,7 @@ public:
     void TrySetInitialCodeEntryPointForVersionableMethod(PCODE entryPoint, bool mayHaveEntryPointSlotsToBackpatch);
     void SetCodeEntryPoint(PCODE entryPoint);
     void ResetCodeEntryPoint();
+    void ResetCodeEntryPointForEnC();
 
 #endif // !CROSSGEN_COMPILE
 
@@ -2023,10 +2020,10 @@ public:
 
 private:
     PCODE PrepareILBasedCode(PrepareCodeConfig* pConfig);
-    PCODE GetPrecompiledCode(PrepareCodeConfig* pConfig);
+    PCODE GetPrecompiledCode(PrepareCodeConfig* pConfig, bool shouldTier);
     PCODE GetPrecompiledNgenCode(PrepareCodeConfig* pConfig);
     PCODE GetPrecompiledR2RCode(PrepareCodeConfig* pConfig);
-    PCODE GetMulticoreJitCode();
+    PCODE GetMulticoreJitCode(PrepareCodeConfig* pConfig, bool* pWasTier0);
     COR_ILMETHOD_DECODER* GetAndVerifyILHeader(PrepareCodeConfig* pConfig, COR_ILMETHOD_DECODER* pIlDecoderMemory);
     COR_ILMETHOD_DECODER* GetAndVerifyMetadataILHeader(PrepareCodeConfig* pConfig, COR_ILMETHOD_DECODER* pIlDecoderMemory);
     COR_ILMETHOD_DECODER* GetAndVerifyNoMetadataILHeader();
@@ -2050,8 +2047,19 @@ class PrepareCodeConfig
 public:
     PrepareCodeConfig();
     PrepareCodeConfig(NativeCodeVersion nativeCodeVersion, BOOL needsMulticoreJitNotification, BOOL mayUsePrecompiledCode);
-    MethodDesc* GetMethodDesc();
-    NativeCodeVersion GetCodeVersion();
+
+    MethodDesc* GetMethodDesc() const
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_pMethodDesc;
+    }
+
+    NativeCodeVersion GetCodeVersion() const
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_nativeCodeVersion;
+    }
+
     BOOL NeedsMulticoreJitNotification();
     BOOL MayUsePrecompiledCode();
     virtual PCODE IsJitCancellationRequested();
@@ -2067,6 +2075,27 @@ public:
     void SetReadyToRunRejectedPrecompiledCode();
     CallerGCMode GetCallerGCMode();
     void SetCallerGCMode(CallerGCMode mode);
+
+public:
+    bool IsForMulticoreJit() const
+    {
+        WRAPPER_NO_CONTRACT;
+
+    #ifdef FEATURE_MULTICOREJIT
+        return m_isForMulticoreJit;
+    #else
+        return false;
+    #endif
+    }
+
+#ifdef FEATURE_MULTICOREJIT
+protected:
+    void SetIsForMulticoreJit()
+    {
+        WRAPPER_NO_CONTRACT;
+        m_isForMulticoreJit = true;
+    }
+#endif
 
 #ifdef FEATURE_CODE_VERSIONING
 public:
@@ -2099,6 +2128,20 @@ public:
 
 #ifdef FEATURE_TIERED_COMPILATION
 public:
+    bool WasTieringDisabledBeforeJitting() const
+    {
+        WRAPPER_NO_CONTRACT;
+        return m_wasTieringDisabledBeforeJitting;
+    }
+
+    void SetWasTieringDisabledBeforeJitting()
+    {
+        WRAPPER_NO_CONTRACT;
+        _ASSERTE(GetMethodDesc()->IsEligibleForTieredCompilation());
+
+        m_wasTieringDisabledBeforeJitting = true;
+    }
+
     bool ShouldCountCalls() const
     {
         WRAPPER_NO_CONTRACT;
@@ -2164,6 +2207,9 @@ public:
             m_jitSwitchedToOptimized = true;
         }
     }
+
+    bool FinalizeOptimizationTierForTier0Load();
+    bool FinalizeOptimizationTierForTier0LoadOrJit();
 #endif
 
 public:
@@ -2191,6 +2237,11 @@ protected:
     BOOL m_ReadyToRunRejectedPrecompiledCode;
     CallerGCMode m_callerGCMode;
 
+#ifdef FEATURE_MULTICOREJIT
+private:
+    bool m_isForMulticoreJit;
+#endif
+
 #ifdef FEATURE_CODE_VERSIONING
 private:
     bool m_profilerMayHaveActivatedNonDefaultCodeVersion;
@@ -2199,6 +2250,7 @@ private:
 
 #ifdef FEATURE_TIERED_COMPILATION
 private:
+    bool m_wasTieringDisabledBeforeJitting;
     bool m_shouldCountCalls;
 #endif
 
@@ -2245,6 +2297,29 @@ public:
     PrepareCodeConfigBuffer &operator =(const PrepareCodeConfigBuffer &) = delete;
 };
 #endif // FEATURE_CODE_VERSIONING
+
+class MulticoreJitPrepareCodeConfig : public PrepareCodeConfig
+{
+private:
+    bool m_wasTier0;
+
+public:
+    MulticoreJitPrepareCodeConfig(MethodDesc* pMethod);
+
+    bool WasTier0() const
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_wasTier0;
+    }
+
+    void SetWasTier0()
+    {
+        LIMITED_METHOD_CONTRACT;
+        m_wasTier0 = true;
+    }
+
+    virtual BOOL SetNativeCode(PCODE pCode, PCODE * ppAlternateCodeToUse) override;
+};
 #endif // DACCESS_COMPILE
 
 /******************************************************************/
@@ -2502,6 +2577,7 @@ inline MethodDescChunk *MethodDesc::GetMethodDescChunk() const
                             (sizeof(MethodDescChunk) + (GetMethodDescIndex() * MethodDesc::ALIGNMENT)));
 }
 
+MethodDesc* NonVirtualEntry2MethodDesc(PCODE entryPoint);
 // convert an entry point into a MethodDesc
 MethodDesc* Entry2MethodDesc(PCODE entryPoint, MethodTable *pMT);
 
@@ -2681,7 +2757,10 @@ public:
     void SetNativeStackArgSize(WORD cbArgSize)
     {
         LIMITED_METHOD_CONTRACT;
-        _ASSERTE(IsILStub() && (cbArgSize % TARGET_POINTER_SIZE) == 0);
+        _ASSERTE(IsILStub());
+#if !defined(OSX_ARM64_ABI)
+        _ASSERTE((cbArgSize % TARGET_POINTER_SIZE) == 0);
+#endif
         m_dwExtendedFlags = (m_dwExtendedFlags & ~nomdStackArgSize) | ((DWORD)cbArgSize << 16);
     }
 
@@ -2901,8 +2980,6 @@ public:
 
 #if defined(TARGET_X86)
         // Size of outgoing arguments (on stack). Note that in order to get the @n stdcall name decoration,
-        // it may be necessary to subtract 4 as the hidden large structure pointer parameter does not count.
-        // See code:kStdCallWithRetBuf
         WORD        m_cbStackArgumentSize;
 #endif // defined(TARGET_X86)
 
@@ -2953,12 +3030,11 @@ public:
 
         kDefaultDllImportSearchPathsStatus = 0x2000, // either method has custom attribute or not.
 
-        kStdCallWithRetBuf              = 0x8000,   // Call returns large structure, only valid if kStdCall is also set
-
+        kNDirectPopulated               = 0x8000, // Indicate if the NDirect has been fully populated.
     };
 
     // Resolve the import to the NDirect target and set it on the NDirectMethodDesc.
-    static void *ResolveAndSetNDirectTarget(_In_ NDirectMethodDesc *pMD);
+    static void* ResolveAndSetNDirectTarget(_In_ NDirectMethodDesc* pMD);
 
     // Attempt to import the NDirect target if a GC transition is suppressed.
     static BOOL TryResolveNDirectTargetForNoGCTransition(_In_ MethodDesc* pMD, _Out_ void** ndirectTarget);
@@ -3084,7 +3160,13 @@ public:
     BOOL IsDefaultDllImportSearchPathsAttributeCached()
     {
         LIMITED_METHOD_CONTRACT;
-        return (ndirect.m_wFlags  & kDefaultDllImportSearchPathsIsCached) != 0;
+        return (ndirect.m_wFlags & kDefaultDllImportSearchPathsIsCached) != 0;
+    }
+
+    BOOL IsPopulated()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return (ndirect.m_wFlags & kNDirectPopulated) != 0;
     }
 
     ULONG DefaultDllImportSearchPathsAttributeCachedValue()
@@ -3097,13 +3179,6 @@ public:
     {
         LIMITED_METHOD_CONTRACT;
         return (ndirect.m_DefaultDllImportSearchPathsAttributeValue & 0x2) != 0;
-    }
-
-    BOOL IsStdCallWithRetBuf() const
-    {
-        LIMITED_METHOD_DAC_CONTRACT;
-
-        return (ndirect.m_wFlags & kStdCallWithRetBuf) != 0;
     }
 
     PTR_NDirectWriteableData GetWriteableData() const
@@ -3164,22 +3239,22 @@ public:
     //  Find the entry point name and function address
     //  based on the module and data from NDirectMethodDesc
     //
-    LPVOID FindEntryPoint(NATIVE_LIBRARY_HANDLE hMod) const;
+    LPVOID FindEntryPoint(NATIVE_LIBRARY_HANDLE hMod);
 
 #ifdef TARGET_WINDOWS
 private:
-    FARPROC FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE mod, PTR_CUTF8 entryPointName) const;
-    FARPROC FindEntryPointWithSuffix(NATIVE_LIBRARY_HANDLE mod, PTR_CUTF8 entryPointName, char suffix) const;
+    FARPROC FindEntryPointWithMangling(NATIVE_LIBRARY_HANDLE mod, PTR_CUTF8 entryPointName);
+    FARPROC FindEntryPointWithSuffix(NATIVE_LIBRARY_HANDLE mod, PTR_CUTF8 entryPointName, char suffix);
 #endif
 public:
 
-    void SetStackArgumentSize(WORD cbDstBuffer, CorPinvokeMap unmgdCallConv)
+    void SetStackArgumentSize(WORD cbDstBuffer, CorInfoCallConvExtension unmgdCallConv)
     {
         LIMITED_METHOD_CONTRACT;
 
 #if defined(TARGET_X86)
         // thiscall passes the this pointer in ECX
-        if (unmgdCallConv == pmCallConvThiscall)
+        if (unmgdCallConv == CorInfoCallConvExtension::Thiscall)
         {
             _ASSERTE(cbDstBuffer >= sizeof(SLOT));
             cbDstBuffer -= sizeof(SLOT);
@@ -3198,6 +3273,8 @@ public:
     }
 
 #if defined(TARGET_X86)
+    void EnsureStackArgumentSize();
+
     WORD GetStackArgumentSize() const
     {
         LIMITED_METHOD_DAC_CONTRACT;
@@ -3561,7 +3638,7 @@ public:
 #ifdef FEATURE_PREJIT
         if (HasNativeCodeSlot())
         {
-            size += (*dac_cast<PTR_TADDR>(GetAddrOfNativeCodeSlot()) & FIXUP_LIST_MASK) ? 
+            size += (*dac_cast<PTR_TADDR>(GetAddrOfNativeCodeSlot()) & FIXUP_LIST_MASK) ?
                 sizeof(FixupListSlot) : 0;
         }
 #endif

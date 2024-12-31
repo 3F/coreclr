@@ -58,12 +58,15 @@ void GCHeap::UpdatePreGCCounters()
 
 void GCHeap::ReportGenerationBounds()
 {
-    g_theGCHeap->DiagDescrGenerations([](void*, int generation, uint8_t* rangeStart, uint8_t* rangeEnd, uint8_t* rangeEndReserved)
+    if (EVENT_ENABLED(GCGenerationRange))
     {
-        uint64_t range = static_cast<uint64_t>(rangeEnd - rangeStart);
-        uint64_t rangeReserved = static_cast<uint64_t>(rangeEndReserved - rangeStart);
-        FIRE_EVENT(GCGenerationRange, generation, rangeStart, range, rangeReserved);
-    }, nullptr);
+        g_theGCHeap->DiagDescrGenerations([](void*, int generation, uint8_t* rangeStart, uint8_t* rangeEnd, uint8_t* rangeEndReserved)
+        {
+            uint64_t range = static_cast<uint64_t>(rangeEnd - rangeStart);
+            uint64_t rangeReserved = static_cast<uint64_t>(rangeEndReserved - rangeStart);
+            FIRE_EVENT(GCGenerationRange, generation, rangeStart, range, rangeReserved);
+        }, nullptr);
+    }
 }
 
 void GCHeap::UpdatePostGCCounters()
@@ -74,7 +77,7 @@ void GCHeap::UpdatePostGCCounters()
     // The following is for instrumentation.
     //
     // Calculate the common ones for ETW and perf counters.
-#if defined(FEATURE_EVENT_TRACE)
+#ifdef FEATURE_EVENT_TRACE
 #ifdef MULTIPLE_HEAPS
     //take the first heap....
     gc_heap* hp1 = gc_heap::g_heaps[0];
@@ -150,9 +153,7 @@ void GCHeap::UpdatePostGCCounters()
         }
 #endif //MULTIPLE_HEAPS
     }
-#endif //FEATURE_EVENT_TRACE
 
-#ifdef FEATURE_EVENT_TRACE
     ReportGenerationBounds();
 
     FIRE_EVENT(GCEnd_V1, static_cast<uint32_t>(pSettings->gc_index), condemned_gen);
@@ -324,25 +325,21 @@ bool GCHeap::IsConcurrentGCInProgress()
 }
 
 #ifdef FEATURE_EVENT_TRACE
-void gc_heap::fire_etw_allocation_event (size_t allocation_amount, int gen_number, uint8_t* object_address)
+void gc_heap::fire_etw_allocation_event (size_t allocation_amount, 
+                                         int gen_number, 
+                                         uint8_t* object_address,
+                                         size_t object_size)
 {
-    gc_etw_alloc_kind kind;
-    switch (gen_number)
-    {
-    case 0:
-        kind = gc_etw_alloc_soh;
-        break;
-    case 3:
-        kind = gc_etw_alloc_loh;
-        break;
-    case 4:
-        kind = gc_etw_alloc_poh;
-        break;
-    default:
-        __UNREACHABLE();
-    }
-
-    FIRE_EVENT(GCAllocationTick_V3, static_cast<uint64_t>(allocation_amount), kind, heap_number, object_address);
+#ifdef FEATURE_REDHAWK
+    FIRE_EVENT(GCAllocationTick_V1, (uint32_t)allocation_amount, (uint32_t)gen_to_oh (gen_number));
+#else
+    FIRE_EVENT(GCAllocationTick_V4, 
+                allocation_amount, 
+                (uint32_t)gen_to_oh (gen_number),
+                heap_number, 
+                object_address, 
+                object_size);
+#endif //FEATURE_REDHAWK
 }
 
 void gc_heap::fire_etw_pin_object_event (uint8_t* object, uint8_t** ppObject)
@@ -457,12 +454,12 @@ segment_handle GCHeap::RegisterFrozenSegment(segment_info *pseginfo)
     heap_segment_plan_allocated(seg) = 0;
     seg->flags = heap_segment_flags_readonly;
 
-#if defined (MULTIPLE_HEAPS) && !defined (ISOLATED_HEAPS)
+#ifdef MULTIPLE_HEAPS
     gc_heap* heap = gc_heap::g_heaps[0];
     heap_segment_heap(seg) = heap;
 #else
     gc_heap* heap = pGenGCHeap;
-#endif //MULTIPLE_HEAPS && !ISOLATED_HEAPS
+#endif //MULTIPLE_HEAPS
 
     if (heap->insert_ro_segment(seg) == FALSE)
     {
@@ -480,11 +477,11 @@ segment_handle GCHeap::RegisterFrozenSegment(segment_info *pseginfo)
 void GCHeap::UnregisterFrozenSegment(segment_handle seg)
 {
 #ifdef FEATURE_BASICFREEZE
-#if defined (MULTIPLE_HEAPS) && !defined (ISOLATED_HEAPS)
+#ifdef MULTIPLE_HEAPS
     gc_heap* heap = gc_heap::g_heaps[0];
 #else
     gc_heap* heap = pGenGCHeap;
-#endif //MULTIPLE_HEAPS && !ISOLATED_HEAPS
+#endif //MULTIPLE_HEAPS
 
     heap->remove_ro_segment(reinterpret_cast<heap_segment*>(seg));
 #else

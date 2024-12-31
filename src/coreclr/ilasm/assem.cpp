@@ -30,8 +30,6 @@ Assembler::Assembler()
     m_pEmitter = NULL;
     m_pImporter = NULL;
 
-    m_fCPlusPlus = FALSE;
-    m_fWindowsCE = FALSE;
     char* pszFQN = new char[16];
     strcpy_s(pszFQN,16,"<Module>");
     m_pModuleClass = new Class(pszFQN);
@@ -42,7 +40,6 @@ Assembler::Assembler()
 
     m_fStdMapping   = FALSE;
     m_fDisplayTraceOutput= FALSE;
-    m_fENCMode = FALSE;
     m_fTolerateDupMethods = FALSE;
 
     m_pCurOutputPos = NULL;
@@ -106,8 +103,6 @@ Assembler::Assembler()
     m_ulLastDebugColumn = 0xFFFFFFFF;
     m_ulLastDebugLineEnd = 0xFFFFFFFF;
     m_ulLastDebugColumnEnd = 0xFFFFFFFF;
-    m_pSymWriter = NULL;
-    m_pSymDocument = NULL;
     m_dwIncludeDebugInfo = 0;
     m_fGeneratePDB = FALSE;
     m_fIsMscorlib = FALSE;
@@ -145,8 +140,6 @@ Assembler::Assembler()
 
     m_pbsMD = NULL;
 
-    m_sysObjRebase = false;
-
     m_pOutputBuffer = new BYTE[OUTPUT_BUFFER_SIZE];
 
     m_pCurOutputPos = m_pOutputBuffer;
@@ -160,7 +153,6 @@ Assembler::Assembler()
     dummyClass = new Class(NULL);
     indexKeywords(&indxKeywords);
 
-    m_pdbFormat = CLASSIC;
     m_pPortablePdbWriter = NULL;
 }
 
@@ -201,18 +193,10 @@ Assembler::~Assembler()
     while((m_szNamespace = m_NSstack.POP())) ;
     delete [] m_szFullNS;
 
-    m_DocWriterList.RESET(true);
-
     m_MethodBodyList.RESET(true);
 
     m_TypeDefDList.RESET(true);
 
-    if (m_pSymWriter != NULL)
-    {
-        m_pSymWriter->Close();
-        m_pSymWriter->Release();
-        m_pSymWriter = NULL;
-    }
     if (m_pImporter != NULL)
     {
         m_pImporter->Release();
@@ -236,7 +220,7 @@ Assembler::~Assembler()
 }
 
 
-BOOL Assembler::Init(BOOL generatePdb, PdbFormat pdbFormat)
+BOOL Assembler::Init(BOOL generatePdb)
 {
     if (m_pCeeFileGen != NULL) {
         if (m_pCeeFile)
@@ -256,7 +240,6 @@ BOOL Assembler::Init(BOOL generatePdb, PdbFormat pdbFormat)
     if (FAILED(m_pCeeFileGen->GetSectionCreate (m_pCeeFile, ".tls", sdReadWrite, &m_pTLSSection))) return FALSE;
 
     m_fGeneratePDB = generatePdb;
-    m_pdbFormat = pdbFormat;
 
     return TRUE;
 }
@@ -269,16 +252,6 @@ void Assembler::SetDLL(BOOL IsDll)
 
     m_fDLL = IsDll;
 }
-
-void Assembler::SetOBJ(BOOL IsObj)
-{
-    HRESULT OK;
-    OK = m_pCeeFileGen->SetObjSwitch(m_pCeeFile, IsObj);
-    _ASSERTE(SUCCEEDED(OK));
-
-    m_fOBJ = IsObj;
-}
-
 
 void Assembler::ResetArgNameList()
 {
@@ -526,70 +499,6 @@ BOOL Assembler::EmitMethodBody(Method* pMethod, BinStr* pbsOut)
                 pFH = (COR_ILMETHOD_FAT*)(pMethod->m_pbsBody->ptr());
                 pFH->SetLocalVarSigTok(pMethod->m_LocalsSig);
             }
-            //--------------------------------------------------------------------------------
-            if(m_fGeneratePDB)
-            {
-                if (m_pSymWriter != NULL)
-                {
-                    m_pSymWriter->OpenMethod(pMethod->m_Tok);
-                    ULONG N = pMethod->m_LinePCList.COUNT();
-                    if(pMethod->m_fEntryPoint) m_pSymWriter->SetUserEntryPoint(pMethod->m_Tok);
-                    if(N)
-                    {
-                        LinePC  *pLPC;
-                        ULONG32  *offsets=new ULONG32[N], *lines = new ULONG32[N], *columns = new ULONG32[N];
-                        ULONG32  *endlines=new ULONG32[N], *endcolumns=new ULONG32[N];
-                        if(offsets && lines && columns && endlines && endcolumns)
-                        {
-                            DocWriter* pDW;
-                            unsigned j=0;
-                            while((pDW = m_DocWriterList.PEEK(j++)))
-                            {
-                                if((m_pSymDocument = pDW->pWriter))
-                                {
-                                    int i, n;
-                                    for(i=0, n=0; (pLPC = pMethod->m_LinePCList.PEEK(i)); i++)
-                                    {
-                                        if(pLPC->pWriter == m_pSymDocument)
-                                        {
-                                            offsets[n] = pLPC->PC;
-                                            lines[n] = pLPC->Line;
-                                            columns[n] = pLPC->Column;
-                                            endlines[n] = pLPC->LineEnd;
-                                            endcolumns[n] = pLPC->ColumnEnd;
-                                            n++;
-                                        }
-                                    }
-                                    if(n) m_pSymWriter->DefineSequencePoints(m_pSymDocument,n,
-                                                                       offsets,lines,columns,endlines,endcolumns);
-                                } // end if(pSymDocument)
-                            } // end while(pDW = next doc.writer)
-                            pMethod->m_LinePCList.RESET(true);
-                        }
-                        else report->error("\nOutOfMemory!\n");
-                        delete [] offsets;
-                        delete [] lines;
-                        delete [] columns;
-                        delete [] endlines;
-                        delete [] endcolumns;
-                    }//enf if(N)
-                    HRESULT hrr;
-                    if(pMethod->m_ulLines[1])
-                        hrr = m_pSymWriter->SetMethodSourceRange(m_pSymDocument,pMethod->m_ulLines[0], pMethod->m_ulColumns[0],
-                                                           m_pSymDocument,pMethod->m_ulLines[1], pMethod->m_ulColumns[1]);
-                    EmitScope(&(pMethod->m_MainScope)); // recursively emits all nested scopes
-
-                    m_pSymWriter->CloseMethod();
-                }
-                else if (IsPortablePdb())
-                {
-                    if (FAILED(m_pPortablePdbWriter->DefineSequencePoints(pMethod)))
-                        return FALSE;
-                    if (FAILED(m_pPortablePdbWriter->DefineLocalScope(pMethod)))
-                        return FALSE;
-                }
-            } // end if(fIncludeDebugInfo)
-            //-----------------------------------------------------
 
             if(m_fFoldCode)
             {
@@ -614,41 +523,21 @@ BOOL Assembler::EmitMethodBody(Method* pMethod, BinStr* pbsOut)
                 BYTE* outBuff;
                 unsigned align = (headerSize == 1)? 1 : 4;
                 ULONG    PEFileOffset, methodRVA;
-                if(m_fENCMode)
-                {
-                    if(pbsOut)
-                    {
-                        PEFileOffset = pbsOut->length();
-                        align--;
-                        while(PEFileOffset & align)
-                        {
-                            pbsOut->appendInt8(0);
-                            PEFileOffset++;
-                        }
-                        pbsOut->append(pbsBody);
-                        outBuff = (BYTE*)(pbsOut->ptr()) + (pbsOut->length() - pbsBody->length());
-                    }
-                    else return FALSE;
 
-                }
-                else
-                {
-                    if (FAILED(m_pCeeFileGen->GetSectionBlock (m_pILSection, totalSize,
-                            align, (void **) &outBuff)))    return FALSE;
-                    memcpy(outBuff,pbsBody->ptr(),totalSize);
-                    // The offset where we start, (not where the alignment bytes start!
-                    if (FAILED(m_pCeeFileGen->GetSectionDataLen (m_pILSection, &PEFileOffset)))
-                        return FALSE;
-                    PEFileOffset -= totalSize;
-                }
+                if (FAILED(m_pCeeFileGen->GetSectionBlock (m_pILSection, totalSize,
+                        align, (void **) &outBuff)))    return FALSE;
+                memcpy(outBuff,pbsBody->ptr(),totalSize);
+                // The offset where we start, (not where the alignment bytes start!
+                if (FAILED(m_pCeeFileGen->GetSectionDataLen (m_pILSection, &PEFileOffset)))
+                    return FALSE;
+                PEFileOffset -= totalSize;
 
                 pMethod->m_pCode = outBuff + headerSize;
                 pMethod->m_headerOffset= PEFileOffset;
                 pMethod->m_methodOffset= PEFileOffset + headerSize;
                 DoDeferredILFixups(pMethod);
 
-                if(m_fENCMode) methodRVA = PEFileOffset;
-                else m_pCeeFileGen->GetMethodRVA(m_pCeeFile, PEFileOffset,&methodRVA);
+                m_pCeeFileGen->GetMethodRVA(m_pCeeFile, PEFileOffset,&methodRVA);
 
                 pMethod->m_headerOffset= methodRVA;
                 pMethod->m_methodOffset= methodRVA + headerSize;
@@ -666,6 +555,15 @@ BOOL Assembler::EmitMethodBody(Method* pMethod, BinStr* pbsOut)
             }
             m_pEmitter->SetRVA(pMethod->m_Tok,pMethod->m_headerOffset);
         }
+
+        if (m_fGeneratePDB)
+        {
+            if (FAILED(m_pPortablePdbWriter->DefineSequencePoints(pMethod)))
+                return FALSE;
+            if (FAILED(m_pPortablePdbWriter->DefineLocalScope(pMethod)))
+                return FALSE;
+        }
+
         return TRUE;
     }
     else return FALSE;
@@ -732,44 +630,6 @@ HRESULT Assembler::EmitPinvokeMap(mdToken tk, PInvokeDescriptor* pDescr)
                         pDescr->dwAttrs,        // [IN] Flags used for mapping.
                         (LPCWSTR)wzAlias,       // [IN] Import name.
                         pDescr->mrDll);         // [IN] ModuleRef token for the target DLL.
-}
-
-void Assembler::EmitScope(Scope* pSCroot)
-{
-    static ULONG32          scopeID;
-    static ARG_NAME_LIST    *pVarList;
-    int                     i;
-    WCHAR*                  wzVarName=&wzUniBuf[0];
-    char*                   szPhonyName=(char*)&wzUniBuf[dwUniBuf >> 1];
-    Scope*                  pSC = pSCroot;
-    if(pSC && m_pSymWriter)
-    {
-        if(SUCCEEDED(m_pSymWriter->OpenScope(pSC->dwStart,&scopeID)))
-        {
-            if(pSC->pLocals)
-            {
-                for(pVarList = pSC->pLocals; pVarList; pVarList = pVarList->pNext)
-                {
-                    if(pVarList->pSig)
-                    {
-                        if((pVarList->szName)&&(*(pVarList->szName))) strcpy_s(szPhonyName,dwUniBuf >> 1,pVarList->szName);
-                        else sprintf_s(szPhonyName,(dwUniBuf >> 1),"V_%d",pVarList->dwAttr);
-
-                        WszMultiByteToWideChar(g_uCodePage,0,szPhonyName,-1,wzVarName,dwUniBuf >> 1);
-
-                        m_pSymWriter->DefineLocalVariable(wzVarName,0,pVarList->pSig->length(),
-                            (BYTE*)pVarList->pSig->ptr(),ADDR_IL_OFFSET,pVarList->dwAttr,0,0,0,0);
-                    }
-                    else
-                    {
-                        report->error("Local Var '%s' has no signature\n",pVarList->szName);
-                    }
-                }
-            }
-            for(i = 0; (pSC = pSCroot->SubScope.PEEK(i)); i++) EmitScope(pSC);
-            m_pSymWriter->CloseScope(pSCroot->dwEnd);
-        }
-    }
 }
 
 BOOL Assembler::EmitMethod(Method *pMethod)
@@ -906,7 +766,17 @@ BOOL Assembler::EmitMethod(Method *pMethod)
                 dwCPlusTypeFlag= (DWORD)*(pMethod->m_pRetValue->ptr());
                 pValue = (void const *)(pMethod->m_pRetValue->ptr()+1);
                 cbValue = pMethod->m_pRetValue->length()-1;
-                if(dwCPlusTypeFlag == ELEMENT_TYPE_STRING) cbValue /= sizeof(WCHAR);
+                if(dwCPlusTypeFlag == ELEMENT_TYPE_STRING)
+                {
+                    cbValue /= sizeof(WCHAR);
+#if BIGENDIAN
+                    void* pValueTemp = _alloca(cbValue * sizeof(WCHAR));
+                    memcpy(pValueTemp, pValue, cbValue * sizeof(WCHAR));
+                    pValue = pValueTemp;
+
+                    SwapStringLength((WCHAR*)pValue, cbValue);
+#endif
+                }
             }
             else
             {
@@ -944,7 +814,17 @@ BOOL Assembler::EmitMethod(Method *pMethod)
                 dwCPlusTypeFlag= (DWORD)*(pAN->pValue->ptr());
                 pValue = (void const *)(pAN->pValue->ptr()+1);
                 cbValue = pAN->pValue->length()-1;
-                if(dwCPlusTypeFlag == ELEMENT_TYPE_STRING) cbValue /= sizeof(WCHAR);
+                if(dwCPlusTypeFlag == ELEMENT_TYPE_STRING)
+                {
+                    cbValue /= sizeof(WCHAR);
+#if BIGENDIAN
+                    void* pValueTemp = _alloca(cbValue * sizeof(WCHAR));
+                    memcpy(pValueTemp, pValue, cbValue * sizeof(WCHAR));
+                    pValue = pValueTemp;
+
+                    SwapStringLength((WCHAR*)pValue, cbValue);
+#endif
+                }
             }
             else
             {
@@ -990,7 +870,6 @@ BOOL Assembler::EmitMethodImpls()
     int i;
     for(i=0; (pMID = m_MethodImplDList.PEEK(i)); i++)
     {
-        if(m_fENCMode && (!pMID->m_fNew)) continue;
         pMID->m_tkImplementingMethod = ResolveLocalMemberRef(pMID->m_tkImplementingMethod);
         pMID->m_tkImplementedMethod = ResolveLocalMemberRef(pMID->m_tkImplementedMethod);
         if(FAILED(m_pEmitter->DefineMethodImpl( pMID->m_tkDefiningClass,
@@ -1127,13 +1006,25 @@ BOOL Assembler::EmitProp(PropDescriptor* pPD)
     }
     mdOthers[nOthers] = mdMethodDefNil; // like null-terminator
 
+    void* pValue = pPD->m_pValue;
+#if BIGENDIAN
+    if (pPD->m_dwCPlusTypeFlag == ELEMENT_TYPE_STRING)
+    {
+        void* pValueTemp = _alloca(pPD->m_cbValue * sizeof(WCHAR));
+        memcpy(pValueTemp, pValue, pPD->m_cbValue * sizeof(WCHAR));
+        pValue = pValueTemp;
+
+        SwapStringLength((WCHAR*)pValue, pPD->m_cbValue);
+    }
+#endif
+
     if(FAILED(m_pEmitter->DefineProperty(   pPD->m_tdClass,
                                             wzMemberName,
                                             pPD->m_dwAttr,
                                             pPD->m_pSig,
                                             pPD->m_dwCSig,
                                             pPD->m_dwCPlusTypeFlag,
-                                            pPD->m_pValue,
+                                            pValue,
                                             pPD->m_cbValue,
                                             mdSet,
                                             mdGet,
@@ -1613,16 +1504,26 @@ unsigned hash(
    switch(len)              /* all the case statements fall through */
    {
        case 11: c+=((unsigned)k[10] << 24);
+                FALLTHROUGH;
        case 10: c+=((unsigned)k[9] << 16);
+                FALLTHROUGH;
        case 9 : c+=((unsigned)k[8] << 8);
+                FALLTHROUGH;
           /* the first byte of c is reserved for the length */
        case 8 : b+=((unsigned)k[7] << 24);
+                FALLTHROUGH;
        case 7 : b+=((unsigned)k[6] << 16);
+                FALLTHROUGH;
        case 6 : b+=((unsigned)k[5] << 8);
+                FALLTHROUGH;
        case 5 : b+=k[4];
+                FALLTHROUGH;
        case 4 : a+=((unsigned)k[3] << 24);
+                FALLTHROUGH;
        case 3 : a+=((unsigned)k[2] << 16);
+                FALLTHROUGH;
        case 2 : a+=((unsigned)k[1] << 8);
+                FALLTHROUGH;
        case 1 : a+=k[0];
      /* case 0: nothing left to add */
    }

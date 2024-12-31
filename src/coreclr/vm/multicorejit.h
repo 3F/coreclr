@@ -13,6 +13,7 @@
 #define __MULTICORE_JIT_H__
 
 class MulticoreJitRecorder;
+class MulticoreJitProfilePlayer;
 
 
 class MulticoreJitCounter
@@ -73,15 +74,77 @@ struct MulticoreJitPlayerStat
 };
 
 
+#ifndef DACCESS_COMPILE
+class MulticoreJitPrepareCodeConfig;
+#endif
+
+class MulticoreJitCodeInfo
+{
+private:
+    enum class TierInfo : TADDR
+    {
+        None = 0,
+        WasTier0 = 1 << 0,
+        JitSwitchedToOptimized = 1 << 1,
+        Mask = None | WasTier0 | JitSwitchedToOptimized
+    };
+
+    TADDR m_entryPointAndTierInfo;
+
+public:
+    MulticoreJitCodeInfo() : m_entryPointAndTierInfo(NULL)
+    {
+        LIMITED_METHOD_CONTRACT;
+    }
+
+#ifndef DACCESS_COMPILE
+public:
+    MulticoreJitCodeInfo(PCODE entryPoint, const MulticoreJitPrepareCodeConfig *pConfig);
+#endif
+
+private:
+    void VerifyIsNotNull() const;
+
+public:
+    bool IsNull() const
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_entryPointAndTierInfo == NULL;
+    }
+
+    PCODE GetEntryPoint() const
+    {
+        WRAPPER_NO_CONTRACT;
+        return IsNull() ? NULL : PINSTRToPCODE(m_entryPointAndTierInfo & ~(TADDR)TierInfo::Mask);
+    }
+
+    bool WasTier0() const
+    {
+        WRAPPER_NO_CONTRACT;
+        VerifyIsNotNull();
+
+        return (m_entryPointAndTierInfo & (TADDR)TierInfo::WasTier0) != 0;
+    }
+
+    bool JitSwitchedToOptimized() const
+    {
+        WRAPPER_NO_CONTRACT;
+        VerifyIsNotNull();
+
+        return (m_entryPointAndTierInfo & (TADDR)TierInfo::JitSwitchedToOptimized) != 0;
+    }
+};
+
+
 // Code Storage
 
 class MulticoreJitCodeStorage
 {
 private:
-    MapSHashWithRemove<PVOID,PCODE> m_nativeCodeMap;
-    CrstExplicitInit                m_crstCodeMap;  // protecting m_nativeCodeMap
-    unsigned                        m_nStored;
-    unsigned                        m_nReturned;
+    MapSHashWithRemove<PVOID, MulticoreJitCodeInfo> m_nativeCodeMap;
+    CrstExplicitInit                                m_crstCodeMap;  // protecting m_nativeCodeMap
+    unsigned                                        m_nStored;
+    unsigned                                        m_nReturned;
 
 public:
 
@@ -100,9 +163,9 @@ public:
 
 #endif
 
-    void StoreMethodCode(MethodDesc * pMethod, PCODE pCode);
+    void StoreMethodCode(MethodDesc * pMethod, MulticoreJitCodeInfo codeInfo);
 
-    PCODE QueryMethodCode(MethodDesc * pMethod, BOOL shouldRemoveCode);
+    MulticoreJitCodeInfo QueryAndRemoveMethodCode(MethodDesc * pMethod);
 
     inline unsigned GetRemainingMethodCount() const
     {
@@ -144,7 +207,6 @@ private:
     LONG                    m_fSetProfileRootCalled;   // SetProfileRoot has been called
     LONG                    m_fAutoStartCalled;
     bool                    m_fRecorderActive;         // Manager open for recording/event, turned on when initialized properly, turned off when at full capacity
-    bool                    m_fAppxMode;
     CrstExplicitInit        m_playerLock;              // Thread protection (accessing m_pMulticoreJitRecorder)
     MulticoreJitPlayerStat  m_stats;                   // Statistics: normally gathered by player, written to profile
 
@@ -166,7 +228,6 @@ public:
         m_fSetProfileRootCalled = 0;
         m_fAutoStartCalled      = 0;
         m_fRecorderActive       = false;
-        m_fAppxMode             = false;
     }
 
     ~MulticoreJitManager()
@@ -207,14 +268,18 @@ public:
 
     static void StopProfileAll();
 
+#ifndef TARGET_UNIX
+    void WriteMulticoreJitProfiler();
+#endif // !TARGET_UNIX
+
     // Track module loading event for recording
     void RecordModuleLoad(Module * pModule, FileLoadLevel loadLevel);
 
     static bool IsMethodSupported(MethodDesc * pMethod);
 
-    PCODE RequestMethodCode(MethodDesc * pMethod);
+    MulticoreJitCodeInfo RequestMethodCode(MethodDesc * pMethod);
 
-    void RecordMethodJit(MethodDesc * pMethod);
+    void RecordMethodJitOrLoad(MethodDesc * pMethod);
 
     MulticoreJitPlayerStat & GetStats()
     {
@@ -232,13 +297,17 @@ public:
 
     static void DisableMulticoreJit();
 
-    static bool IsSupportedModule(Module * pModule, bool fMethodJit, bool fAppx);
+    static bool IsSupportedModule(Module * pModule, bool fMethodJit);
 
     static FileLoadLevel GetModuleFileLoadLevel(Module * pModule);
 
     static bool ModuleHasNoCode(Module * pModule);
 
+    static DWORD EncodeModuleHelper(void * pModuleContext,
+                                    Module * pReferencedModule);
 
+    static Module * DecodeModuleFromIndex(void * pModuleContext,
+                                          DWORD  ix);
 };
 
 

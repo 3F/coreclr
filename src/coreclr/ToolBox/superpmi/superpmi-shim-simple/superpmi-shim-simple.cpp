@@ -1,7 +1,5 @@
-//
-// Copyright (c) Microsoft. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-//
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 //----------------------------------------------------------
 // SuperPMI-Shim.cpp - thin shim for the jit
@@ -95,10 +93,11 @@ extern "C"
     return TRUE;
 }
 
-extern "C" DLLEXPORT void __stdcall jitStartup(ICorJitHost* host)
+extern "C" DLLEXPORT void jitStartup(ICorJitHost* host)
 {
     SetDefaultPaths();
     SetLibName();
+    SetDebugDumpVariables();
 
     if (!LoadRealJitLib(g_hRealJit, g_realJitPath))
     {
@@ -118,7 +117,7 @@ extern "C" DLLEXPORT void __stdcall jitStartup(ICorJitHost* host)
     pnjitStartup(g_ourJitHost);
 }
 
-extern "C" DLLEXPORT ICorJitCompiler* __stdcall getJit()
+extern "C" DLLEXPORT ICorJitCompiler* getJit()
 {
     DWORD             dwRetVal = 0;
     PgetJit           pngetJit;
@@ -127,6 +126,7 @@ extern "C" DLLEXPORT ICorJitCompiler* __stdcall getJit()
 
     SetDefaultPaths();
     SetLibName();
+    SetDebugDumpVariables();
 
     if (!LoadRealJitLib(g_hRealJit, g_realJitPath))
     {

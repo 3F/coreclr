@@ -30,157 +30,7 @@
 #include "array.h"
 #include "eepolicy.h"
 
-#ifndef TARGET_UNIX
-typedef void(WINAPI *pfnGetSystemTimeAsFileTime)(LPFILETIME lpSystemTimeAsFileTime);
-extern pfnGetSystemTimeAsFileTime g_pfnGetSystemTimeAsFileTime;
 
-void WINAPI InitializeGetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
-{
-    pfnGetSystemTimeAsFileTime func = NULL;
-
-    HMODULE hKernel32 = WszLoadLibrary(W("kernel32.dll"));
-    if (hKernel32 != NULL)
-    {
-        func = (pfnGetSystemTimeAsFileTime)GetProcAddress(hKernel32, "GetSystemTimePreciseAsFileTime");
-        if (func != NULL)
-        {
-            // GetSystemTimePreciseAsFileTime exists and we'd like to use it.  However, on
-            // misconfigured systems, it's possible for the "precise" time to be inaccurate:
-            //     https://github.com/dotnet/runtime/issues/9014
-            // If it's inaccurate, though, we expect it to be wildly inaccurate, so as a
-            // workaround/heuristic, we get both the "normal" and "precise" times, and as
-            // long as they're close, we use the precise one. This workaround can be removed
-            // when we better understand what's causing the drift and the issue is no longer
-            // a problem or can be better worked around on all targeted OSes.
-
-            FILETIME systemTimeResult;
-            ::GetSystemTimeAsFileTime(&systemTimeResult);
-
-            FILETIME preciseSystemTimeResult;
-            func(&preciseSystemTimeResult);
-
-            LONG64 systemTimeLong100ns = (LONG64)((((ULONG64)systemTimeResult.dwHighDateTime) << 32) | (ULONG64)systemTimeResult.dwLowDateTime);
-            LONG64 preciseSystemTimeLong100ns = (LONG64)((((ULONG64)preciseSystemTimeResult.dwHighDateTime) << 32) | (ULONG64)preciseSystemTimeResult.dwLowDateTime);
-
-            const INT32 THRESHOLD_100NS = 1000000; // 100ms
-            if (abs(preciseSystemTimeLong100ns - systemTimeLong100ns) > THRESHOLD_100NS)
-            {
-                // Too much difference.  Don't use GetSystemTimePreciseAsFileTime.
-                func = NULL;
-            }
-        }
-    }
-    if (func == NULL)
-    {
-        func = &::GetSystemTimeAsFileTime;
-    }
-
-    InterlockedCompareExchangeT(&g_pfnGetSystemTimeAsFileTime, func, &InitializeGetSystemTimeAsFileTime);
-
-    g_pfnGetSystemTimeAsFileTime(lpSystemTimeAsFileTime);
-}
-
-pfnGetSystemTimeAsFileTime g_pfnGetSystemTimeAsFileTime = &InitializeGetSystemTimeAsFileTime;
-#endif // TARGET_UNIX
-
-FCIMPL0(INT64, SystemNative::__GetSystemTimeAsFileTime)
-{
-    FCALL_CONTRACT;
-
-    INT64 timestamp;
-#ifndef TARGET_UNIX
-    g_pfnGetSystemTimeAsFileTime((FILETIME*)&timestamp);
-#else
-    GetSystemTimeAsFileTime((FILETIME*)&timestamp);
-#endif
-
-#if BIGENDIAN
-    timestamp = (INT64)(((UINT64)timestamp >> 32) | ((UINT64)timestamp << 32));
-#endif
-
-    return timestamp;
-}
-FCIMPLEND;
-
-
-#ifndef TARGET_UNIX
-
-FCIMPL1(VOID, SystemNative::GetSystemTimeWithLeapSecondsHandling, FullSystemTime *time)
-{
-    FCALL_CONTRACT;
-    INT64 timestamp;
-
-    g_pfnGetSystemTimeAsFileTime((FILETIME*)&timestamp);
-
-    if (::FileTimeToSystemTime((FILETIME*)&timestamp, &(time->systemTime)))
-    {
-        // to keep the time precision
-        time->hundredNanoSecond = timestamp % 10000; // 10000 is the number of 100-nano seconds per Millisecond
-    }
-    else
-    {
-        ::GetSystemTime(&(time->systemTime));
-        time->hundredNanoSecond = 0;
-    }
-
-    if (time->systemTime.wSecond > 59)
-    {
-        // we have a leap second, force it to last second in the minute as DateTime doesn't account for leap seconds in its calculation.
-        // we use the maxvalue from the milliseconds and the 100-nano seconds to avoid reporting two out of order 59 seconds
-        time->systemTime.wSecond = 59;
-        time->systemTime.wMilliseconds = 999;
-        time->hundredNanoSecond = 9999;
-    }
-}
-FCIMPLEND;
-
-FCIMPL2(FC_BOOL_RET, SystemNative::FileTimeToSystemTime, INT64 fileTime, FullSystemTime *time)
-{
-    FCALL_CONTRACT;
-    if (::FileTimeToSystemTime((FILETIME*)&fileTime, (LPSYSTEMTIME) time))
-    {
-        // to keep the time precision
-        time->hundredNanoSecond = fileTime % 10000; // 10000 is the number of 100-nano seconds per Millisecond
-        if (time->systemTime.wSecond > 59)
-        {
-            // we have a leap second, force it to last second in the minute as DateTime doesn't account for leap seconds in its calculation.
-            // we use the maxvalue from the milliseconds and the 100-nano seconds to avoid reporting two out of order 59 seconds
-            time->systemTime.wSecond = 59;
-            time->systemTime.wMilliseconds = 999;
-            time->hundredNanoSecond = 9999;
-        }
-        FC_RETURN_BOOL(TRUE);
-    }
-    FC_RETURN_BOOL(FALSE);
-}
-FCIMPLEND;
-
-FCIMPL2(FC_BOOL_RET, SystemNative::ValidateSystemTime, SYSTEMTIME *time, CLR_BOOL localTime)
-{
-    FCALL_CONTRACT;
-
-    if (localTime)
-    {
-        SYSTEMTIME st;
-        FC_RETURN_BOOL(::TzSpecificLocalTimeToSystemTime(NULL, time, &st));
-    }
-    else
-    {
-        FILETIME timestamp;
-        FC_RETURN_BOOL(::SystemTimeToFileTime(time, &timestamp));
-    }
-}
-FCIMPLEND;
-
-FCIMPL2(FC_BOOL_RET, SystemNative::SystemTimeToFileTime, SYSTEMTIME *time, INT64 *pFileTime)
-{
-    FCALL_CONTRACT;
-
-    BOOL ret = ::SystemTimeToFileTime(time, (LPFILETIME) pFileTime);
-    FC_RETURN_BOOL(ret);
-}
-FCIMPLEND;
-#endif // TARGET_UNIX
 
 
 FCIMPL0(UINT32, SystemNative::GetTickCount)
@@ -332,31 +182,7 @@ INT32 QCALLTYPE SystemNative::GetProcessorCount()
 
     BEGIN_QCALL;
 
-#ifndef TARGET_UNIX
-    CPUGroupInfo::EnsureInitialized();
-
-    if(CPUGroupInfo::CanEnableThreadUseAllCpuGroups())
-    {
-        processorCount = CPUGroupInfo::GetNumActiveProcessors();
-    }
-#endif // !TARGET_UNIX
-    // Processor count will be 0 if CPU groups are disabled/not supported
-    if(processorCount == 0)
-    {
-        SYSTEM_INFO systemInfo;
-        ZeroMemory(&systemInfo, sizeof(systemInfo));
-
-        GetSystemInfo(&systemInfo);
-
-        processorCount = systemInfo.dwNumberOfProcessors;
-    }
-
-#ifdef TARGET_UNIX
-    uint32_t cpuLimit;
-
-    if (PAL_GetCpuLimit(&cpuLimit) && cpuLimit < (uint32_t)processorCount)
-        processorCount = cpuLimit;
-#endif
+    processorCount = GetCurrentProcessCpuCount();
 
     END_QCALL;
 
@@ -369,6 +195,8 @@ INT32 QCALLTYPE SystemNative::GetProcessorCount()
 // managed string object buffer. This buffer is not always used, see comments in
 // the method below.
 WCHAR g_szFailFastBuffer[256];
+WCHAR *g_pFailFastBuffer = g_szFailFastBuffer;
+
 #define FAIL_FAST_STATIC_BUFFER_LENGTH (sizeof(g_szFailFastBuffer) / sizeof(WCHAR))
 
 // This is the common code for FailFast processing that is wrapped by the two
@@ -417,7 +245,7 @@ void SystemNative::GenericFailFast(STRINGREF refMesgString, EXCEPTIONREF refExce
     // Another option would seem to be to implement a new frame type that
     // protects object references as pinned, but that seems like overkill for
     // just this problem.
-    WCHAR  *pszMessage = NULL;
+    WCHAR  *pszMessageBuffer = NULL;
     DWORD   cchMessage = (gc.refMesgString == NULL) ? 0 : gc.refMesgString->GetStringLength();
 
     WCHAR * errorSourceString = NULL;
@@ -436,32 +264,44 @@ void SystemNative::GenericFailFast(STRINGREF refMesgString, EXCEPTIONREF refExce
 
     if (cchMessage < FAIL_FAST_STATIC_BUFFER_LENGTH)
     {
-        pszMessage = g_szFailFastBuffer;
+        // The static buffer can be used only once to avoid race condition with other threads
+        pszMessageBuffer = InterlockedExchangeT(&g_pFailFastBuffer, NULL);
     }
-    else
+
+    if (pszMessageBuffer == NULL)
     {
         // We can fail here, but we can handle the fault.
         CONTRACT_VIOLATION(FaultViolation);
-        pszMessage = new (nothrow) WCHAR[cchMessage + 1];
-        if (pszMessage == NULL)
+        pszMessageBuffer = new (nothrow) WCHAR[cchMessage + 1];
+        if (pszMessageBuffer == NULL)
         {
             // Truncate the message to what will fit in the static buffer.
             cchMessage = FAIL_FAST_STATIC_BUFFER_LENGTH - 1;
-            pszMessage = g_szFailFastBuffer;
+            pszMessageBuffer = InterlockedExchangeT(&g_pFailFastBuffer, NULL);
         }
     }
 
-    if (cchMessage > 0)
-        memcpyNoGCRefs(pszMessage, gc.refMesgString->GetBuffer(), cchMessage * sizeof(WCHAR));
-    pszMessage[cchMessage] = W('\0');
+    const WCHAR *pszMessage;
+    if (pszMessageBuffer != NULL)
+    {
+        if (cchMessage > 0)
+            memcpyNoGCRefs(pszMessageBuffer, gc.refMesgString->GetBuffer(), cchMessage * sizeof(WCHAR));
+        pszMessageBuffer[cchMessage] = W('\0');
+        pszMessage = pszMessageBuffer;
+    }
+    else
+    {
+        pszMessage = W("There is not enough memory to print the supplied FailFast message.");
+        cchMessage = (DWORD)wcslen(pszMessage);
+    }
 
     if (cchMessage == 0) {
         WszOutputDebugString(W("CLR: Managed code called FailFast without specifying a reason.\r\n"));
     }
     else {
-        WszOutputDebugString(W("CLR: Managed code called FailFast, saying \""));
+        WszOutputDebugString(W("CLR: Managed code called FailFast.\r\n"));
         WszOutputDebugString(pszMessage);
-        WszOutputDebugString(W("\"\r\n"));
+        WszOutputDebugString(W("\r\n"));
     }
 
     LPCWSTR argExceptionString = NULL;
@@ -589,23 +429,6 @@ FCIMPL0(FC_BOOL_RET, SystemNative::IsServerGC)
     FC_RETURN_BOOL(GCHeapUtilities::IsServerHeap());
 }
 FCIMPLEND
-
-#ifdef FEATURE_COMINTEROP
-
-BOOL QCALLTYPE SystemNative::WinRTSupported()
-{
-    QCALL_CONTRACT;
-
-    BOOL hasWinRT = FALSE;
-
-    BEGIN_QCALL;
-    hasWinRT = ::WinRTSupported();
-    END_QCALL;
-
-    return hasWinRT;
-}
-
-#endif // FEATURE_COMINTEROP
 
 #if defined(TARGET_X86) || defined(TARGET_AMD64)
 

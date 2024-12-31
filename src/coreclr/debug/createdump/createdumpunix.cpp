@@ -7,9 +7,9 @@
 // The Linux/MacOS create dump code
 //
 bool
-CreateDump(const char* dumpPathTemplate, int pid, const char* dumpType, MINIDUMP_TYPE minidumpType)
+CreateDump(const CreateDumpOptions& options)
 {
-    ReleaseHolder<CrashInfo> crashInfo = new CrashInfo(pid);
+    ReleaseHolder<CrashInfo> crashInfo = new CrashInfo(options);
     DumpWriter dumpWriter(*crashInfo);
     std::string dumpPath;
     bool result = false;
@@ -19,7 +19,12 @@ CreateDump(const char* dumpPathTemplate, int pid, const char* dumpType, MINIDUMP
     {
         goto exit;
     }
-    printf("Gathering state for process %d %s\n", pid, crashInfo->Name().c_str());
+    printf_status("Gathering state for process %d %s\n", options.Pid, crashInfo->Name().c_str());
+
+    if (options.Signal != 0 || options.CrashThread != 0)
+    {
+        printf_status("Crashing thread %04x signal %d (%04x)\n", options.CrashThread, options.Signal, options.Signal);
+    }
 
     // Suspend all the threads in the target process and build the list of threads
     if (!crashInfo->EnumerateAndSuspendThreads())
@@ -27,29 +32,65 @@ CreateDump(const char* dumpPathTemplate, int pid, const char* dumpType, MINIDUMP
         goto exit;
     }
     // Gather all the info about the process, threads (registers, etc.) and memory regions
-    if (!crashInfo->GatherCrashInfo(minidumpType))
+    if (!crashInfo->GatherCrashInfo(options.MinidumpType))
     {
         goto exit;
     }
     // Format the dump pattern template now that the process name on MacOS has been obtained
-    if (!FormatDumpName(dumpPath, dumpPathTemplate, crashInfo->Name().c_str(), pid))
+    if (!FormatDumpName(dumpPath, options.DumpPathTemplate, crashInfo->Name().c_str(), options.Pid))
     {
         goto exit;
     }
-    printf("Writing %s to file %s\n", dumpType, dumpPath.c_str());
+    // Write the crash report json file if enabled
+    if (options.CrashReport)
+    {
+        CrashReportWriter crashReportWriter(*crashInfo);
+        crashReportWriter.WriteCrashReport(dumpPath);
+    }
+    if (options.CreateDump)
+    {
+        // Gather all the useful memory regions from the DAC
+        if (!crashInfo->EnumerateMemoryRegionsWithDAC(options.MinidumpType))
+        {
+            goto exit;
+        }
+        // Join all adjacent memory regions
+        crashInfo->CombineMemoryRegions();
+    
+        printf_status("Writing %s to file %s\n", options.DumpType, dumpPath.c_str());
+    
+        // Write the actual dump file
+        if (!dumpWriter.OpenDump(dumpPath.c_str()))
+        {
+            goto exit;
+        }
+        if (!dumpWriter.WriteDump())
+        {
+            printf_error( "Writing dump FAILED\n");
 
-    // Write the actual dump file
-    if (!dumpWriter.OpenDump(dumpPath.c_str()))
-    {
-        goto exit;
-    }
-    if (!dumpWriter.WriteDump())
-    {
-        fprintf(stderr, "Writing dump FAILED\n");
-        goto exit;
+            // Delete the partial dump file on error
+            remove(dumpPath.c_str());
+            goto exit;
+        }
     }
     result = true;
 exit:
+    if (kill(options.Pid, 0) == 0)
+    {
+        printf_status("Target process is alive\n");
+    }
+    else
+    {
+        int err = errno;
+        if (err == ESRCH)
+        {
+            printf_error("Target process terminated\n");
+        }
+        else
+        {
+            printf_error("kill(%d, 0) FAILED %s (%d)\n", options.Pid, strerror(err), err);
+        }
+    }
     crashInfo->CleanupAndResumeProcess();
     return result;
 }

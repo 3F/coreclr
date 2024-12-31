@@ -22,7 +22,7 @@ namespace Internal.TypeSystem
                 ThrowHelper.ThrowTypeLoadException(ExceptionStringID.ClassLoadGeneral, type);
             }
 
-            // CLI - Partition 1, section 9.5 - Generic types shall not be marked explicitlayout.  
+            // CLI - Partition 1, section 9.5 - Generic types shall not be marked explicitlayout.
             if (type.HasInstantiation && type.IsExplicitLayout)
             {
                 ThrowHelper.ThrowTypeLoadException(ExceptionStringID.ClassLoadExplicitGeneric, type.GetTypeDefinition());
@@ -63,8 +63,8 @@ namespace Internal.TypeSystem
             }
 
             // CLI - Partition 2, section 22.8
-            // A type has layout if it is marked SequentialLayout or ExplicitLayout.  If any type within an inheritance chain has layout, 
-            // then so shall all its base classes, up to the one that descends immediately from System.ValueType (if it exists in the type's 
+            // A type has layout if it is marked SequentialLayout or ExplicitLayout.  If any type within an inheritance chain has layout,
+            // then so shall all its base classes, up to the one that descends immediately from System.ValueType (if it exists in the type's
             // hierarchy); otherwise, from System.Object
             // Note: While the CLI isn't clearly worded, the layout needs to be the same for the entire chain.
             // If the current type isn't ValueType or System.Object and has a layout and the parent type isn't
@@ -103,6 +103,7 @@ namespace Internal.TypeSystem
                     type.Context.Target.GetWellKnownTypeSize(type),
                     type.Context.Target.GetWellKnownTypeAlignment(type),
                     0,
+                    alignUpInstanceByteSize: true,
                     out instanceByteSizeAndAlignment
                     );
 
@@ -172,7 +173,7 @@ namespace Internal.TypeSystem
             {
                 return ComputeExplicitFieldLayout(type, numInstanceFields);
             }
-            else if (type.IsSequentialLayout || type.Context.Target.Abi == TargetAbi.CppCodegen)
+            else if (type.IsSequentialLayout || type.IsEnum || type.Context.Target.Abi == TargetAbi.CppCodegen)
             {
                 return ComputeSequentialFieldLayout(type, numInstanceFields);
             }
@@ -228,7 +229,7 @@ namespace Internal.TypeSystem
                 }
 
                 ref StaticsBlock block = ref GetStaticsBlockForField(ref result, field);
-                SizeAndAlignment sizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, context.Target.DefaultPackingSize, out bool _);
+                SizeAndAlignment sizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, hasLayout: false, context.Target.DefaultPackingSize, out bool _);
 
                 block.Size = LayoutInt.AlignUp(block.Size, sizeAndAlignment.Alignment, context.Target);
                 result.Offsets[index] = new FieldAndOffset(field, block.Size);
@@ -304,16 +305,17 @@ namespace Internal.TypeSystem
         {
         }
 
-        protected static ComputedInstanceFieldLayout ComputeExplicitFieldLayout(MetadataType type, int numInstanceFields)
+        protected virtual bool AlignUpInstanceByteSizeForExplicitFieldLayoutCompatQuirk(TypeDesc type) => true;
+
+        protected ComputedInstanceFieldLayout ComputeExplicitFieldLayout(MetadataType type, int numInstanceFields)
         {
             // Instance slice size is the total size of instance not including the base type.
             // It is calculated as the field whose offset and size add to the greatest value.
-            LayoutInt cumulativeInstanceFieldPos =
-                type.HasBaseType && !type.IsValueType ? type.BaseType.InstanceByteCount : LayoutInt.Zero;
-            LayoutInt instanceSize = cumulativeInstanceFieldPos;
+            LayoutInt offsetBias = !type.IsValueType ? new LayoutInt(type.Context.Target.PointerSize) : LayoutInt.Zero;
+            LayoutInt cumulativeInstanceFieldPos = CalculateFieldBaseOffset(type, requiresAlign8: false, requiresAlignedBase: false) - offsetBias;
+            LayoutInt instanceSize = cumulativeInstanceFieldPos + offsetBias;
 
             var layoutMetadata = type.GetClassLayout();
-
             int packingSize = ComputePackingSize(type, layoutMetadata);
             LayoutInt largestAlignmentRequired = LayoutInt.One;
 
@@ -324,7 +326,7 @@ namespace Internal.TypeSystem
             foreach (var fieldAndOffset in layoutMetadata.Offsets)
             {
                 TypeDesc fieldType = fieldAndOffset.Field.FieldType;
-                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, packingSize, out bool fieldLayoutAbiStable);
+                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, hasLayout: true, packingSize, out bool fieldLayoutAbiStable);
                 if (!fieldLayoutAbiStable)
                     layoutAbiStable = false;
 
@@ -333,7 +335,7 @@ namespace Internal.TypeSystem
                 if (fieldAndOffset.Offset == FieldAndOffset.InvalidOffset)
                     ThrowHelper.ThrowTypeLoadException(ExceptionStringID.ClassLoadBadFormat, type);
 
-                LayoutInt computedOffset = fieldAndOffset.Offset + cumulativeInstanceFieldPos;
+                LayoutInt computedOffset = fieldAndOffset.Offset + cumulativeInstanceFieldPos + offsetBias;
 
                 // GC pointers MUST be aligned.
                 // We treat byref-like structs as GC pointers too.
@@ -363,7 +365,12 @@ namespace Internal.TypeSystem
             }
 
             SizeAndAlignment instanceByteSizeAndAlignment;
-            var instanceSizeAndAlignment = ComputeInstanceSize(type, instanceSize, largestAlignmentRequired, layoutMetadata.Size, out instanceByteSizeAndAlignment);
+            var instanceSizeAndAlignment = ComputeInstanceSize(type,
+                instanceSize,
+                largestAlignmentRequired,
+                layoutMetadata.Size,
+                alignUpInstanceByteSize: AlignUpInstanceByteSizeForExplicitFieldLayoutCompatQuirk(type),
+                out instanceByteSizeAndAlignment);
 
             ComputedInstanceFieldLayout computedLayout = new ComputedInstanceFieldLayout();
             computedLayout.FieldAlignment = instanceSizeAndAlignment.Alignment;
@@ -373,18 +380,25 @@ namespace Internal.TypeSystem
             computedLayout.Offsets = offsets;
             computedLayout.LayoutAbiStable = layoutAbiStable;
 
-
             ExplicitLayoutValidator.Validate(type, computedLayout);
 
             return computedLayout;
         }
 
-        protected static ComputedInstanceFieldLayout ComputeSequentialFieldLayout(MetadataType type, int numInstanceFields)
+        private static LayoutInt AlignUpInstanceFieldOffset(TypeDesc typeWithField, LayoutInt cumulativeInstanceFieldPos, LayoutInt alignment, TargetDetails target)
+        {
+            return LayoutInt.AlignUp(cumulativeInstanceFieldPos, alignment, target);
+        }
+
+        protected ComputedInstanceFieldLayout ComputeSequentialFieldLayout(MetadataType type, int numInstanceFields)
         {
             var offsets = new FieldAndOffset[numInstanceFields];
 
             // For types inheriting from another type, field offsets continue on from where they left off
-            LayoutInt cumulativeInstanceFieldPos = ComputeBytesUsedInParentType(type);
+            // For reference types, we calculate field alignment as if the address after the method table pointer
+            // has offset 0 (on 32-bit platforms, this location is guaranteed to be 8-aligned).
+            LayoutInt offsetBias = !type.IsValueType ? new LayoutInt(type.Context.Target.PointerSize) : LayoutInt.Zero;
+            LayoutInt cumulativeInstanceFieldPos = CalculateFieldBaseOffset(type, requiresAlign8: false, requiresAlignedBase: false) - offsetBias;
 
             var layoutMetadata = type.GetClassLayout();
 
@@ -398,21 +412,27 @@ namespace Internal.TypeSystem
                 if (field.IsStatic)
                     continue;
 
-                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(field.FieldType, packingSize, out bool fieldLayoutAbiStable);
+                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(field.FieldType, hasLayout: true, packingSize, out bool fieldLayoutAbiStable);
                 if (!fieldLayoutAbiStable)
                     layoutAbiStable = false;
 
                 largestAlignmentRequirement = LayoutInt.Max(fieldSizeAndAlignment.Alignment, largestAlignmentRequirement);
 
-                cumulativeInstanceFieldPos = LayoutInt.AlignUp(cumulativeInstanceFieldPos, fieldSizeAndAlignment.Alignment, type.Context.Target);
-                offsets[fieldOrdinal] = new FieldAndOffset(field, cumulativeInstanceFieldPos);
+                cumulativeInstanceFieldPos = AlignUpInstanceFieldOffset(type, cumulativeInstanceFieldPos, fieldSizeAndAlignment.Alignment, type.Context.Target);
+                offsets[fieldOrdinal] = new FieldAndOffset(field, cumulativeInstanceFieldPos + offsetBias);
                 cumulativeInstanceFieldPos = checked(cumulativeInstanceFieldPos + fieldSizeAndAlignment.Size);
 
                 fieldOrdinal++;
             }
 
             SizeAndAlignment instanceByteSizeAndAlignment;
-            var instanceSizeAndAlignment = ComputeInstanceSize(type, cumulativeInstanceFieldPos, largestAlignmentRequirement, layoutMetadata.Size, out instanceByteSizeAndAlignment);
+            var instanceSizeAndAlignment = ComputeInstanceSize(
+                type,
+                cumulativeInstanceFieldPos + offsetBias,
+                largestAlignmentRequirement,
+                layoutMetadata.Size,
+                alignUpInstanceByteSize: true,
+                out instanceByteSizeAndAlignment);
 
             ComputedInstanceFieldLayout computedLayout = new ComputedInstanceFieldLayout();
             computedLayout.FieldAlignment = instanceSizeAndAlignment.Alignment;
@@ -425,23 +445,22 @@ namespace Internal.TypeSystem
             return computedLayout;
         }
 
-        protected virtual void AlignBaseOffsetIfNecessary(MetadataType type, ref LayoutInt baseOffset, bool requiresAlign8)
+        protected virtual void AlignBaseOffsetIfNecessary(MetadataType type, ref LayoutInt baseOffset, bool requiresAlign8, bool requiresAlignedBase)
         {
         }
 
         protected ComputedInstanceFieldLayout ComputeAutoFieldLayout(MetadataType type, int numInstanceFields)
         {
-            // For types inheriting from another type, field offsets continue on from where they left off
-            LayoutInt cumulativeInstanceFieldPos = ComputeBytesUsedInParentType(type);
+            TypeSystemContext context = type.Context;
 
+            bool hasLayout = type.HasLayout();
             var layoutMetadata = type.GetClassLayout();
 
             int packingSize = ComputePackingSize(type, layoutMetadata);
+            packingSize = Math.Min(context.Target.MaximumAutoLayoutPackingSize, packingSize);
 
             var offsets = new FieldAndOffset[numInstanceFields];
             int fieldOrdinal = 0;
-
-            TypeSystemContext context = type.Context;
 
             // Iterate over the instance fields and keep track of the number of fields of each category
             // For the non-GC Pointer fields, we will keep track of the number of fields by log2(size)
@@ -467,10 +486,10 @@ namespace Internal.TypeSystem
                     instanceGCPointerFieldsCount++;
                 }
                 else
-                {                    
+                {
                     Debug.Assert(fieldType.IsPrimitive || fieldType.IsPointer || fieldType.IsFunctionPointer || fieldType.IsEnum);
 
-                    var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, packingSize, out bool _);
+                    var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, hasLayout, packingSize, out bool _);
                     instanceNonGCPointerFieldsCount[CalculateLog2(fieldSizeAndAlignment.Size.AsInt)]++;
                 }
             }
@@ -507,7 +526,7 @@ namespace Internal.TypeSystem
 
                 TypeDesc fieldType = field.FieldType;
 
-                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, packingSize, out bool fieldLayoutAbiStable);
+                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(fieldType, hasLayout, packingSize, out bool fieldLayoutAbiStable);
                 if (!fieldLayoutAbiStable)
                     layoutAbiStable = false;
 
@@ -528,9 +547,19 @@ namespace Internal.TypeSystem
                 }
             }
 
-            largestAlignmentRequired = type.Context.Target.GetObjectAlignment(largestAlignmentRequired);
+            largestAlignmentRequired = context.Target.GetObjectAlignment(largestAlignmentRequired);
             bool requiresAlign8 = !largestAlignmentRequired.IsIndeterminate && largestAlignmentRequired.AsInt > 4;
-            AlignBaseOffsetIfNecessary(type, ref cumulativeInstanceFieldPos, requiresAlign8);
+
+            // For types inheriting from another type, field offsets continue on from where they left off
+            // Base alignment is not always required, it's only applied when there's a version bubble boundary
+            // between base type and the current type.
+            LayoutInt cumulativeInstanceFieldPos = CalculateFieldBaseOffset(type, requiresAlign8, requiresAlignedBase: false);
+            LayoutInt offsetBias = LayoutInt.Zero;
+            if (!type.IsValueType && cumulativeInstanceFieldPos != LayoutInt.Zero && type.Context.Target.Architecture == TargetArchitecture.X86)
+            {
+                offsetBias = new LayoutInt(type.Context.Target.PointerSize);
+                cumulativeInstanceFieldPos -= offsetBias;
+            }
 
             // We've finished placing the fields into their appropriate arrays
             // The next optimization may place non-GC Pointers, so repurpose our
@@ -572,7 +601,7 @@ namespace Internal.TypeSystem
                         // (the subsequent loop will place fields from large to small fields)
                         if (j > maxLog2Size)
                             break;
-                        
+
                         // Check whether there are any small enough fields
                         // We must consider both GC Pointers and non-GC Pointers
                         for (j = i; j >= 0; j--)
@@ -604,7 +633,7 @@ namespace Internal.TypeSystem
                         // Place the field
                         j = instanceNonGCPointerFieldsCount[i];
                         FieldDesc field = instanceNonGCPointerFieldsArr[i][j];
-                        PlaceInstanceField(field, packingSize, offsets, ref cumulativeInstanceFieldPos, ref fieldOrdinal);
+                        PlaceInstanceField(field, hasLayout, packingSize, offsets, ref cumulativeInstanceFieldPos, ref fieldOrdinal, offsetBias);
 
                         instanceNonGCPointerFieldsCount[i]++;
                     }
@@ -621,14 +650,14 @@ namespace Internal.TypeSystem
                 {
                     for (int j = 0; j < instanceGCPointerFieldsArr.Length; j++)
                     {
-                        PlaceInstanceField(instanceGCPointerFieldsArr[j], packingSize, offsets, ref cumulativeInstanceFieldPos, ref fieldOrdinal);
+                        PlaceInstanceField(instanceGCPointerFieldsArr[j], hasLayout, packingSize, offsets, ref cumulativeInstanceFieldPos, ref fieldOrdinal, offsetBias);
                     }
                 }
 
                 // The start index will be the index that may have been increased in the previous optimization
                 for (int j = instanceNonGCPointerFieldsCount[i]; j < instanceNonGCPointerFieldsArr[i].Length; j++)
                 {
-                    PlaceInstanceField(instanceNonGCPointerFieldsArr[i][j], packingSize, offsets, ref cumulativeInstanceFieldPos, ref fieldOrdinal);
+                    PlaceInstanceField(instanceNonGCPointerFieldsArr[i][j], hasLayout, packingSize, offsets, ref cumulativeInstanceFieldPos, ref fieldOrdinal, offsetBias);
                 }
             }
 
@@ -638,20 +667,20 @@ namespace Internal.TypeSystem
                 // If the field has an indeterminate alignment, align the cumulative field offset to the indeterminate value
                 // Otherwise, align the cumulative field offset to the PointerSize
                 // This avoids issues with Universal Generic Field layouts whose fields may have Indeterminate sizes or alignments
-                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(instanceValueClassFieldsArr[i].FieldType, packingSize, out bool fieldLayoutAbiStable);
+                var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(instanceValueClassFieldsArr[i].FieldType, hasLayout, packingSize, out bool fieldLayoutAbiStable);
                 if (!fieldLayoutAbiStable)
                     layoutAbiStable = false;
 
                 if (fieldSizeAndAlignment.Alignment.IsIndeterminate)
                 {
-                    cumulativeInstanceFieldPos = LayoutInt.AlignUp(cumulativeInstanceFieldPos, fieldSizeAndAlignment.Alignment, context.Target);
+                    cumulativeInstanceFieldPos = AlignUpInstanceFieldOffset(type, cumulativeInstanceFieldPos, fieldSizeAndAlignment.Alignment, context.Target);
                 }
                 else
                 {
                     LayoutInt AlignmentRequired = LayoutInt.Max(fieldSizeAndAlignment.Alignment, context.Target.LayoutPointerSize);
-                    cumulativeInstanceFieldPos = LayoutInt.AlignUp(cumulativeInstanceFieldPos, AlignmentRequired, context.Target);
+                    cumulativeInstanceFieldPos = AlignUpInstanceFieldOffset(type, cumulativeInstanceFieldPos, AlignmentRequired, context.Target);
                 }
-                offsets[fieldOrdinal] = new FieldAndOffset(instanceValueClassFieldsArr[i], cumulativeInstanceFieldPos);
+                offsets[fieldOrdinal] = new FieldAndOffset(instanceValueClassFieldsArr[i], cumulativeInstanceFieldPos + offsetBias);
 
                 // If the field has an indeterminate size, align the cumulative field offset to the indeterminate value
                 // Otherwise, align the cumulative field offset to the aligned-instance field size
@@ -670,9 +699,13 @@ namespace Internal.TypeSystem
             {
                 minAlign = LayoutInt.Indeterminate;
             }
-            else if (cumulativeInstanceFieldPos.AsInt > type.Context.Target.PointerSize)
+            else if (cumulativeInstanceFieldPos.AsInt > context.Target.PointerSize)
             {
-                minAlign = type.Context.Target.LayoutPointerSize;
+                minAlign = context.Target.LayoutPointerSize;
+                if (requiresAlign8 && minAlign.AsInt == 4)
+                {
+                    minAlign = new LayoutInt(8);
+                }
             }
             else
             {
@@ -682,7 +715,12 @@ namespace Internal.TypeSystem
             }
 
             SizeAndAlignment instanceByteSizeAndAlignment;
-            var instanceSizeAndAlignment = ComputeInstanceSize(type, cumulativeInstanceFieldPos, minAlign, 0/* specified field size unused */, out instanceByteSizeAndAlignment);
+            var instanceSizeAndAlignment = ComputeInstanceSize(type,
+                cumulativeInstanceFieldPos + offsetBias,
+                minAlign,
+                classLayoutSize: 0,
+                alignUpInstanceByteSize: true,
+                out instanceByteSizeAndAlignment);
 
             ComputedInstanceFieldLayout computedLayout = new ComputedInstanceFieldLayout();
             computedLayout.FieldAlignment = instanceSizeAndAlignment.Alignment;
@@ -695,12 +733,12 @@ namespace Internal.TypeSystem
             return computedLayout;
         }
 
-        private static void PlaceInstanceField(FieldDesc field, int packingSize, FieldAndOffset[] offsets, ref LayoutInt instanceFieldPos, ref int fieldOrdinal)
+        private static void PlaceInstanceField(FieldDesc field, bool hasLayout, int packingSize, FieldAndOffset[] offsets, ref LayoutInt instanceFieldPos, ref int fieldOrdinal, LayoutInt offsetBias)
         {
-            var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(field.FieldType, packingSize, out bool _);
+            var fieldSizeAndAlignment = ComputeFieldSizeAndAlignment(field.FieldType, hasLayout, packingSize, out bool _);
 
-            instanceFieldPos = LayoutInt.AlignUp(instanceFieldPos, fieldSizeAndAlignment.Alignment, field.Context.Target);
-            offsets[fieldOrdinal] = new FieldAndOffset(field, instanceFieldPos);
+            instanceFieldPos = AlignUpInstanceFieldOffset(field.OwningType, instanceFieldPos, fieldSizeAndAlignment.Alignment, field.Context.Target);
+            offsets[fieldOrdinal] = new FieldAndOffset(field, instanceFieldPos + offsetBias);
             instanceFieldPos = checked(instanceFieldPos + fieldSizeAndAlignment.Size);
 
             fieldOrdinal++;
@@ -737,19 +775,27 @@ namespace Internal.TypeSystem
             return type.IsValueType && !type.IsPrimitive && !type.IsEnum;
         }
 
-        private static LayoutInt ComputeBytesUsedInParentType(DefType type)
+        public LayoutInt CalculateFieldBaseOffset(MetadataType type, bool requiresAlign8, bool requiresAlignedBase)
         {
             LayoutInt cumulativeInstanceFieldPos = LayoutInt.Zero;
 
             if (!type.IsValueType && type.HasBaseType)
             {
                 cumulativeInstanceFieldPos = type.BaseType.InstanceByteCountUnaligned;
+                if (!cumulativeInstanceFieldPos.IsIndeterminate)
+                {
+                    if (requiresAlignedBase && type.BaseType.IsZeroSizedReferenceType && ((MetadataType)type.BaseType).HasLayout())
+                    {
+                        cumulativeInstanceFieldPos += LayoutInt.One;
+                    }
+                    AlignBaseOffsetIfNecessary(type, ref cumulativeInstanceFieldPos, requiresAlign8, requiresAlignedBase);
+                }
             }
 
             return cumulativeInstanceFieldPos;
         }
 
-        private static SizeAndAlignment ComputeFieldSizeAndAlignment(TypeDesc fieldType, int packingSize, out bool layoutAbiStable)
+        private static SizeAndAlignment ComputeFieldSizeAndAlignment(TypeDesc fieldType, bool hasLayout, int packingSize, out bool layoutAbiStable)
         {
             SizeAndAlignment result;
             layoutAbiStable = true;
@@ -784,24 +830,30 @@ namespace Internal.TypeSystem
                 result.Alignment = fieldType.Context.Target.LayoutPointerSize;
             }
 
-            result.Alignment = LayoutInt.Min(result.Alignment, new LayoutInt(packingSize));
+            if (hasLayout)
+            {
+                result.Alignment = LayoutInt.Min(result.Alignment, new LayoutInt(packingSize));
+            }
+            else
+            {
+                result.Alignment = LayoutInt.Min(result.Alignment, fieldType.Context.Target.GetObjectAlignment(result.Alignment));
+            }
 
             return result;
         }
 
         private static int ComputePackingSize(MetadataType type, ClassLayoutMetadata layoutMetadata)
         {
-            // If a type contains pointers then the metadata specified packing size is ignored (On .NET Framework this is disqualification from ManagedSequential)
-            if (layoutMetadata.PackingSize == 0 || type.ContainsGCPointers)
+            if (layoutMetadata.PackingSize == 0)
                 return type.Context.Target.DefaultPackingSize;
             else
                 return layoutMetadata.PackingSize;
         }
 
-        private static SizeAndAlignment ComputeInstanceSize(MetadataType type, LayoutInt instanceSize, LayoutInt alignment, int classLayoutSize, out SizeAndAlignment byteCount)
+        private static SizeAndAlignment ComputeInstanceSize(MetadataType type, LayoutInt instanceSize, LayoutInt alignment, int classLayoutSize, bool alignUpInstanceByteSize, out SizeAndAlignment byteCount)
         {
             SizeAndAlignment result;
-            
+
             // Pad the length of structs to be 1 if they are empty so we have no zero-length structures
             if (type.IsValueType && instanceSize == LayoutInt.Zero)
             {
@@ -826,7 +878,9 @@ namespace Internal.TypeSystem
             {
                 if (type.IsValueType)
                 {
-                    instanceSize = LayoutInt.AlignUp(instanceSize, alignment, target);
+                    instanceSize = LayoutInt.AlignUp(instanceSize,
+                        alignUpInstanceByteSize ? alignment : LayoutInt.Min(alignment, target.LayoutPointerSize),
+                        target);
                 }
             }
 
@@ -844,7 +898,7 @@ namespace Internal.TypeSystem
             }
 
             // Determine the alignment needed by the type when allocated
-            // This is target specific, and not just pointer sized due to 
+            // This is target specific, and not just pointer sized due to
             // 8 byte alignment requirements on ARM for longs and doubles
             alignment = target.GetObjectAlignment(alignment);
 
@@ -866,7 +920,15 @@ namespace Internal.TypeSystem
             return result;
         }
 
-        private ValueTypeShapeCharacteristics ComputeHomogeneousAggregateCharacteristic(DefType type)
+        /// <summary>
+        /// Identify whether a given type is a homogeneous floating-point aggregate. This code must be
+        /// kept in sync with the CoreCLR runtime method EEClass::CheckForHFA, as of this change it
+        /// can be found at
+        /// https://github.com/dotnet/runtime/blob/1928cd2b65c04ebe6fe528d4ebb581e46f1fed47/src/coreclr/vm/class.cpp#L1567
+        /// </summary>
+        /// <param name="type">Type to analyze</param>
+        /// <returns>HFA classification of the type parameter</returns>
+        private static ValueTypeShapeCharacteristics ComputeHomogeneousAggregateCharacteristic(DefType type)
         {
             // Use this constant to make the code below more laconic
             const ValueTypeShapeCharacteristics NotHA = ValueTypeShapeCharacteristics.None;
@@ -878,12 +940,7 @@ namespace Internal.TypeSystem
                 return NotHA;
 
             MetadataType metadataType = (MetadataType)type;
-
-            // No HAs with explicit layout. There may be cases where explicit layout may be still
-            // eligible for HA, but it is hard to tell the real intent. Make it simple and just 
-            // unconditionally disable HAs for explicit layout.
-            if (metadataType.IsExplicitLayout)
-                return NotHA;
+            int haElementSize = 0;
 
             switch (metadataType.Category)
             {
@@ -896,11 +953,17 @@ namespace Internal.TypeSystem
                 case TypeFlags.ValueType:
                     // Find the common HA element type if any
                     ValueTypeShapeCharacteristics haResultType = NotHA;
+                    bool hasZeroOffsetField = false;
 
                     foreach (FieldDesc field in metadataType.GetFields())
                     {
                         if (field.IsStatic)
                             continue;
+
+                        if (field.Offset == LayoutInt.Zero)
+                        {
+                            hasZeroOffsetField = true;
+                        }
 
                         // If a field isn't a DefType, then this type cannot be a HA type
                         if (!(field.FieldType is DefType fieldType))
@@ -915,6 +978,15 @@ namespace Internal.TypeSystem
                         {
                             // If we hadn't yet figured out what form of HA this type might be, we've now found one case
                             haResultType = haFieldType;
+
+                            haElementSize = haResultType switch
+                            {
+                                ValueTypeShapeCharacteristics.Float32Aggregate => 4,
+                                ValueTypeShapeCharacteristics.Float64Aggregate => 8,
+                                ValueTypeShapeCharacteristics.Vector64Aggregate => 8,
+                                ValueTypeShapeCharacteristics.Vector128Aggregate => 16,
+                                _ => throw new ArgumentOutOfRangeException()
+                            };
                         }
                         else if (haResultType != haFieldType)
                         {
@@ -923,20 +995,16 @@ namespace Internal.TypeSystem
                             // be a HA type.
                             return NotHA;
                         }
+
+                        if (field.Offset.IsIndeterminate || field.Offset.AsInt % haElementSize != 0)
+                        {
+                            return NotHA;
+                        }
                     }
 
-                    // If there are no instance fields, this is not a HA type
-                    if (haResultType == NotHA)
+                    // If the struct doesn't have a zero-offset field, it's not an HFA.
+                    if (!hasZeroOffsetField)
                         return NotHA;
-
-                    int haElementSize = haResultType switch
-                    {
-                        ValueTypeShapeCharacteristics.Float32Aggregate => 4,
-                        ValueTypeShapeCharacteristics.Float64Aggregate => 8,
-                        ValueTypeShapeCharacteristics.Vector64Aggregate => 8,
-                        ValueTypeShapeCharacteristics.Vector128Aggregate => 16,
-                        _ => throw new ArgumentOutOfRangeException()
-                    };
 
                     // Types which are indeterminate in field size are not considered to be HA
                     if (type.InstanceFieldSize.IsIndeterminate)
@@ -946,8 +1014,13 @@ namespace Internal.TypeSystem
                     // - Type of fields can be HA valuetype itself.
                     // - Managed C++ HA valuetypes have just one <alignment member> of type float to signal that
                     //   the valuetype is HA and explicitly specified size.
-                    int maxSize = haElementSize * type.Context.Target.MaxHomogeneousAggregateElementCount;
-                    if (type.InstanceFieldSize.AsInt > maxSize)
+                    int totalSize = type.InstanceFieldSize.AsInt;
+
+                    if (totalSize % haElementSize != 0)
+                        return NotHA;
+
+                    // On ARM, HFAs can have a maximum of four fields regardless of whether those are float or double.
+                    if (totalSize > haElementSize * type.Context.Target.MaxHomogeneousAggregateElementCount)
                         return NotHA;
 
                     // All the tests passed. This is a HA type.
@@ -955,6 +1028,31 @@ namespace Internal.TypeSystem
             }
 
             return NotHA;
+        }
+
+        public override bool ComputeIsUnsafeValueType(DefType type)
+        {
+            if (!type.IsValueType)
+                return false;
+
+            MetadataType metadataType = (MetadataType)type;
+            if (metadataType.HasCustomAttribute("System.Runtime.CompilerServices", "UnsafeValueTypeAttribute"))
+                return true;
+
+            foreach (FieldDesc field in metadataType.GetFields())
+            {
+                if (field.IsStatic)
+                    continue;
+
+                TypeDesc fieldType = field.FieldType;
+                if (!fieldType.IsValueType || fieldType.IsPrimitive)
+                    continue;
+
+                if (((DefType)fieldType).IsUnsafeValueType)
+                    return true;
+            }
+
+            return false;
         }
 
         private struct SizeAndAlignment

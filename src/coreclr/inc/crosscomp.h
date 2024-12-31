@@ -45,10 +45,12 @@
 #define CONTEXT_UNWOUND_TO_CALL 0x20000000
 #endif
 
+#if !defined(HOST_ARM64)
 typedef struct _NEON128 {
     ULONGLONG Low;
     LONGLONG High;
 } NEON128, *PNEON128;
+#endif // !defined(HOST_ARM64)
 
 typedef struct DECLSPEC_ALIGN(8) _T_CONTEXT {
     //
@@ -154,13 +156,14 @@ typedef struct _T_KNONVOLATILE_CONTEXT_POINTERS {
 //
 // Define dynamic function table entry.
 //
-
+#if defined(HOST_X86)
 typedef
 PT_RUNTIME_FUNCTION
 (*PGET_RUNTIME_FUNCTION_CALLBACK) (
     IN DWORD64 ControlPc,
     IN PVOID Context
     );
+#endif // defined(HOST_X86)
 
 typedef struct _T_DISPATCHER_CONTEXT {
     ULONG ControlPc;
@@ -296,6 +299,17 @@ typedef struct _T_RUNTIME_FUNCTION {
 } T_RUNTIME_FUNCTION, *PT_RUNTIME_FUNCTION;
 
 
+#ifdef HOST_UNIX
+
+typedef
+EXCEPTION_DISPOSITION
+(*PEXCEPTION_ROUTINE) (
+    PEXCEPTION_RECORD ExceptionRecord,
+    ULONG64 EstablisherFrame,
+    PCONTEXT ContextRecord,
+    PVOID DispatcherContext
+    );
+#endif
 //
 // Define exception dispatch context structure.
 //
@@ -347,6 +361,27 @@ typedef struct _T_KNONVOLATILE_CONTEXT_POINTERS {
 
 } T_KNONVOLATILE_CONTEXT_POINTERS, *PT_KNONVOLATILE_CONTEXT_POINTERS;
 
+#if defined(HOST_UNIX) && defined(TARGET_ARM64) && !defined(HOST_ARM64)
+enum
+{
+    UNW_AARCH64_X19 = 19,
+    UNW_AARCH64_X20 = 20,
+    UNW_AARCH64_X21 = 21,
+    UNW_AARCH64_X22 = 22,
+    UNW_AARCH64_X23 = 23,
+    UNW_AARCH64_X24 = 24,
+    UNW_AARCH64_X25 = 25,
+    UNW_AARCH64_X26 = 26,
+    UNW_AARCH64_X27 = 27,
+    UNW_AARCH64_X28 = 28,
+    UNW_AARCH64_X29 = 29,
+    UNW_AARCH64_X30 = 30,
+    UNW_AARCH64_SP = 31,
+    UNW_AARCH64_PC = 32
+};
+
+#endif // TARGET_ARM64 && !HOST_ARM64
+
 #else
 
 #define T_CONTEXT CONTEXT
@@ -366,7 +401,7 @@ typedef struct _T_KNONVOLATILE_CONTEXT_POINTERS {
 #if defined(DACCESS_COMPILE) && defined(TARGET_UNIX)
 // This is a TARGET oriented copy of CRITICAL_SECTION and PAL_CS_NATIVE_DATA_SIZE
 // It is configured based on TARGET configuration rather than HOST configuration
-// There is validation code in src/coreclr/src/vm/crst.cpp to keep these from
+// There is validation code in src/coreclr/vm/crst.cpp to keep these from
 // getting out of sync
 
 #define T_CRITICAL_SECTION_VALIDATION_MESSAGE "T_CRITICAL_SECTION validation failed. It is not in sync with CRITICAL_SECTION"
@@ -388,6 +423,8 @@ typedef struct _T_KNONVOLATILE_CONTEXT_POINTERS {
 #elif defined(TARGET_LINUX) && defined(TARGET_X86)
 #define DAC_CS_NATIVE_DATA_SIZE 76
 #elif defined(TARGET_LINUX) && defined(TARGET_AMD64)
+#define DAC_CS_NATIVE_DATA_SIZE 96
+#elif defined(TARGET_LINUX) && defined(TARGET_S390X)
 #define DAC_CS_NATIVE_DATA_SIZE 96
 #elif defined(TARGET_NETBSD) && defined(TARGET_AMD64)
 #define DAC_CS_NATIVE_DATA_SIZE 96

@@ -1,11 +1,12 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Diagnostics;
 using System.Runtime.InteropServices.ComTypes;
 
 namespace System.Runtime.InteropServices.CustomMarshalers
 {
-    internal class EnumerableViewOfDispatch : ICustomAdapter, System.Collections.IEnumerable
+    internal sealed class EnumerableViewOfDispatch : ICustomAdapter, System.Collections.IEnumerable
     {
         // Reserved DISPID slot for getting an enumerator from an IDispatch-implementing COM interface.
         private const int DISPID_NEWENUM = -4;
@@ -38,6 +39,7 @@ namespace System.Runtime.InteropServices.CustomMarshalers
                     IntPtr.Zero);
             }
 
+            Debug.Assert(OperatingSystem.IsWindows());
             IntPtr enumVariantPtr = IntPtr.Zero;
             try
             {

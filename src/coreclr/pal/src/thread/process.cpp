@@ -35,6 +35,7 @@ SET_DEFAULT_DEBUG_CHANNEL(PROCESS); // some headers have code with asserts, so d
 #include "pal/environ.h"
 #include "pal/virtual.h"
 #include "pal/stackstring.hpp"
+#include "pal/signal.hpp"
 
 #include <errno.h>
 #if HAVE_POLL
@@ -60,6 +61,7 @@ SET_DEFAULT_DEBUG_CHANNEL(PROCESS); // some headers have code with asserts, so d
 #include <stdint.h>
 #include <dlfcn.h>
 #include <limits.h>
+#include <vector>
 
 #ifdef __linux__
 #include <sys/syscall.h> // __NR_membarrier
@@ -83,7 +85,24 @@ SET_DEFAULT_DEBUG_CHANNEL(PROCESS); // some headers have code with asserts, so d
 #include <libproc.h>
 #include <sys/sysctl.h>
 #include <sys/posix_sem.h>
-#endif
+#include <mach/task.h>
+#include <mach/vm_map.h>
+extern "C"
+{
+#  include <mach/thread_state.h>
+}
+
+#define CHECK_MACH(_msg, machret) do {                                      \
+        if (machret != KERN_SUCCESS)                                        \
+        {                                                                   \
+            char _szError[1024];                                            \
+            snprintf(_szError, _countof(_szError), "%s: %u: %s", __FUNCTION__, __LINE__, _msg);  \
+            mach_error(_szError, machret);                                  \
+            abort();                                                        \
+        }                                                                   \
+    } while (false)
+
+#endif // __APPLE__
 
 #ifdef __NetBSD__
 #include <sys/cdefs.h>
@@ -212,7 +231,7 @@ static_assert_no_msg(CLR_SEM_MAX_NAMELEN <= MAX_PATH);
 Volatile<PSHUTDOWN_CALLBACK> g_shutdownCallback = nullptr;
 
 // Crash dump generating program arguments. Initialized in PROCAbortInitialize().
-char* g_argvCreateDump[8] = { nullptr };
+std::vector<const char*> g_argvCreateDump;
 
 //
 // Key used for associating CPalThread's with the underlying pthread
@@ -351,160 +370,6 @@ GetCurrentProcess(
     /* return a pseudo handle */
     return hPseudoCurrentProcess;
 }
-
-/*++
-Function:
-  CreateProcessA
-
-Note:
-  Only Standard handles need to be inherited.
-  Security attributes parameters are not used.
-
-See MSDN doc.
---*/
-BOOL
-PALAPI
-CreateProcessA(
-           IN LPCSTR lpApplicationName,
-           IN LPSTR lpCommandLine,
-           IN LPSECURITY_ATTRIBUTES lpProcessAttributes,
-           IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
-           IN BOOL bInheritHandles,
-           IN DWORD dwCreationFlags,
-           IN LPVOID lpEnvironment,
-           IN LPCSTR lpCurrentDirectory,
-           IN LPSTARTUPINFOA lpStartupInfo,
-           OUT LPPROCESS_INFORMATION lpProcessInformation)
-{
-    PAL_ERROR palError = NO_ERROR;
-    CPalThread *pThread;
-    STARTUPINFOW StartupInfoW;
-    LPWSTR CommandLineW = NULL;
-    LPWSTR ApplicationNameW = NULL;
-    LPWSTR CurrentDirectoryW = NULL;
-
-    int n;
-
-    PERF_ENTRY(CreateProcessA);
-    ENTRY("CreateProcessA(lpAppName=%p (%s), lpCmdLine=%p (%s), lpProcessAttr=%p, "
-          "lpThreadAttr=%p, bInherit=%d, dwFlags=%#x, lpEnv=%p, "
-          "lpCurrentDir=%p (%s), lpStartupInfo=%p, lpProcessInfo=%p)\n",
-           lpApplicationName?lpApplicationName:"NULL",
-           lpApplicationName?lpApplicationName:"NULL",
-           lpCommandLine?lpCommandLine:"NULL",
-           lpCommandLine?lpCommandLine:"NULL",
-           lpProcessAttributes, lpThreadAttributes, bInheritHandles,
-           dwCreationFlags, lpEnvironment,
-           lpCurrentDirectory?lpCurrentDirectory:"NULL",
-           lpCurrentDirectory?lpCurrentDirectory:"NULL",
-           lpStartupInfo, lpProcessInformation);
-
-    pThread = InternalGetCurrentThread();
-
-    if(lpStartupInfo == NULL)
-    {
-        ASSERT("lpStartupInfo is NULL!\n");
-        palError = ERROR_INVALID_PARAMETER;
-        goto done;
-    }
-
-    /* convert parameters to Unicode */
-
-    if(lpApplicationName)
-    {
-        n = MultiByteToWideChar(CP_ACP, 0, lpApplicationName, -1, NULL, 0);
-        if(0 == n)
-        {
-            ASSERT("MultiByteToWideChar failed!\n");
-            palError = ERROR_INTERNAL_ERROR;
-            goto done;
-        }
-        ApplicationNameW = (LPWSTR)InternalMalloc(sizeof(WCHAR)*n);
-        if(!ApplicationNameW)
-        {
-            ERROR("malloc() failed!\n");
-            palError = ERROR_NOT_ENOUGH_MEMORY;
-            goto done;
-        }
-        MultiByteToWideChar(CP_ACP, 0, lpApplicationName, -1, ApplicationNameW,
-                            n);
-    }
-
-    if(lpCommandLine)
-    {
-        n = MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, NULL, 0);
-        if(0 == n)
-        {
-            ASSERT("MultiByteToWideChar failed!\n");
-            palError = ERROR_INTERNAL_ERROR;
-            goto done;
-        }
-        CommandLineW = (LPWSTR)InternalMalloc(sizeof(WCHAR)*n);
-        if(!CommandLineW)
-        {
-            ERROR("malloc() failed!\n");
-            palError = ERROR_NOT_ENOUGH_MEMORY;
-            goto done;
-        }
-        MultiByteToWideChar(CP_ACP, 0, lpCommandLine, -1, CommandLineW, n);
-    }
-
-    if(lpCurrentDirectory)
-    {
-        n = MultiByteToWideChar(CP_ACP, 0, lpCurrentDirectory, -1, NULL, 0);
-        if(0 == n)
-        {
-            ASSERT("MultiByteToWideChar failed!\n");
-            palError = ERROR_INTERNAL_ERROR;
-            goto done;
-        }
-        CurrentDirectoryW = (LPWSTR)InternalMalloc(sizeof(WCHAR)*n);
-        if(!CurrentDirectoryW)
-        {
-            ERROR("malloc() failed!\n");
-            palError = ERROR_NOT_ENOUGH_MEMORY;
-            goto done;
-        }
-        MultiByteToWideChar(CP_ACP, 0, lpCurrentDirectory, -1,
-                            CurrentDirectoryW, n);
-    }
-
-    // lpEnvironment should remain ansi on the call to CreateProcessW
-
-    StartupInfoW.cb = sizeof StartupInfoW;
-    StartupInfoW.dwFlags = lpStartupInfo->dwFlags;
-    StartupInfoW.hStdError = lpStartupInfo->hStdError;
-    StartupInfoW.hStdInput = lpStartupInfo->hStdInput;
-    StartupInfoW.hStdOutput = lpStartupInfo->hStdOutput;
-    /* all other members are PAL_Undefined, we can ignore them */
-
-    palError  = InternalCreateProcess(
-        pThread,
-        ApplicationNameW,
-        CommandLineW,
-        lpProcessAttributes,
-        lpThreadAttributes,
-        dwCreationFlags,
-        lpEnvironment,
-        CurrentDirectoryW,
-        &StartupInfoW,
-        lpProcessInformation
-        );
-done:
-    free(ApplicationNameW);
-    free(CommandLineW);
-    free(CurrentDirectoryW);
-
-    if (NO_ERROR != palError)
-    {
-        pThread->SetLastError(palError);
-    }
-
-    LOGEXIT("CreateProcessA returns BOOL %d\n", NO_ERROR == palError);
-    PERF_EXIT(CreateProcessA);
-    return NO_ERROR == palError;
-}
-
 
 /*++
 Function:
@@ -1346,7 +1211,7 @@ ExitProcess(
 
     /* this should never get executed */
     ASSERT("ExitProcess should not return!\n");
-    for (;;);
+    while (true);
 }
 
 /*++
@@ -1468,9 +1333,10 @@ static BOOL PROCEndProcess(HANDLE hProcess, UINT uExitCode, BOOL bTerminateUncon
         {
             // abort() has the semantics that
             // (1) it doesn't run atexit handlers
-            // (2) can invoke CrashReporter or produce a coredump,
-            // which is appropriate for TerminateProcess calls
-            PROCAbort();
+            // (2) can invoke CrashReporter or produce a coredump, which is appropriate for TerminateProcess calls
+            // TerminationRequestHandlingRoutine in synchmanager.cpp sets the exit code to this special value. The
+            // Watson analyzer needs to know that the process was terminated with a SIGTERM.
+            PROCAbort(uExitCode == (128 + SIGTERM) ? SIGTERM : SIGABRT);
         }
         else
         {
@@ -1870,14 +1736,20 @@ public:
             TRACE("sem_wait(startup)\n");
 
             // Wait until the coreclr runtime (debuggee) starts up
-            if (sem_wait(m_startupSem) == 0)
+            while (sem_wait(m_startupSem) != 0)
             {
-                pe = InvokeStartupCallback();
-            }
-            else
-            {
+                if (EINTR == errno)
+                {
+                    TRACE("sem_wait() failed with EINTR; re-waiting");
+                    continue;
+                }
                 TRACE("sem_wait(startup) failed: errno is %d (%s)\n", errno, strerror(errno));
                 pe = GetSemError();
+            }
+
+            if (pe == NO_ERROR)
+            {
+                pe = InvokeStartupCallback();
             }
         }
 
@@ -2040,8 +1912,13 @@ PAL_NotifyRuntimeStarted()
     }
 
     // Now wait until the debugger's runtime startup notification is finished
-    if (sem_wait(continueSem) != 0)
+    while (sem_wait(continueSem) != 0)
     {
+        if (EINTR == errno)
+        {
+            TRACE("sem_wait() failed with EINTR; re-waiting");
+            continue;
+        }
         ASSERT("sem_wait(continueSem) failed: errno is %d (%s)\n", errno, strerror(errno));
         goto exit;
     }
@@ -3181,16 +3058,74 @@ Function
 
 (no return value)
 --*/
-__attribute__((destructor))
 VOID
-PROCNotifyProcessShutdown()
+PROCNotifyProcessShutdown(bool isExecutingOnAltStack)
 {
     // Call back into the coreclr to clean up the debugger transport pipes
     PSHUTDOWN_CALLBACK callback = InterlockedExchangePointer(&g_shutdownCallback, NULL);
     if (callback != NULL)
     {
-        callback();
+        callback(isExecutingOnAltStack);
     }
+}
+
+/*++
+Function
+  PROCNotifyProcessShutdownDestructor
+
+  Called at process exit, invokes process shutdown notification
+
+(no return value)
+--*/
+__attribute__((destructor))
+VOID
+PROCNotifyProcessShutdownDestructor()
+{
+    PROCNotifyProcessShutdown(/* isExecutingOnAltStack */ false);
+}
+
+/*++
+Function:
+    PROCFormatInt
+
+    Helper function to format an ULONG32 as a string.
+
+--*/
+char*
+PROCFormatInt(ULONG32 value)
+{
+    char* buffer = (char*)InternalMalloc(128);
+    if (buffer != nullptr)
+    {
+        if (sprintf_s(buffer, 128, "%d", value) == -1)
+        {
+            free(buffer);
+            buffer = nullptr;
+        }
+    }
+    return buffer;
+}
+
+/*++
+Function:
+    PROCFormatInt64
+
+    Helper function to format an ULONG64 as a string.
+
+--*/
+char*
+PROCFormatInt64(ULONG64 value)
+{
+    char* buffer = (char*)InternalMalloc(128);
+    if (buffer != nullptr)
+    {
+        if (sprintf_s(buffer, 128, "%lld", value) == -1)
+        {
+            free(buffer);
+            buffer = nullptr;
+        }
+    }
+    return buffer;
 }
 
 /*++
@@ -3206,12 +3141,12 @@ Return
 --*/
 BOOL
 PROCBuildCreateDumpCommandLine(
-    const char** argv,
+    std::vector<const char*>& argv,
     char** pprogram,
     char** ppidarg,
-    char* dumpName,
-    char* dumpType,
-    BOOL diag)
+    const char* dumpName,
+    const char* dumpType,
+    ULONG32 flags)
 {
     if (g_szCoreCLRPath == nullptr)
     {
@@ -3241,50 +3176,56 @@ PROCBuildCreateDumpCommandLine(
     {
         return FALSE;
     }
-    char* pidarg = *ppidarg = (char*)InternalMalloc(128);
-    if (pidarg == nullptr)
+    *ppidarg = PROCFormatInt(gPID);
+    if (*ppidarg == nullptr)
     {
         return FALSE;
     }
-    if (sprintf_s(pidarg, 128, "%d", gPID) == -1)
-    {
-        return FALSE;
-    }
-    *argv++ = program;
+    argv.push_back(program);
 
     if (dumpName != nullptr)
     {
-        *argv++ = "--name";
-        *argv++ = dumpName;
+        argv.push_back("--name");
+        argv.push_back(dumpName);
     }
 
     if (dumpType != nullptr)
     {
         if (strcmp(dumpType, "1") == 0)
         {
-            *argv++ = "--normal";
+            argv.push_back("--normal");
         }
         else if (strcmp(dumpType, "2") == 0)
         {
-            *argv++ = "--withheap";
+            argv.push_back("--withheap");
         }
         else if (strcmp(dumpType, "3") == 0)
         {
-            *argv++ = "--triage";
+            argv.push_back("--triage");
         }
         else if (strcmp(dumpType, "4") == 0)
         {
-            *argv++ = "--full";
+            argv.push_back("--full");
         }
     }
 
-    if (diag)
+    if (flags & GenerateDumpFlagsLoggingEnabled)
     {
-        *argv++ = "--diag";
+        argv.push_back("--diag");
     }
 
-    *argv++ = pidarg;
-    *argv = nullptr;
+    if (flags & GenerateDumpFlagsVerboseLoggingEnabled)
+    {
+        argv.push_back("--verbose");
+    }
+
+    if (flags & GenerateDumpFlagsCrashReportEnabled)
+    {
+        argv.push_back("--crashreport");
+    }
+
+    argv.push_back(*ppidarg);
+    argv.push_back(nullptr);
 
     return TRUE;
 }
@@ -3299,7 +3240,7 @@ Function:
 (no return value)
 --*/
 BOOL
-PROCCreateCrashDump(char** argv)
+PROCCreateCrashDump(std::vector<const char*>& argv)
 {
     // Fork the core dump child process.
     pid_t childpid = fork();
@@ -3313,7 +3254,7 @@ PROCCreateCrashDump(char** argv)
     else if (childpid == 0)
     {
         // Child process
-        if (execve(argv[0], argv, palEnvironment) == -1)
+        if (execve(argv[0], (char**)argv.data(), palEnvironment) == -1)
         {
             ERROR("PROCCreateCrashDump: execve() FAILED %d (%s)\n", errno, strerror(errno));
             return false;
@@ -3367,10 +3308,26 @@ PROCAbortInitialize()
         char* dumpType = getenv("COMPlus_DbgMiniDumpType");
         char* diagStr = getenv("COMPlus_CreateDumpDiagnostics");
         BOOL diag = diagStr != nullptr && strcmp(diagStr, "1") == 0;
+        char* verboseStr = getenv("COMPlus_CreateDumpVerboseDiagnostics");
+        BOOL verbose = verboseStr != nullptr && strcmp(verboseStr, "1") == 0;
+        char* crashReportStr = getenv("COMPlus_EnableCrashReport");
+        BOOL crashReport = crashReportStr != nullptr && strcmp(crashReportStr, "1") == 0;
+        ULONG32 flags = GenerateDumpFlagsNone;
+        if (diag)
+        {
+            flags |= GenerateDumpFlagsLoggingEnabled;
+        }
+        if (verbose)
+        {
+            flags |= GenerateDumpFlagsVerboseLoggingEnabled;
+        }
+        if (crashReport)
+        {
+            flags |= GenerateDumpFlagsCrashReportEnabled;
+        }
         char* program = nullptr;
         char* pidarg = nullptr;
-
-        if (!PROCBuildCreateDumpCommandLine((const char **)g_argvCreateDump, &program, &pidarg, dumpName, dumpType, diag))
+        if (!PROCBuildCreateDumpCommandLine(g_argvCreateDump, &program, &pidarg, dumpName, dumpType, flags))
         {
             return FALSE;
         }
@@ -3392,8 +3349,8 @@ Parameters:
         WithHeap = 2,
         Triage = 3,
         Full = 4
-    diag
-        true - log createdump diagnostics to console
+    flags
+        See enum
 
 Return:
     TRUE success
@@ -3403,9 +3360,9 @@ BOOL
 PAL_GenerateCoreDump(
     LPCSTR dumpName,
     INT dumpType,
-    BOOL diag)
+    ULONG32 flags)
 {
-    char* argvCreateDump[8] = { nullptr };
+    std::vector<const char*> argvCreateDump;
     char dumpTypeStr[16];
 
     if (dumpType < 1 || dumpType > 4)
@@ -3422,7 +3379,7 @@ PAL_GenerateCoreDump(
     }
     char* program = nullptr;
     char* pidarg = nullptr;
-    BOOL result = PROCBuildCreateDumpCommandLine((const char **)argvCreateDump, &program, &pidarg, (char*)dumpName, dumpTypeStr, diag);
+    BOOL result = PROCBuildCreateDumpCommandLine(argvCreateDump, &program, &pidarg, dumpName, dumpTypeStr, flags);
     if (result)
     {
         result = PROCCreateCrashDump(argvCreateDump);
@@ -3439,15 +3396,77 @@ Function:
   Creates crash dump of the process (if enabled). Can be
   called from the unhandled native exception handler.
 
+Parameters:
+  signal - POSIX signal number
+
 (no return value)
 --*/
 VOID
-PROCCreateCrashDumpIfEnabled()
+PROCCreateCrashDumpIfEnabled(int signal, siginfo_t* siginfo)
 {
     // If enabled, launch the create minidump utility and wait until it completes
-    if (g_argvCreateDump[0] != nullptr)
+    if (!g_argvCreateDump.empty())
     {
-        PROCCreateCrashDump(g_argvCreateDump);
+        std::vector<const char*> argv(g_argvCreateDump);
+        char* signalArg = nullptr;
+        char* crashThreadArg = nullptr;
+        char* signalCodeArg = nullptr;
+        char* signalErrnoArg = nullptr;
+        char* signalAddressArg = nullptr;
+
+        if (signal != 0)
+        {
+            // Remove the terminating nullptr
+            argv.pop_back();
+
+            // Add the signal number to the command line
+            signalArg = PROCFormatInt(signal);
+            if (signalArg != nullptr)
+            {
+                argv.push_back("--signal");
+                argv.push_back(signalArg);
+            }
+
+            // Add the current thread id to the command line. This function is always called on the crashing thread.
+            crashThreadArg = PROCFormatInt(THREADSilentGetCurrentThreadId());
+            if (crashThreadArg != nullptr)
+            {
+                argv.push_back("--crashthread");
+                argv.push_back(crashThreadArg);
+            }
+
+            if (siginfo != nullptr)
+            {
+                signalCodeArg = PROCFormatInt(siginfo->si_code);
+                if (signalCodeArg != nullptr)
+                {
+                    argv.push_back("--code");
+                    argv.push_back(signalCodeArg);
+                }
+                signalErrnoArg = PROCFormatInt(siginfo->si_errno);
+                if (signalErrnoArg != nullptr)
+                {
+                    argv.push_back("--errno");
+                    argv.push_back(signalErrnoArg);
+                }
+                signalAddressArg = PROCFormatInt64((ULONG64)siginfo->si_addr);
+                if (signalAddressArg != nullptr)
+                {
+                    argv.push_back("--address");
+                    argv.push_back(signalAddressArg);
+                }
+            }
+
+            argv.push_back(nullptr);
+        }
+
+        PROCCreateCrashDump(argv);
+
+        free(signalArg);
+        free(crashThreadArg);
+        free(signalCodeArg);
+        free(signalErrnoArg);
+        free(signalAddressArg);
     }
 }
 
@@ -3458,16 +3477,23 @@ Function:
   Aborts the process after calling the shutdown cleanup handler. This function
   should be called instead of calling abort() directly.
 
+Parameters:
+  signal - POSIX signal number
+
   Does not return
 --*/
 PAL_NORETURN
 VOID
-PROCAbort()
+PROCAbort(int signal, siginfo_t* siginfo)
 {
     // Do any shutdown cleanup before aborting or creating a core dump
     PROCNotifyProcessShutdown();
 
-    PROCCreateCrashDumpIfEnabled();
+    PROCCreateCrashDumpIfEnabled(signal, siginfo);
+
+    // Restore all signals; the SIGABORT handler to prevent recursion and
+    // the others to prevent multiple core dumps from being generated.
+    SEHCleanupSignals();
 
     // Abort the process after waiting for the core dump to complete
     abort();
@@ -3502,6 +3528,9 @@ InitializeFlushProcessWriteBuffers()
         }
     }
 
+#ifdef TARGET_OSX
+    return TRUE;
+#else
     s_helperPage = static_cast<int*>(mmap(0, GetVirtualPageSize(), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
 
     if(s_helperPage == MAP_FAILED)
@@ -3529,6 +3558,7 @@ InitializeFlushProcessWriteBuffers()
     }
 
     return status == 0;
+#endif // TARGET_OSX
 }
 
 #define FATAL_ASSERT(e, msg) \
@@ -3557,7 +3587,7 @@ FlushProcessWriteBuffers()
         int status = membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
         FATAL_ASSERT(status == 0, "Failed to flush using membarrier");
     }
-    else
+    else if (s_helperPage != 0)
     {
         int status = pthread_mutex_lock(&flushProcessWriteBuffersMutex);
         FATAL_ASSERT(status == 0, "Failed to lock the flushProcessWriteBuffersMutex lock");
@@ -3578,6 +3608,33 @@ FlushProcessWriteBuffers()
         status = pthread_mutex_unlock(&flushProcessWriteBuffersMutex);
         FATAL_ASSERT(status == 0, "Failed to unlock the flushProcessWriteBuffersMutex lock");
     }
+#ifdef TARGET_OSX
+    else
+    {
+        mach_msg_type_number_t cThreads;
+        thread_act_t *pThreads;
+        kern_return_t machret = task_threads(mach_task_self(), &pThreads, &cThreads);
+        CHECK_MACH("task_threads()", machret);
+
+        uintptr_t sp;
+        uintptr_t registerValues[128];
+
+        // Iterate through each of the threads in the list.
+        for (mach_msg_type_number_t i = 0; i < cThreads; i++)
+        {
+            // Request the threads pointer values to force the thread to emit a memory barrier
+            size_t registers = 128;
+            machret = thread_get_register_pointer_values(pThreads[i], &sp, &registers, registerValues);
+            if (machret == KERN_INSUFFICIENT_BUFFER_SIZE)
+            {
+                CHECK_MACH("thread_get_register_pointer_values()", machret);
+            }
+        }
+        // Deallocate the thread list now we're done with it.
+        machret = vm_deallocate(mach_task_self(), (vm_address_t)pThreads, cThreads * sizeof(thread_act_t));
+        CHECK_MACH("vm_deallocate()", machret);
+    }
+#endif // TARGET_OSX
 }
 
 /*++
@@ -4260,7 +4317,7 @@ PROCGetProcessStatus(
             // have to try again. A second legitimate cause is ECHILD, which
             // happens if we're trying to retrieve the status of a currently-
             // running process that isn't a child of this process.
-            if(EINTR == errno)
+            if (EINTR == errno)
             {
                 TRACE("waitpid() failed with EINTR; re-waiting");
                 continue;

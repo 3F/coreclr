@@ -38,19 +38,21 @@ namespace System.Reflection.Emit
             return fieldBuilder;
         }
 
+        [return: DynamicallyAccessedMembersAttribute(DynamicallyAccessedMemberTypes.All)]
         public TypeInfo? CreateTypeInfo()
         {
             return m_typeBuilder.CreateTypeInfo();
         }
 
         // CreateType cause EnumBuilder to be baked.
+        [return: DynamicallyAccessedMembersAttribute(DynamicallyAccessedMemberTypes.All)]
         public Type? CreateType()
         {
             return m_typeBuilder.CreateType();
         }
 
         // Get the internal metadata token for this class.
-        public TypeToken TypeToken => m_typeBuilder.TypeToken;
+        internal int TypeToken => m_typeBuilder.TypeToken;
 
 
         // return the underlying field for the enum
@@ -135,11 +137,14 @@ namespace System.Reflection.Emit
             return m_typeBuilder.GetFields(bindingAttr);
         }
 
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
+        [return: DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
         public override Type? GetInterface(string name, bool ignoreCase)
         {
             return m_typeBuilder.GetInterface(name, ignoreCase);
         }
 
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.Interfaces)]
         public override Type[] GetInterfaces()
         {
             return m_typeBuilder.GetInterfaces();
@@ -182,19 +187,19 @@ namespace System.Reflection.Emit
             return m_typeBuilder.GetNestedType(name, bindingAttr);
         }
 
-        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
+        [DynamicallyAccessedMembers(GetAllMembers)]
         public override MemberInfo[] GetMember(string name, MemberTypes type, BindingFlags bindingAttr)
         {
             return m_typeBuilder.GetMember(name, type, bindingAttr);
         }
 
-       [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)]
+        [DynamicallyAccessedMembers(GetAllMembers)]
         public override MemberInfo[] GetMembers(BindingFlags bindingAttr)
         {
             return m_typeBuilder.GetMembers(bindingAttr);
         }
 
-        public override InterfaceMapping GetInterfaceMap(Type interfaceType)
+        public override InterfaceMapping GetInterfaceMap([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type interfaceType)
         {
             return m_typeBuilder.GetInterfaceMap(interfaceType);
         }
@@ -332,6 +337,8 @@ namespace System.Reflection.Emit
 
         // Constructs a EnumBuilder.
         // EnumBuilder can only be a top-level (not nested) enum type.
+        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2064:UnrecognizedReflectionPattern",
+            Justification = "Reflection.Emit is not subject to trimming")]
         internal EnumBuilder(
             string name,                       // name of type
             Type underlyingType,             // underlying type for an Enum

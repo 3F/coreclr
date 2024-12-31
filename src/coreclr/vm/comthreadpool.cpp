@@ -123,6 +123,135 @@ DelegateInfo *DelegateInfo::MakeDelegateInfo(OBJECTREF *state,
 }
 
 /*****************************************************************************************************/
+// Enumerates some runtime config variables that are used by CoreLib for initialization. The config variable index should start
+// at 0 to begin enumeration. If a config variable at or after the specified config variable index is configured, returns the
+// next config variable index to pass in on the next call to continue enumeration.
+FCIMPL4(INT32, ThreadPoolNative::GetNextConfigUInt32Value,
+    INT32 configVariableIndex,
+    UINT32 *configValueRef,
+    BOOL *isBooleanRef,
+    LPCWSTR *appContextConfigNameRef)
+{
+    FCALL_CONTRACT;
+    _ASSERTE(configVariableIndex >= 0);
+    _ASSERTE(configValueRef != NULL);
+    _ASSERTE(isBooleanRef != NULL);
+    _ASSERTE(appContextConfigNameRef != NULL);
+
+    if (!ThreadpoolMgr::UsePortableThreadPool())
+    {
+        *configValueRef = 0;
+        *isBooleanRef = false;
+        *appContextConfigNameRef = NULL;
+        return -1;
+    }
+
+    auto TryGetConfig =
+        [=](const CLRConfig::ConfigDWORDInfo &configInfo, bool isBoolean, const WCHAR *appContextConfigName) -> bool
+    {
+        bool wasNotConfigured = true;
+        *configValueRef = CLRConfig::GetConfigValue(configInfo, &wasNotConfigured);
+        if (wasNotConfigured)
+        {
+            return false;
+        }
+
+        *isBooleanRef = isBoolean;
+        *appContextConfigNameRef = appContextConfigName;
+        return true;
+    };
+
+    switch (configVariableIndex)
+    {
+        case 0:
+            // Special case for UsePortableThreadPool, which doesn't go into the AppContext
+            *configValueRef = 1;
+            *isBooleanRef = true;
+            *appContextConfigNameRef = NULL;
+            return 1;
+
+        case 1: if (TryGetConfig(CLRConfig::INTERNAL_ThreadPool_ForceMinWorkerThreads, false, W("System.Threading.ThreadPool.MinThreads"))) { return 2; } FALLTHROUGH;
+        case 2: if (TryGetConfig(CLRConfig::INTERNAL_ThreadPool_ForceMaxWorkerThreads, false, W("System.Threading.ThreadPool.MaxThreads"))) { return 3; } FALLTHROUGH;
+        case 3: if (TryGetConfig(CLRConfig::INTERNAL_ThreadPool_DisableStarvationDetection, true, W("System.Threading.ThreadPool.DisableStarvationDetection"))) { return 4; } FALLTHROUGH;
+        case 4: if (TryGetConfig(CLRConfig::INTERNAL_ThreadPool_DebugBreakOnWorkerStarvation, true, W("System.Threading.ThreadPool.DebugBreakOnWorkerStarvation"))) { return 5; } FALLTHROUGH;
+        case 5: if (TryGetConfig(CLRConfig::INTERNAL_ThreadPool_EnableWorkerTracking, true, W("System.Threading.ThreadPool.EnableWorkerTracking"))) { return 6; } FALLTHROUGH;
+        case 6: if (TryGetConfig(CLRConfig::INTERNAL_ThreadPool_UnfairSemaphoreSpinLimit, false, W("System.Threading.ThreadPool.UnfairSemaphoreSpinLimit"))) { return 7; } FALLTHROUGH;
+
+        case 7: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_Disable, true, W("System.Threading.ThreadPool.HillClimbing.Disable"))) { return 8; } FALLTHROUGH;
+        case 8: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_WavePeriod, false, W("System.Threading.ThreadPool.HillClimbing.WavePeriod"))) { return 9; } FALLTHROUGH;
+        case 9: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_TargetSignalToNoiseRatio, false, W("System.Threading.ThreadPool.HillClimbing.TargetSignalToNoiseRatio"))) { return 10; } FALLTHROUGH;
+        case 10: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_ErrorSmoothingFactor, false, W("System.Threading.ThreadPool.HillClimbing.ErrorSmoothingFactor"))) { return 11; } FALLTHROUGH;
+        case 11: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_WaveMagnitudeMultiplier, false, W("System.Threading.ThreadPool.HillClimbing.WaveMagnitudeMultiplier"))) { return 12; } FALLTHROUGH;
+        case 12: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_MaxWaveMagnitude, false, W("System.Threading.ThreadPool.HillClimbing.MaxWaveMagnitude"))) { return 13; } FALLTHROUGH;
+        case 13: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_WaveHistorySize, false, W("System.Threading.ThreadPool.HillClimbing.WaveHistorySize"))) { return 14; } FALLTHROUGH;
+        case 14: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_Bias, false, W("System.Threading.ThreadPool.HillClimbing.Bias"))) { return 15; } FALLTHROUGH;
+        case 15: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_MaxChangePerSecond, false, W("System.Threading.ThreadPool.HillClimbing.MaxChangePerSecond"))) { return 16; } FALLTHROUGH;
+        case 16: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_MaxChangePerSample, false, W("System.Threading.ThreadPool.HillClimbing.MaxChangePerSample"))) { return 17; } FALLTHROUGH;
+        case 17: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_MaxSampleErrorPercent, false, W("System.Threading.ThreadPool.HillClimbing.MaxSampleErrorPercent"))) { return 18; } FALLTHROUGH;
+        case 18: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_SampleIntervalLow, false, W("System.Threading.ThreadPool.HillClimbing.SampleIntervalLow"))) { return 19; } FALLTHROUGH;
+        case 19: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_SampleIntervalHigh, false, W("System.Threading.ThreadPool.HillClimbing.SampleIntervalHigh"))) { return 20; } FALLTHROUGH;
+        case 20: if (TryGetConfig(CLRConfig::INTERNAL_HillClimbing_GainExponent, false, W("System.Threading.ThreadPool.HillClimbing.GainExponent"))) { return 21; } FALLTHROUGH;
+
+        case 21:
+        {
+            int threadPoolThreadTimeoutMs = g_pConfig->ThreadPoolThreadTimeoutMs();
+            if (threadPoolThreadTimeoutMs >= -1)
+            {
+                *configValueRef = (UINT32)threadPoolThreadTimeoutMs;
+                *isBooleanRef = false;
+                *appContextConfigNameRef = W("System.Threading.ThreadPool.ThreadTimeoutMs");
+                return 22;
+            }
+
+            FALLTHROUGH;
+        }
+
+        case 22:
+        {
+            int threadPoolThreadsToKeepAlive = g_pConfig->ThreadPoolThreadsToKeepAlive();
+            if (threadPoolThreadsToKeepAlive >= -1)
+            {
+                *configValueRef = (UINT32)threadPoolThreadsToKeepAlive;
+                *isBooleanRef = false;
+                *appContextConfigNameRef = W("System.Threading.ThreadPool.ThreadsToKeepAlive");
+                return 23;
+            }
+
+            FALLTHROUGH;
+        }
+
+        default:
+            *configValueRef = 0;
+            *isBooleanRef = false;
+            *appContextConfigNameRef = NULL;
+            return -1;
+    }
+}
+FCIMPLEND
+
+/*****************************************************************************************************/
+FCIMPL1(FC_BOOL_RET, ThreadPoolNative::CorCanSetMinIOCompletionThreads, DWORD ioCompletionThreads)
+{
+    FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, ThreadpoolMgr::UsePortableThreadPool());
+
+    BOOL result = ThreadpoolMgr::CanSetMinIOCompletionThreads(ioCompletionThreads);
+    FC_RETURN_BOOL(result);
+}
+FCIMPLEND
+
+/*****************************************************************************************************/
+FCIMPL1(FC_BOOL_RET, ThreadPoolNative::CorCanSetMaxIOCompletionThreads, DWORD ioCompletionThreads)
+{
+    FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, ThreadpoolMgr::UsePortableThreadPool());
+
+    BOOL result = ThreadpoolMgr::CanSetMaxIOCompletionThreads(ioCompletionThreads);
+    FC_RETURN_BOOL(result);
+}
+FCIMPLEND
+
+/*****************************************************************************************************/
 FCIMPL2(FC_BOOL_RET, ThreadPoolNative::CorSetMaxThreads,DWORD workerThreads, DWORD completionPortThreads)
 {
     FCALL_CONTRACT;
@@ -207,6 +336,8 @@ INT64 QCALLTYPE ThreadPoolNative::GetCompletedWorkItemCount()
 FCIMPL0(INT64, ThreadPoolNative::GetPendingUnmanagedWorkItemCount)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
+
     return PerAppDomainTPCountList::GetUnmanagedTPCount()->GetNumRequests();
 }
 FCIMPLEND
@@ -216,6 +347,7 @@ FCIMPLEND
 FCIMPL0(VOID, ThreadPoolNative::NotifyRequestProgress)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
     _ASSERTE(ThreadpoolMgr::IsInitialized()); // can't be here without requesting a thread first
 
     ThreadpoolMgr::NotifyWorkItemCompleted();
@@ -240,6 +372,8 @@ FCIMPLEND
 FCIMPL1(VOID, ThreadPoolNative::ReportThreadStatus, CLR_BOOL isWorking)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
+
     ThreadpoolMgr::ReportThreadStatus(isWorking);
 }
 FCIMPLEND
@@ -247,6 +381,7 @@ FCIMPLEND
 FCIMPL0(FC_BOOL_RET, ThreadPoolNative::NotifyRequestComplete)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
     _ASSERTE(ThreadpoolMgr::IsInitialized()); // can't be here without requesting a thread first
 
     ThreadpoolMgr::NotifyWorkItemCompleted();
@@ -259,7 +394,6 @@ FCIMPL0(FC_BOOL_RET, ThreadPoolNative::NotifyRequestComplete)
     // we need a thread adjustment, before setting up the frame.
     //
     Thread *pThread = GetThread();
-    _ASSERTE (pThread);
 
     INT32 priority = pThread->ResetManagedThreadObjectInCoopMode(ThreadNative::PRIORITY_NORMAL);
 
@@ -309,6 +443,7 @@ FCIMPLEND
 FCIMPL0(FC_BOOL_RET, ThreadPoolNative::GetEnableWorkerTracking)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
 
     BOOL result = CLRConfig::GetConfigValue(CLRConfig::INTERNAL_ThreadPool_EnableWorkerTracking) ? TRUE : FALSE;
     FC_RETURN_BOOL(result);
@@ -361,7 +496,7 @@ RegisterWaitForSingleObjectCallback_Worker(LPVOID ptr)
 
 VOID NTAPI RegisterWaitForSingleObjectCallback(PVOID delegateInfo, BOOLEAN TimerOrWaitFired)
 {
-    Thread* pThread = GetThread();
+    Thread* pThread = GetThreadNULLOk();
     if (pThread == NULL)
     {
         ClrFlsSetThreadType(ThreadType_Threadpool_Worker);
@@ -396,6 +531,7 @@ FCIMPL5(LPVOID, ThreadPoolNative::CorRegisterWaitForSingleObject,
                                         Object* registeredWaitObjectUNSAFE)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
 
     HANDLE handle = 0;
     struct _gc
@@ -420,7 +556,6 @@ FCIMPL5(LPVOID, ThreadPoolNative::CorRegisterWaitForSingleObject,
     _ASSERTE(hWaitHandle);
 
     Thread* pCurThread = GetThread();
-    _ASSERTE( pCurThread);
 
     DelegateInfoHolder delegateInfo = DelegateInfo::MakeDelegateInfo(
                                                                 &gc.state,
@@ -446,6 +581,26 @@ FCIMPL5(LPVOID, ThreadPoolNative::CorRegisterWaitForSingleObject,
 }
 FCIMPLEND
 
+#ifdef TARGET_WINDOWS // the IO completion thread pool is currently only available on Windows
+FCIMPL1(void, ThreadPoolNative::CorQueueWaitCompletion, Object* completeWaitWorkItemObjectUNSAFE)
+{
+    FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, ThreadpoolMgr::UsePortableThreadPool());
+
+    OBJECTREF completeWaitWorkItemObject = ObjectToOBJECTREF(completeWaitWorkItemObjectUNSAFE);
+    HELPER_METHOD_FRAME_BEGIN_1(completeWaitWorkItemObject);
+
+    _ASSERTE(completeWaitWorkItemObject != NULL);
+
+    OBJECTHANDLE completeWaitWorkItemObjectHandle = GetAppDomain()->CreateHandle(completeWaitWorkItemObject);
+    ThreadpoolMgr::PostQueuedCompletionStatus(
+        (LPOVERLAPPED)completeWaitWorkItemObjectHandle,
+        ThreadpoolMgr::ManagedWaitIOCompletionCallback);
+
+    HELPER_METHOD_FRAME_END();
+}
+FCIMPLEND
+#endif // TARGET_WINDOWS
 
 VOID QueueUserWorkItemManagedCallback(PVOID pArg)
 {
@@ -473,6 +628,8 @@ BOOL QCALLTYPE ThreadPoolNative::RequestWorkerThread()
 
     BEGIN_QCALL;
 
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
+
     ThreadpoolMgr::EnsureInitialized();
     ThreadpoolMgr::SetAppDomainRequestsActive();
 
@@ -492,12 +649,30 @@ BOOL QCALLTYPE ThreadPoolNative::RequestWorkerThread()
     return res;
 }
 
+BOOL QCALLTYPE ThreadPoolNative::PerformGateActivities(INT32 cpuUtilization)
+{
+    QCALL_CONTRACT;
+
+    bool needGateThread = false;
+
+    BEGIN_QCALL;
+
+    _ASSERTE_ALL_BUILDS(__FILE__, ThreadpoolMgr::UsePortableThreadPool());
+
+    ThreadpoolMgr::PerformGateActivities(cpuUtilization);
+    needGateThread = ThreadpoolMgr::NeedGateThreadForIOCompletions();
+
+    END_QCALL;
+
+    return needGateThread;
+}
 
 /********************************************************************************************************************/
 
 FCIMPL2(FC_BOOL_RET, ThreadPoolNative::CorUnregisterWait, LPVOID WaitHandle, Object* objectToNotify)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
 
     BOOL retVal = false;
     SAFEHANDLEREF refSH = (SAFEHANDLEREF) ObjectToOBJECTREF(objectToNotify);
@@ -553,6 +728,7 @@ FCIMPLEND
 FCIMPL1(void, ThreadPoolNative::CorWaitHandleCleanupNative, LPVOID WaitHandle)
 {
     FCALL_CONTRACT;
+    _ASSERTE_ALL_BUILDS(__FILE__, !ThreadpoolMgr::UsePortableThreadPool());
 
     HELPER_METHOD_FRAME_BEGIN_0();
 
@@ -565,6 +741,18 @@ FCIMPLEND
 
 /********************************************************************************************************************/
 
+void QCALLTYPE ThreadPoolNative::ExecuteUnmanagedThreadPoolWorkItem(LPTHREAD_START_ROUTINE callback, LPVOID state)
+{
+    QCALL_CONTRACT;
+
+    BEGIN_QCALL;
+
+    _ASSERTE_ALL_BUILDS(__FILE__, ThreadpoolMgr::UsePortableThreadPool());
+    callback(state);
+
+    END_QCALL;
+}
+
 /********************************************************************************************************************/
 
 struct BindIoCompletion_Args
@@ -573,17 +761,6 @@ struct BindIoCompletion_Args
     DWORD numBytesTransferred;
     LPOVERLAPPED lpOverlapped;
 };
-
-void SetAsyncResultProperties(
-    OVERLAPPEDDATAREF overlapped,
-    DWORD dwErrorCode,
-    DWORD dwNumBytes
-)
-{
-    STATIC_CONTRACT_THROWS;
-    STATIC_CONTRACT_GC_NOTRIGGER;
-    STATIC_CONTRACT_MODE_ANY;
-}
 
 VOID BindIoCompletionCallBack_Worker(LPVOID args)
 {
@@ -621,9 +798,6 @@ VOID BindIoCompletionCallBack_Worker(LPVOID args)
     {
         // no user delegate to callback
         _ASSERTE((overlapped->m_callback == NULL) || !"This is benign, but should be optimized");
-
-
-        SetAsyncResultProperties(overlapped, ErrorCode, numBytesTransferred);
     }
     GCPROTECT_END();
 }
@@ -633,7 +807,7 @@ void __stdcall BindIoCompletionCallbackStubEx(DWORD ErrorCode,
                                               LPOVERLAPPED lpOverlapped,
                                               BOOL setStack)
 {
-    Thread* pThread = GetThread();
+    Thread* pThread = GetThreadNULLOk();
     if (pThread == NULL)
     {
         // TODO: how do we notify user of OOM here?
@@ -668,21 +842,6 @@ void WINAPI BindIoCompletionCallbackStub(DWORD ErrorCode,
 {
     WRAPPER_NO_CONTRACT;
     BindIoCompletionCallbackStubEx(ErrorCode, numBytesTransferred, lpOverlapped, TRUE);
-
-#ifndef TARGET_UNIX
-    extern Volatile<ULONG> g_fCompletionPortDrainNeeded;
-
-    Thread *pThread = GetThread();
-    if (g_fCompletionPortDrainNeeded && pThread)
-    {
-        // We have started draining completion port.
-        // The next job picked up by this thread is going to be after our special marker.
-        if (!pThread->IsCompletionPortDrained())
-        {
-            pThread->MarkCompletionPortDrained();
-        }
-    }
-#endif // !TARGET_UNIX
 }
 
 FCIMPL1(FC_BOOL_RET, ThreadPoolNative::CorBindIoCompletionCallback, HANDLE fileHandle)
@@ -780,7 +939,7 @@ void AppDomainTimerCallback_Worker(LPVOID ptr)
 
 VOID WINAPI AppDomainTimerCallback(PVOID callbackState, BOOLEAN timerOrWaitFired)
 {
-    Thread* pThread = GetThread();
+    Thread* pThread = GetThreadNULLOk();
     if (pThread == NULL)
     {
         // TODO: how do we notify user of OOM here?

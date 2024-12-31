@@ -964,7 +964,7 @@ size_t DisAssembler::CbDisassemble(DIS*        pdis,
                 }
             }
 
-                __fallthrough;
+                FALLTHROUGH;
 
             case DISX86::trmtaJmpShort:
             case DISX86::trmtaJmpNear:
@@ -1022,7 +1022,7 @@ size_t DisAssembler::CbDisassemble(DIS*        pdis,
                 }
             }
 
-                __fallthrough;
+                FALLTHROUGH;
 
             case DISARM64::TRMTA::trmtaBra:
             case DISARM64::TRMTA::trmtaBraCase:
@@ -1197,7 +1197,7 @@ size_t CbDisassembleWithBytes(DIS* pdis, DIS::ADDR addr, const BYTE* pb, size_t 
 
     for (pwzBytes = wzBytes; pwzBytes != NULL; pwzBytes = pwzNext)
     {
-        BOOL fFirst = (pwzBytes == wzBytes);
+        bool fFirst = (pwzBytes == wzBytes);
 
         cchBytes = wcslen(pwzBytes);
 

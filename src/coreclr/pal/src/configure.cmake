@@ -13,7 +13,10 @@ if(CLR_CMAKE_TARGET_FREEBSD)
 elseif(CLR_CMAKE_TARGET_SUNOS)
   set(CMAKE_REQUIRED_INCLUDES /opt/local/include)
 endif()
-if(NOT CLR_CMAKE_TARGET_OSX AND NOT CLR_CMAKE_TARGET_FREEBSD AND NOT CLR_CMAKE_TARGET_NETBSD)
+
+if(CLR_CMAKE_TARGET_OSX)
+  set(CMAKE_REQUIRED_DEFINITIONS -D_XOPEN_SOURCE)
+elseif(NOT CLR_CMAKE_TARGET_FREEBSD AND NOT CLR_CMAKE_TARGET_NETBSD)
   set(CMAKE_REQUIRED_DEFINITIONS "-D_BSD_SOURCE -D_SVID_SOURCE -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L")
 endif()
 
@@ -44,7 +47,6 @@ check_include_files(runetype.h HAVE_RUNETYPE_H)
 check_include_files(semaphore.h HAVE_SEMAPHORE_H)
 check_include_files(sys/prctl.h HAVE_PRCTL_H)
 check_include_files(numa.h HAVE_NUMA_H)
-check_include_files(pthread_np.h HAVE_PTHREAD_NP_H)
 check_include_files("sys/auxv.h;asm/hwcap.h" HAVE_AUXV_HWCAP_H)
 check_include_files("sys/ptrace.h" HAVE_SYS_PTRACE_H)
 check_symbol_exists(getauxval sys/auxv.h HAVE_GETAUXVAL)
@@ -75,7 +77,6 @@ int main(int argc, char **argv) {
 
 set(CMAKE_REQUIRED_LIBRARIES)
 
-check_include_files(sys/sysctl.h HAVE_SYS_SYSCTL_H)
 check_function_exists(sysctlbyname HAVE_SYSCTLBYNAME)
 check_include_files(gnu/lib-names.h HAVE_GNU_LIBNAMES_H)
 
@@ -111,7 +112,12 @@ set(CMAKE_REQUIRED_LIBRARIES)
 check_function_exists(fsync HAVE_FSYNC)
 check_function_exists(futimes HAVE_FUTIMES)
 check_function_exists(utimes HAVE_UTIMES)
-check_function_exists(sysctl HAVE_SYSCTL)
+if(CLR_CMAKE_TARGET_LINUX)
+  # sysctl is deprecated on Linux
+  set(HAVE_SYSCTL 0)
+else()
+  check_function_exists(sysctl HAVE_SYSCTL)
+endif()
 check_function_exists(sysinfo HAVE_SYSINFO)
 check_function_exists(sysconf HAVE_SYSCONF)
 check_function_exists(gmtime_r HAVE_GMTIME_R)
@@ -446,16 +452,14 @@ set(CMAKE_REQUIRED_LIBRARIES)
 
 check_cxx_source_runs("
 #include <stdlib.h>
-#include <mach/mach_time.h>
+#include <time.h>
 
 int main()
 {
   int ret;
-  mach_timebase_info_data_t timebaseInfo;
-  ret = mach_timebase_info(&timebaseInfo);
-  mach_absolute_time();
-  exit(ret);
-}" HAVE_MACH_ABSOLUTE_TIME)
+  ret = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  exit((ret == 0) ? 1 : 0);
+}" HAVE_CLOCK_GETTIME_NSEC_NP)
 
 set(CMAKE_REQUIRED_LIBRARIES ${CMAKE_RT_LIBS})
 check_cxx_source_runs("
@@ -473,26 +477,6 @@ int main()
 }" HAVE_CLOCK_THREAD_CPUTIME)
 set(CMAKE_REQUIRED_LIBRARIES)
 
-check_cxx_source_runs("
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-
-int main(void) {
-  int devzero;
-  void *retval;
-
-  devzero = open(\"/dev/zero\", O_RDWR);
-  if (-1 == devzero) {
-    exit(1);
-  }
-  retval = mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_SHARED, devzero, 0);
-  if (retval == (void *)-1) {
-    exit(1);
-  }
-  exit(0);
-}" HAVE_MMAP_DEV_ZERO)
 check_cxx_source_runs("
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -1063,6 +1047,15 @@ int main(int argc, char **argv)
 check_symbol_exists(unw_get_save_loc libunwind.h HAVE_UNW_GET_SAVE_LOC)
 check_symbol_exists(unw_get_accessors libunwind.h HAVE_UNW_GET_ACCESSORS)
 
+check_cxx_source_compiles("
+#include <libunwind.h>
+
+int main(int argc, char **argv)
+{
+    int flag = (int)UNW_AARCH64_X19;
+    return 0;
+}" HAVE_UNW_AARCH64_X19)
+
 if(NOT CLR_CMAKE_USE_SYSTEM_LIBUNWIND)
   list(REMOVE_AT CMAKE_REQUIRED_INCLUDES 0 1)
 endif()
@@ -1418,4 +1411,4 @@ check_prototype_definition(
     ${STATFS_INCLUDES}
     HAVE_NON_LEGACY_STATFS)
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/config.h.in ${CMAKE_CURRENT_BINARY_DIR}/config.h)
+configure_file(${CMAKE_CURRENT_LIST_DIR}/config.h.in ${CMAKE_CURRENT_BINARY_DIR}/config.h)

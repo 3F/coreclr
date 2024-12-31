@@ -225,7 +225,8 @@ public:
     virtual void NoteSuccess() = 0;
     virtual void NoteBool(InlineObservation obs, bool value) = 0;
     virtual void NoteFatal(InlineObservation obs) = 0;
-    virtual void NoteInt(InlineObservation obs, int value) = 0;
+    virtual void NoteInt(InlineObservation obs, int value)       = 0;
+    virtual void NoteDouble(InlineObservation obs, double value) = 0;
 
     // Optional observations. Most policies ignore these.
     virtual void NoteContext(InlineContext* context)
@@ -239,12 +240,19 @@ public:
 
     // Policy determinations
     virtual void DetermineProfitability(CORINFO_METHOD_INFO* methodInfo) = 0;
+    virtual bool BudgetCheck() const                                     = 0;
 
     // Policy policies
     virtual bool PropagateNeverToRuntime() const = 0;
 
     // Policy estimates
     virtual int CodeSizeEstimate() = 0;
+
+    // Does Policy require a more precise IL scan?
+    virtual bool RequiresPreciseScan()
+    {
+        return false;
+    }
 
 #if defined(DEBUG) || defined(INLINE_DATA)
 
@@ -261,6 +269,35 @@ public:
     virtual void DumpSchema(FILE* file) const
     {
     }
+
+#define XATTR_I4(x)                                                                                                    \
+    if ((INT32)x != 0)                                                                                                 \
+    {                                                                                                                  \
+        fprintf(file, " " #x "=\"%d\"", (INT32)x);                                                                     \
+    }
+#define XATTR_R8(x)                                                                                                    \
+    if (fabs(x) > 0.01)                                                                                                \
+    {                                                                                                                  \
+        fprintf(file, " " #x "=\"%.2lf\"", x);                                                                         \
+    }
+#define XATTR_B(x)                                                                                                     \
+    if (x)                                                                                                             \
+    {                                                                                                                  \
+        fprintf(file, " " #x "=\"True\"");                                                                             \
+    }
+
+    // Detailed data value dump as XML
+    void DumpXml(FILE* file, unsigned indent = 0)
+    {
+        fprintf(file, "%*s<%s", indent, "", GetName());
+        OnDumpXml(file);
+        fprintf(file, " />\n");
+    }
+
+    virtual void OnDumpXml(FILE* file, unsigned indent = 0) const
+    {
+    }
+
     // True if this is the inline targeted by data collection
     bool IsDataCollectionTarget()
     {
@@ -395,6 +432,12 @@ public:
         m_Policy->NoteInt(obs, value);
     }
 
+    // Make an observation with a double value
+    void NoteDouble(InlineObservation obs, double value)
+    {
+        m_Policy->NoteDouble(obs, value);
+    }
+
 #if defined(DEBUG) || defined(INLINE_DATA)
 
     // Record observation from an earlier failure.
@@ -504,14 +547,26 @@ private:
     bool                  m_Reported;
 };
 
-// GuardedDevirtualizationCandidateInfo provides information about
-// a potential target of a virtual call.
+// ClassProfileCandidateInfo provides information about
+// profiling an indirect or virtual call.
+//
+struct ClassProfileCandidateInfo
+{
+    IL_OFFSET ilOffset;
+    unsigned  probeIndex;
+    void*     stubAddr;
+};
 
-struct GuardedDevirtualizationCandidateInfo
+// GuardedDevirtualizationCandidateInfo provides information about
+// a potential target of a virtual or interface call.
+//
+struct GuardedDevirtualizationCandidateInfo : ClassProfileCandidateInfo
 {
     CORINFO_CLASS_HANDLE  guardedClassHandle;
     CORINFO_METHOD_HANDLE guardedMethodHandle;
-    void*                 stubAddr;
+    CORINFO_METHOD_HANDLE guardedMethodUnboxedEntryHandle;
+    unsigned              likelihood;
+    bool                  requiresInstMethodTableArg;
 };
 
 // InlineCandidateInfo provides basic information about a particular
@@ -519,7 +574,7 @@ struct GuardedDevirtualizationCandidateInfo
 //
 // It is a superset of GuardedDevirtualizationCandidateInfo: calls
 // can start out as GDv candidates and turn into inline candidates
-
+//
 struct InlineCandidateInfo : public GuardedDevirtualizationCandidateInfo
 {
     CORINFO_METHOD_INFO    methInfo;
@@ -540,8 +595,6 @@ struct InlineCandidateInfo : public GuardedDevirtualizationCandidateInfo
 
 struct InlArgInfo
 {
-    unsigned __int64 bbFlags;             // basic block flags that need to be added when replacing GT_RET_EXPR
-                                          // with argNode
     GenTree* argNode;                     // caller node for this argument
     GenTree* argBashTmpNode;              // tmp node created, if it may be replaced with actual arg
     unsigned argTmpNum;                   // the argument tmp number
@@ -557,6 +610,7 @@ struct InlArgInfo
     unsigned argHasStargOp : 1;           // Is there STARG(s) operation on this argument?
     unsigned argIsByRefToStructLocal : 1; // Is this arg an address of a struct local or a normed struct local or a
                                           // field in them?
+    unsigned argIsExact : 1;              // Is this arg of an exact class?
 };
 
 // InlLclVarInfo describes inline candidate argument and local variable properties.
@@ -894,7 +948,7 @@ public:
     }
 
     // Set up or access random state (for use by RandomPolicy)
-    CLRRandom* GetRandom();
+    CLRRandom* GetRandom(int optionalSeed = 0);
 
 #endif // defined(DEBUG) || defined(INLINE_DATA)
 

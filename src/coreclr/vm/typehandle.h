@@ -373,6 +373,8 @@ public:
     bool IsHFA() const;
     CorInfoHFAElemType GetHFAType() const;
 
+    bool IsFloatHfa() const;
+
 #ifdef FEATURE_64BIT_ALIGNMENT
     bool RequiresAlign8() const;
 #endif // FEATURE_64BIT_ALIGNMENT
@@ -752,6 +754,16 @@ public:
     {
         LIMITED_METHOD_DAC_CONTRACT;
         return m_pArgs;
+    }
+
+    bool ContainsAllOneType(TypeHandle th)
+    {
+        for (auto i = GetNumArgs(); i > 0;)
+        {
+            if ((*this)[--i] != th)
+                return false;
+        }
+        return true;
     }
 
 private:

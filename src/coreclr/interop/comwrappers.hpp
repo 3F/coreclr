@@ -1,12 +1,26 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-#ifndef _INTEROP_COMWRAPPERS_H_
-#define _INTEROP_COMWRAPPERS_H_
+#ifndef _INTEROP_COMWRAPPERS_HPP_
+#define _INTEROP_COMWRAPPERS_HPP_
 
 #include "platform.h"
 #include <interoplib.h>
+#include <interoplibabi.h>
 #include "referencetrackertypes.hpp"
+
+#ifndef DEFINE_ENUM_FLAG_OPERATORS
+#define DEFINE_ENUM_FLAG_OPERATORS(ENUMTYPE) \
+extern "C++" { \
+    inline ENUMTYPE operator | (ENUMTYPE a, ENUMTYPE b) { return ENUMTYPE(((int)a)|((int)b)); } \
+    inline ENUMTYPE operator |= (ENUMTYPE &a, ENUMTYPE b) { return (ENUMTYPE &)(((int &)a) |= ((int)b)); } \
+    inline ENUMTYPE operator & (ENUMTYPE a, ENUMTYPE b) { return ENUMTYPE(((int)a)&((int)b)); } \
+    inline ENUMTYPE operator &= (ENUMTYPE &a, ENUMTYPE b) { return (ENUMTYPE &)(((int &)a) &= ((int)b)); } \
+    inline ENUMTYPE operator ~ (ENUMTYPE a) { return (ENUMTYPE)(~((int)a)); } \
+    inline ENUMTYPE operator ^ (ENUMTYPE a, ENUMTYPE b) { return ENUMTYPE(((int)a)^((int)b)); } \
+    inline ENUMTYPE operator ^= (ENUMTYPE &a, ENUMTYPE b) { return (ENUMTYPE &)(((int &)a) ^= ((int)b)); } \
+}
+#endif
 
 enum class CreateComInterfaceFlagsEx : int32_t
 {
@@ -31,23 +45,25 @@ namespace ABI
     struct ComInterfaceEntry;
 }
 
+static constexpr size_t ManagedObjectWrapperRefCountOffset();
+
 // Class for wrapping a managed object and projecting it in a non-managed environment
 class ManagedObjectWrapper
 {
-    friend constexpr size_t RefCountOffset();
+    friend constexpr size_t ManagedObjectWrapperRefCountOffset();
 public:
     Volatile<InteropLib::OBJECTHANDLE> Target;
 
 private:
+    LONGLONG _refCount;
+
     const int32_t _runtimeDefinedCount;
     const int32_t _userDefinedCount;
     const ABI::ComInterfaceEntry* _runtimeDefined;
     const ABI::ComInterfaceEntry* _userDefined;
     ABI::ComInterfaceDispatch* _dispatches;
 
-    LONGLONG _refCount;
     Volatile<CreateComInterfaceFlagsEx> _flags;
-    const ABI::ComInterfaceDispatch* _refTrackerDispatch;
 
 public: // static
     // Get the implementation for IUnknown.
@@ -113,27 +129,33 @@ public: // IReferenceTrackerTarget
 
 public: // Lifetime
     HRESULT QueryInterface(
-        _In_ const ABI::ComInterfaceDispatch* dispatch,
         /* [in] */ REFIID riid,
         /* [iid_is][out] */ _COM_Outptr_ void __RPC_FAR * __RPC_FAR * ppvObject);
     ULONG AddRef(void);
     ULONG Release(void);
 };
 
-// The Target and _refCount fields are used by the DAC, any changes to the layout must be updated on the DAC side (request.cpp)
-static constexpr size_t DACTargetOffset = 0;
-static_assert(offsetof(ManagedObjectWrapper, Target) == DACTargetOffset, "Keep in sync with DAC interfaces");
-static constexpr size_t DACRefCountOffset = (4 * sizeof(intptr_t)) + (2 * sizeof(int32_t));
-static constexpr size_t RefCountOffset()
+// ABI contract. This below offset is assumed in managed code and the DAC.
+ABI_ASSERT(offsetof(ManagedObjectWrapper, Target) == 0);
+
+static constexpr size_t ManagedObjectWrapperRefCountOffset()
 {
-    // _refCount is a private field and offsetof won't let you look at private fields. To overcome
-    // this RefCountOffset() is a friend function.
+    // _refCount is a private field and offsetof won't let you look at private fields.
+    // To overcome, this function is a friend function of ManagedObjectWrapper.
     return offsetof(ManagedObjectWrapper, _refCount);
 }
-static_assert(RefCountOffset() == DACRefCountOffset, "Keep in sync with DAC interfaces");
 
-// ABI contract. This below offset is assumed in managed code.
-ABI_ASSERT(offsetof(ManagedObjectWrapper, Target) == 0);
+// ABI contract used by the DAC.
+ABI_ASSERT(offsetof(ManagedObjectWrapper, Target) == offsetof(InteropLib::ABI::ManagedObjectWrapperLayout, ManagedObject));
+ABI_ASSERT(ManagedObjectWrapperRefCountOffset() == offsetof(InteropLib::ABI::ManagedObjectWrapperLayout, RefCount));
+
+// State ownership mechanism.
+enum class TrackerObjectState
+{
+    NotSet,
+    SetNoRelease,
+    SetForRelease,
+};
 
 // Class for connecting a native COM object to a managed object instance
 class NativeObjectWrapperContext
@@ -141,7 +163,7 @@ class NativeObjectWrapperContext
     IReferenceTracker* _trackerObject;
     void* _runtimeContext;
     Volatile<BOOL> _trackerObjectDisconnected;
-    int _trackerObjectState;
+    TrackerObjectState _trackerObjectState;
     IUnknown* _nativeObjectAsInner;
 
 #ifdef _DEBUG
@@ -152,7 +174,7 @@ public: // static
     static NativeObjectWrapperContext* MapFromRuntimeContext(_In_ void* cxt);
 
     // Create a NativeObjectWrapperContext instance
-    static HRESULT NativeObjectWrapperContext::Create(
+    static HRESULT Create(
         _In_ IUnknown* external,
         _In_opt_ IUnknown* nativeObjectAsInner,
         _In_ InteropLib::Com::CreateObjectFlags flags,
@@ -274,4 +296,4 @@ struct ComHolder
         }
     }
 };
-#endif // _INTEROP_COMWRAPPERS_H_
+#endif // _INTEROP_COMWRAPPERS_HPP_

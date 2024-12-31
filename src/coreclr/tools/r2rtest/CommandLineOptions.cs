@@ -43,6 +43,9 @@ namespace R2RTest
                         OutputDirectory(),
                         Crossgen(),
                         CrossgenPath(),
+                        Crossgen2Path(),
+                        TargetArch(),
+                        VerifyTypeAndFieldLayout(),
                         NoJit(),
                         NoCrossgen2(),
                         Exe(),
@@ -50,6 +53,7 @@ namespace R2RTest
                         NoEtw(),
                         NoCleanup(),
                         Map(),
+                        Pdb(),
                         DegreeOfParallelism(),
                         Sequential(),
                         Framework(),
@@ -58,6 +62,7 @@ namespace R2RTest
                         LargeBubble(),
                         Composite(),
                         Crossgen2Parallelism(),
+                        Crossgen2JitPath(),
                         ReferencePath(),
                         IssuesPath(),
                         CompilationTimeoutMinutes(),
@@ -65,6 +70,7 @@ namespace R2RTest
                         R2RDumpPath(),
                         MeasurePerf(),
                         InputFileSearchString(),
+                        MibcPath(),
                     },
                     CompileDirectoryCommand.CompileDirectory);
 
@@ -76,6 +82,9 @@ namespace R2RTest
                         OutputDirectory(),
                         Crossgen(),
                         CrossgenPath(),
+                        Crossgen2Path(),
+                        TargetArch(),
+                        VerifyTypeAndFieldLayout(),
                         NoJit(),
                         NoCrossgen2(),
                         Exe(),
@@ -83,6 +92,7 @@ namespace R2RTest
                         NoEtw(),
                         NoCleanup(),
                         Map(),
+                        Pdb(),
                         DegreeOfParallelism(),
                         Sequential(),
                         Framework(),
@@ -91,12 +101,14 @@ namespace R2RTest
                         LargeBubble(),
                         Composite(),
                         Crossgen2Parallelism(),
+                        Crossgen2JitPath(),
                         ReferencePath(),
                         IssuesPath(),
                         CompilationTimeoutMinutes(),
                         ExecutionTimeoutMinutes(),
                         R2RDumpPath(),
                         GCStress(),
+                        MibcPath(),
                     },
                     CompileSubtreeCommand.CompileSubtree);
 
@@ -106,8 +118,15 @@ namespace R2RTest
                     {
                         Crossgen(),
                         CrossgenPath(),
+                        Crossgen2Path(),
+                        TargetArch(),
+                        VerifyTypeAndFieldLayout(),
                         NoCrossgen2(),
                         NoCleanup(),
+                        Map(),
+                        Pdb(),
+                        Crossgen2Parallelism(),
+                        Crossgen2JitPath(),
                         DegreeOfParallelism(),
                         Sequential(),
                         Release(),
@@ -119,6 +138,8 @@ namespace R2RTest
                         R2RDumpPath(),
                         MeasurePerf(),
                         InputFileSearchString(),
+                        OutputDirectory(),
+                        MibcPath(),
                     },
                     CompileFrameworkCommand.CompileFramework);
 
@@ -132,9 +153,12 @@ namespace R2RTest
                         PackageList(),
                         Crossgen(),
                         NoCleanup(),
+                        Map(),
+                        Pdb(),
                         DegreeOfParallelism(),
                         CompilationTimeoutMinutes(),
                         ExecutionTimeoutMinutes(),
+                        MibcPath(),
                     },
                     CompileNugetCommand.CompileNuget);
 
@@ -145,9 +169,14 @@ namespace R2RTest
                         InputDirectory(),
                         DegreeOfParallelism(),
                         AspNetPath(),
-                        CompositeScenario()
+                        Composite(),
+                        Map(),
+                        Pdb(),
+                        CompilationTimeoutMinutes(),
+                        Crossgen2Path(),
+                        MibcPath(),
                     },
-                    options => 
+                    options =>
                     {
                         var compileSerp = new CompileSerpCommand(options);
                         return compileSerp.CompileSerpAssemblies();
@@ -169,13 +198,23 @@ namespace R2RTest
 
             Option ReferencePath() =>
                 new Option<DirectoryInfo[]>(new[] { "--reference-path", "-r" }, "Folder containing assemblies to reference during compilation")
-                    { Argument = new Argument<DirectoryInfo[]>() { Arity = ArgumentArity.ZeroOrMore }.ExistingOnly() };
+                { Argument = new Argument<DirectoryInfo[]>() { Arity = ArgumentArity.ZeroOrMore }.ExistingOnly() };
+
+            Option MibcPath() =>
+                new Option<FileInfo[]>(new[] { "--mibc-path", "-m" }, "Mibc files to use in compilation")
+                { Argument = new Argument<FileInfo[]>() { Arity = ArgumentArity.ZeroOrMore }.ExistingOnly() };
 
             Option Crossgen() =>
                 new Option<bool>(new[] { "--crossgen" }, "Compile the apps using Crossgen in the CORE_ROOT folder");
 
             Option CrossgenPath() =>
                 new Option<FileInfo>(new[] { "--crossgen-path", "-cp" }, "Explicit Crossgen path (useful for cross-targeting)").ExistingOnly();
+
+            Option Crossgen2Path() =>
+                new Option<FileInfo>(new[] { "--crossgen2-path", "-c2p" }, "Explicit Crossgen2 path (useful for cross-targeting)").ExistingOnly();
+
+            Option VerifyTypeAndFieldLayout() =>
+                new Option<bool>(new[] { "--verify-type-and-field-layout" }, "Verify that struct type layout and field offsets match between compile time and runtime. Use only for diagnostic purposes.");
 
             Option NoJit() =>
                 new Option<bool>(new[] { "--nojit" }, "Don't run tests in JITted mode");
@@ -197,6 +236,9 @@ namespace R2RTest
 
             Option Map() =>
                 new Option<bool>(new[] { "--map" }, "Generate a map file (Crossgen2)");
+
+            Option Pdb() =>
+                new Option<bool>(new[] { "--pdb" }, "Generate PDB symbol information (Crossgen2 / Windows only)");
 
             Option DegreeOfParallelism() =>
                 new Option<int>(new[] { "--degree-of-parallelism", "-dop" }, "Override default compilation / execution DOP (default = logical processor count)");
@@ -221,6 +263,9 @@ namespace R2RTest
 
             Option Crossgen2Parallelism() =>
                 new Option<int>(new[] { "--crossgen2-parallelism" }, "Max number of threads to use in Crossgen2 (default = logical processor count)");
+            
+            Option Crossgen2JitPath() =>
+                new Option<FileInfo>(new[] { "--crossgen2-jitpath" }, "Jit path to use for crossgen2");
 
             Option IssuesPath() =>
                 new Option<FileInfo[]>(new[] { "--issues-path", "-ip" }, "Path to issues.targets")
@@ -233,7 +278,7 @@ namespace R2RTest
                 new Option<int>(new[] { "--execution-timeout-minutes", "-et" }, "Execution timeout (minutes)");
 
             Option R2RDumpPath() =>
-                new Option<FileInfo>(new[] { "--r2r-dump-path", "-r2r" }, "Path to R2RDump.exe/dll").ExistingOnly();;
+                new Option<FileInfo>(new[] { "--r2r-dump-path", "-r2r" }, "Path to R2RDump.exe/dll").ExistingOnly();
 
             Option MeasurePerf() =>
                 new Option<bool>(new[] { "--measure-perf" }, "Print out compilation time");
@@ -246,22 +291,21 @@ namespace R2RTest
 
             Option DotNetCli() =>
                 new Option<string>(new [] { "--dotnet-cli", "-cli" }, "For dev box testing, point at .NET 5 dotnet.exe or <repo>/dotnet.cmd.");
-                
+
+            Option TargetArch() =>
+                new Option<string>(new[] { "--target-arch" }, "Target architecture for crossgen2");
 
             //
             // compile-nuget specific options
             //
             Option PackageList() =>
-                new Option<FileInfo>(new[] { "--package-list", "-pl" }, "Text file containing a package name on each line").ExistingOnly();;
+                new Option<FileInfo>(new[] { "--package-list", "-pl" }, "Text file containing a package name on each line").ExistingOnly();
 
             //
             // compile-serp specific options
             //
             Option AspNetPath() =>
                 new Option<DirectoryInfo>(new[] { "--asp-net-path", "-asp" }, "Path to SERP's ASP.NET Core folder").ExistingOnly();
-
-            Option CompositeScenario() =>
-                new Option<SerpCompositeScenario>(new [] { "--composite-scenario", "-cs" }, "Specifies which layers of a shared framework application are compiled as composite" );
         }
     }
 }

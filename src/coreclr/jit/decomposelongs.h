@@ -25,13 +25,15 @@ public:
     void PrepareForDecomposition();
     void DecomposeBlock(BasicBlock* block);
 
-    static void DecomposeRange(Compiler* compiler, unsigned blockWeight, LIR::Range& range);
+    static void DecomposeRange(Compiler* compiler, LIR::Range& range);
 
 private:
     inline LIR::Range& Range() const
     {
         return *m_range;
     }
+
+    void PromoteLongVars();
 
     // Driver functions
     void     DecomposeRangeHelper();
@@ -55,8 +57,13 @@ private:
     GenTree* DecomposeRotate(LIR::Use& use);
     GenTree* DecomposeMul(LIR::Use& use);
     GenTree* DecomposeUMod(LIR::Use& use);
-    GenTree* DecomposeSimd(LIR::Use& use);
-    GenTree* DecomposeSimdGetItem(LIR::Use& use);
+
+#ifdef FEATURE_HW_INTRINSICS
+    GenTree* DecomposeHWIntrinsic(LIR::Use& use);
+    GenTree* DecomposeHWIntrinsicGetElement(LIR::Use& use, GenTreeHWIntrinsic* node);
+#endif // FEATURE_HW_INTRINSICS
+
+    GenTree* OptimizeCastFromDecomposedLong(GenTreeCast* cast, GenTree* nextNode);
 
     // Helper functions
     GenTree* FinalizeDecomposition(LIR::Use& use, GenTree* loResult, GenTree* hiResult, GenTree* insertResultAfter);
@@ -69,7 +76,6 @@ private:
 
     // Data
     Compiler*   m_compiler;
-    unsigned    m_blockWeight;
     LIR::Range* m_range;
 };
 
