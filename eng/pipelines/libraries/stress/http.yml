@@ -1,0 +1,75 @@
+trigger: none
+
+pr:
+  branches:
+    include:
+    - "*"
+
+schedules:
+- cron: "0 13 * * *" # 1PM UTC => 5 AM PST
+  displayName: HttpStress nightly run
+  branches:
+    include:
+    - master
+
+variables:
+  - template: ../variables.yml
+  - name: dockerfilesFolder
+    value: $(Build.SourcesDirectory)/eng/docker
+  - name: httpStressProject
+    value: $(sourcesRoot)/System.Net.Http/tests/StressTests/HttpStress
+  - name: sdkBaseImage
+    value: dotnet-sdk-libraries-current
+
+
+jobs:
+- job: linux
+  displayName: Docker Linux
+  timeoutInMinutes: 120
+  pool:
+    name:  NetCore1ESPool-Svc-Public
+    demands: ImageOverride -equals Build.Ubuntu.1804.Amd64.Open
+
+  steps:
+  - checkout: self
+    clean: true
+    fetchDepth: 5
+  
+  - bash: |
+      $(dockerfilesFolder)/build-docker-sdk.sh -t $(sdkBaseImage) -c $(BUILD_CONFIGURATION)
+    displayName: Build CLR and Libraries
+  
+  - bash: |
+      $(httpStressProject)/run-docker-compose.sh -o -c $(BUILD_CONFIGURATION) -t $(sdkBaseImage)
+    displayName: Build HttpStress
+  
+  - bash: |
+      cd '$(httpStressProject)'
+      docker-compose up --abort-on-container-exit --no-color
+    displayName: Run HttpStress
+
+- job: windows
+  displayName: Docker NanoServer
+  timeoutInMinutes: 120
+  pool:
+    name: NetCore1ESPool-Svc-Public
+    demands: ImageOverride -equals Build.Server.Amd64.VS2019.Open
+
+  steps:
+  - checkout: self
+    clean: true
+    fetchDepth: 5
+    lfs: false
+  
+  - powershell: |
+      $(dockerfilesFolder)/build-docker-sdk.ps1 -w -t $(sdkBaseImage) -c $(BUILD_CONFIGURATION)
+    displayName: Build CLR and Libraries
+  
+  - powershell: |
+      $(httpStressProject)/run-docker-compose.ps1 -w -o -c $(BUILD_CONFIGURATION) -t $(sdkBaseImage)
+    displayName: Build HttpStress
+  
+  - powershell: |
+      cd '$(httpStressProject)'
+      docker-compose up --abort-on-container-exit --no-color
+    displayName: Run HttpStress

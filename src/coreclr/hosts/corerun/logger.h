@@ -1,6 +1,5 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
 
 
 //
@@ -15,8 +14,8 @@ class Logger {
     bool m_formatHRESULT;
 
 public:
-    Logger() : 
-        m_isEnabled(true), 
+    Logger() :
+        m_isEnabled(true),
         m_prefixRequired(true),
         m_formatHRESULT(false) { }
 
@@ -28,7 +27,7 @@ public:
     // Disables output from the logger
     void Disable();
 
-  
+
     Logger& operator<< (bool val);
     Logger& operator<< (short val);
     Logger& operator<< (unsigned short val);
@@ -42,6 +41,7 @@ public:
     Logger& operator<< (double val);
     Logger& operator<< (long double val);
     Logger& operator<< (const wchar_t* val);
+    Logger& operator<< (const char* val);
     Logger& operator<< (Logger& ( *pf )(Logger&));
     static Logger& endl ( Logger& log );
     static Logger& hresult ( Logger& log);

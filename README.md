@@ -12,7 +12,7 @@ Contains the complete runtime implementation for .NET Core. It includes RyuJIT, 
 
 ```
 Copyright (c) .NET Foundation and Contributors
-Copyright (c) 2016-2019  Denis Kuzmin < x-3F@outlook.com > GitHub/3F
+Copyright (c) 2016-2024  Denis Kuzmin <x-3F@outlook.com> github/3F
 ```
 
 ## CoreCLR IL Assembler
@@ -46,7 +46,7 @@ Related issue: https://github.com/3F/coreclr/issues/2
 
 Custom use via [GetNuTool](https://github.com/3F/GetNuTool)
 
-[`gnt`](https://3f.github.io/GetNuTool/releases/latest/gnt/)` /p:ngpackages="ILAsm"` [[?](https://github.com/3F/GetNuTool)]
+[`gnt`](https://3F.github.io/GetNuTool/releases/latest/gnt/)` ILAsm` [[?](https://github.com/3F/GetNuTool)]
 
 **PDB** files (240 MB+) are available through GitHub Releases:
 https://github.com/3F/coreclr/releases

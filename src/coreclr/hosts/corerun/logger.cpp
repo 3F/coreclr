@@ -1,6 +1,5 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
 
 
 
@@ -8,6 +7,7 @@
 #include <windows.h>
 #include <Logger.h>
 #include "palclr.h"
+#include "sstring.h"
 
 void Logger::Enable() {
     m_isEnabled = true;
@@ -229,6 +229,19 @@ Logger& Logger::operator<< (const wchar_t *val) {
     if (m_isEnabled) {
         EnsurePrefixIsPrinted();
         print(val);
+    }
+    return *this;
+}
+
+Logger& Logger::operator<< (const char *val) {
+    if (m_isEnabled) {
+        EnsurePrefixIsPrinted();
+
+        SString valUTF8(SString::Utf8Literal, val);
+        SmallStackSString valUnicode;
+        valUTF8.ConvertToUnicode(valUnicode);
+
+        print(valUnicode);
     }
     return *this;
 }

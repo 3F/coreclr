@@ -1,6 +1,5 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
 
 //
 // A simple CoreCLR host that runs a managed binary with the same name as this executable but with *.dll extension
@@ -18,7 +17,7 @@ static const wchar_t *coreCLRDll = W("CoreCLR.dll");
 
 // Dynamically expanding string buffer to hold TPA list
 class StringBuffer {
-    static const int m_defaultSize = 4096; 
+    static const int m_defaultSize = 4096;
     wchar_t* m_buffer;
     size_t m_capacity;
     size_t m_length;
@@ -27,7 +26,7 @@ class StringBuffer {
     StringBuffer& operator =(const StringBuffer&);
 
 public:
-    StringBuffer() : m_capacity(0), m_buffer(nullptr), m_length(0) {
+    StringBuffer() : m_buffer(nullptr), m_capacity(0), m_length(0) {
     }
 
     ~StringBuffer() {
@@ -57,7 +56,7 @@ public:
 };
 
 // Encapsulates the environment that CoreCLR will run in, including the TPALIST
-class HostEnvironment 
+class HostEnvironment
 {
     // The path to this module
     wchar_t m_hostPath[MAX_LONGPATH];
@@ -115,8 +114,8 @@ public:
     // The path to the directory that CoreCLR is in
     wchar_t m_coreCLRDirectoryPath[MAX_LONGPATH];
 
-    HostEnvironment(Logger *logger) 
-        : m_log(logger), m_CLRRuntimeHost(nullptr) {
+    HostEnvironment(Logger *logger)
+        : m_CLRRuntimeHost(nullptr), m_log(logger) {
 
             // Discover the path to this exe's module. All other files are expected to be in the same directory.
             DWORD thisModuleLength = ::GetModuleFileNameW(::GetModuleHandleW(nullptr), m_hostPath, MAX_LONGPATH);
@@ -199,7 +198,7 @@ public:
     void RemoveExtensionAndNi(_In_z_ wchar_t* fileName)
     {
         // Remove extension, if it exists
-        wchar_t* extension = wcsrchr(fileName, W('.')); 
+        wchar_t* extension = wcsrchr(fileName, W('.'));
         if (extension != NULL)
         {
             extension[0] = W('\0');
@@ -328,7 +327,7 @@ public:
 
             *m_log << W("Finding GetCLRRuntimeHost(...)") << Logger::endl;
 
-            FnGetCLRRuntimeHost pfnGetCLRRuntimeHost = 
+            FnGetCLRRuntimeHost pfnGetCLRRuntimeHost =
                 (FnGetCLRRuntimeHost)::GetProcAddress(m_coreCLRModule, "GetCLRRuntimeHost");
 
             if (!pfnGetCLRRuntimeHost) {
@@ -363,12 +362,12 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
     wchar_t managedAssemblyFullName[MAX_LONGPATH] = W("");
 
     wchar_t* filePart = NULL;
-    
+
     if (!::GetFullPathName(programPath, MAX_LONGPATH, appPath, &filePart)) {
         log << W("Failed to get full path: ") << programPath << Logger::endl;
         log << W("Error code: ") << GetLastError() << Logger::endl;
         return false;
-    } 
+    }
 
     wcscpy_s(managedAssemblyFullName, appPath);
 
@@ -407,7 +406,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
 
     // Default startup flags
     hr = host->SetStartupFlags((STARTUP_FLAGS)
-        (STARTUP_FLAGS::STARTUP_LOADER_OPTIMIZATION_SINGLE_DOMAIN | 
+        (STARTUP_FLAGS::STARTUP_LOADER_OPTIMIZATION_SINGLE_DOMAIN |
         STARTUP_FLAGS::STARTUP_SINGLE_APPDOMAIN |
         STARTUP_FLAGS::STARTUP_CONCURRENT_GC));
     if (FAILED(hr)) {
@@ -443,13 +442,13 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
     // NATIVE_DLL_SEARCH_DIRECTORIES
     // - The list of paths that will be probed for native DLLs called by PInvoke
     //
-    const wchar_t *property_keys[] = { 
+    const wchar_t *property_keys[] = {
         W("TRUSTED_PLATFORM_ASSEMBLIES"),
         W("APP_PATHS"),
         W("APP_NI_PATHS"),
         W("NATIVE_DLL_SEARCH_DIRECTORIES"),
     };
-    const wchar_t *property_values[] = { 
+    const wchar_t *property_values[] = {
         // TRUSTED_PLATFORM_ASSEMBLIES
         hostEnvironment.GetTpaList(),
         // APP_PATHS
@@ -485,7 +484,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
         // APPDOMAIN_IGNORE_UNHANDLED_EXCEPTION
         // - Prevents the application from being torn down if a managed exception is unhandled
         //
-        APPDOMAIN_ENABLE_PLATFORM_SPECIFIC_APPS | 
+        APPDOMAIN_ENABLE_PLATFORM_SPECIFIC_APPS |
         APPDOMAIN_ENABLE_PINVOKE_AND_CLASSIC_COMINTEROP |
         APPDOMAIN_DISABLE_TRANSPARENCY_ENFORCEMENT,
         NULL,                // Name of the assembly that contains the AppDomainManager implementation
@@ -533,7 +532,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
     log << W("Unloading the AppDomain") << Logger::endl;
 
     hr = host->UnloadAppDomain2(
-        domainId, 
+        domainId,
         true,
         (int *)&exitCode);                          // Wait until done
 

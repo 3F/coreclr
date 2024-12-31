@@ -1,6 +1,5 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
 
 // CoreCLR boot loader for OSX app packages.
 //
@@ -11,7 +10,7 @@
 //   /Contents/ManagedBundle/       Your managed assemblies, including yourAppName.exe
 //
 // Of course you can also include whatever else you might need in the app package
-// 
+//
 // Symlinking the CoreClrBundle is handy for dev/debug builds. eg:
 //
 //   Contents> ln -s ~/dotnet/runtime/ CoreClrBundle
@@ -26,7 +25,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
-int corerun(const int argc, const char* argv[])
+int main(const int argc, const char* argv[])
 {
     // Make sure we have a full path for argv[0].
     std::string argv0AbsolutePath;
@@ -82,9 +81,4 @@ int corerun(const int argc, const char* argv[])
                             managedAssemblyArgv);
 
     return exitCode;
-}
-
-int main(const int argc, const char* argv[])
-{
-    return corerun(argc, argv);
 }

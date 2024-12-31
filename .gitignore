@@ -1,42 +1,50 @@
 syntax: glob
 
-[Bb]inaries/
-
-# Build tools related files
-/[Tt]ools/
-
 ### VisualStudio ###
+
+# Tool Runtime Dir
+# note: there is no trailing slash so if these are symlinks (which are seen as files,
+#       instead of directories), git will still ignore them.
+.dotnet
+.dotnet-mono
+.packages
+.tools
 
 # User-specific files
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
-*.swp
 
 # Build results
+artifacts/
+.idea/
 [Dd]ebug/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
-build/
 bld/
 [Bb]in/
 [Oo]bj/
 msbuild.log
-msbuild.binlog
+msbuild.err
+msbuild.wrn
+*.binlog
+.deps/
+.dirstamp
+.libs/
+*.lo
+*.o
 
-# add back architecture directories ignored in 'Build results'
-!tests/x86
-!src/mscorlib/src/System/Runtime/Intrinsics/X86
-!tests/src/JIT/HardwareIntrinsics/X86
+# Cross building rootfs
+cross/rootfs/
+cross/android-rootfs/
 
-# Visual Studio 2015
+# Visual Studio
 .vs/
 
-# Visual Studio 2015 Pre-CTP6
-*.sln.ide
-*.ide/
+# Ionide
+.ionide/
 
 # MSTest test Results
 [Tt]est[Rr]esult*/
@@ -45,6 +53,7 @@ msbuild.binlog
 #NUNIT
 *.VisualState.xml
 TestResult.xml
+testResults.xml
 
 # Build Results of an ATL Project
 [Dd]ebugPS/
@@ -68,7 +77,6 @@ dlldata.c
 *.tmp
 *.tmp_proj
 *.log
-*.html
 *.vspscc
 *.vssscc
 .builds
@@ -138,9 +146,6 @@ DocProject/Help/*.hhp
 DocProject/Help/Html2
 DocProject/Help/html
 
-# Click-Once directory
-publish/
-
 # Publish Web Output
 *.[Pp]ublish.xml
 *.azurePubxml
@@ -153,9 +158,9 @@ publish/
 *.nuget.g.targets
 *.nuget.cache
 **/packages/*
-*.nuget.dgspec.json
 project.lock.json
 project.assets.json
+*.nuget.dgspec.json
 
 # Windows Azure Build Output
 csx/
@@ -165,7 +170,6 @@ csx/
 AppPackages/
 
 # Others
-sql/
 *.Cache
 ClientBin/
 [Ss]tyle[Cc]op.*
@@ -177,9 +181,7 @@ ClientBin/
 node_modules/
 *.metaproj
 *.metaproj.tmp
-.atom-build.json
-tags
-TAGS
+bin.localpkg/
 
 # RIA/Silverlight projects
 Generated_Code/
@@ -206,14 +208,11 @@ FakesAssemblies/
 
 # C/C++ extension for Visual Studio Code
 browse.VC.db
-
 # Local settings folder for Visual Studio Code
 **/.vscode/**
 !**/.vscode/c_cpp_properties.json
 
 ### MonoDevelop ###
-
-*.pidb
 *.userprefs
 
 ### Windows ###
@@ -237,16 +236,9 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
-# Common binary extensions on Windows
-*.exe
-*.exe.stackdump
-*.dll
-*.lib
-
 ### Linux ###
 
 *~
-\#*\#
 
 # KDE directory preferences
 .directory
@@ -274,13 +266,38 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-# We have some checked in prebuilt generated files
+# vim temporary files
+[._]*.s[a-w][a-z]
+[._]s[a-w][a-z]
+*.un~
+Session.vim
+.netrwhist
+
+# Visual Studio Code
+.vscode/
+.devcontainer/
+
+# Private test configuration and binaries.
+config.ps1
+**/IISApplications
+
+# VS debug support files
+launchSettings.json
+
+# Snapcraft files
+.snapcraft
+*.snap
+parts/
+prime/
+stage/
+
+# CLR prebuilt generated files
 !src/pal/prebuilt/idl/*_i.c
 
 # Valid 'debug' folder, that contains CLR debugging code
 !src/debug
 
-# Ignore folders created by the test build
+# Ignore folders created by the CLR test build
 TestWrappers_x64_[d|D]ebug
 TestWrappers_x64_[c|C]hecked
 TestWrappers_x64_[r|R]elease
@@ -322,7 +339,21 @@ sandbox
 #IL linker for testing
 linker
 
-# Arcade files
-/artifacts/toolset
-/.packages
-/.dotnet
+# Symbolic link for the shared portion of CoreLib to make grep/findstr work for runtime devs
+#
+# On Windows, make your own by running these commands from the repo root:
+# mklink /D src\coreclr\src\System.Private.CoreLib\shared %CD%\src\libraries\System.Private.CoreLib\src
+# mklink /D src\coreclr\src\System.Private.CoreLib\common %CD%\src\libraries\Common\src
+#
+# On Unix, make your own by running these commands from the repo root:
+# ln -s $(pwd)/src/libraries/System.Private.CoreLib/src src/coreclr/src/System.Private.CoreLib/shared
+# ln -s $(pwd)/src/libraries/Common/src src/coreclr/src/System.Private.CoreLib/common
+src/coreclr/src/System.Private.CoreLib/shared
+src/coreclr/src/System.Private.CoreLib/common
+
+# The debug directory should not be ignored
+!src/coreclr/src/debug
+
+# Mono Wasm-specific excludes
+src/mono/wasm/emsdk/
+src/mono/wasm/.stamp-wasm-install-and-select*

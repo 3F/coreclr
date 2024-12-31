@@ -1,13 +1,13 @@
 project(CoreRun)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
- 
+
 set(CoreRun_SOURCES corerun.cpp logger.cpp)
 set(CoreRun_RESOURCES native.rc)
 
 add_definitions(-DFX_VER_INTERNALNAME_STR=CoreRun.exe)
 
-if(CLR_CMAKE_PLATFORM_UNIX)
+if(CLR_CMAKE_HOST_UNIX)
     # This does not compile on Linux yet
     if(CAN_BE_COMPILED_ON_LINUX)
         _add_executable(CoreRun
@@ -33,6 +33,6 @@ else()
     )
 
     # Can't compile on linux yet so only add for windows
-    install_clr(CoreRun)
-    
-endif(CLR_CMAKE_PLATFORM_UNIX)
+    install_clr(TARGETS CoreRun)
+
+endif(CLR_CMAKE_HOST_UNIX)

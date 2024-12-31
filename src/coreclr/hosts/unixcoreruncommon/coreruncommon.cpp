@@ -1,6 +1,5 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-// See the LICENSE file in the project root for more information.
 
 //
 // Code that is used by both the Unix corerun and coreconsole.
@@ -35,6 +34,13 @@
 #define SUCCEEDED(Status) ((Status) >= 0)
 #endif // !SUCCEEDED
 
+#if !HAVE_DIRENT_D_TYPE
+#define DT_UNKNOWN 0
+#define DT_DIR 4
+#define DT_REG 8
+#define DT_LNK 10
+#endif
+
 // Name of the environment variable controlling server GC.
 // If set to 1, server GC is enabled on startup. If 0, server GC is
 // disabled. Server GC is off by default.
@@ -53,13 +59,13 @@ static const char* globalizationInvariantVar = "CORECLR_GLOBAL_INVARIANT";
 bool GetEntrypointExecutableAbsolutePath(std::string& entrypointExecutable)
 {
     bool result = false;
-    
+
     entrypointExecutable.clear();
 
     // Get path to the executable for the current process using
     // platform specific means.
 #if defined(__APPLE__)
-    
+
     // On Mac, we ask the OS for the absolute path to the entrypoint executable
     uint32_t lenActualPath = 0;
     if (_NSGetExecutablePath(nullptr, &lenActualPath) == -1)
@@ -109,6 +115,34 @@ bool GetEntrypointExecutableAbsolutePath(std::string& entrypointExecutable)
     {
         result = false;
     }
+#elif defined(__sun)
+    const char *path;
+    if ((path = getexecname()) == NULL)
+    {
+        result = false;
+    }
+    else if (*path != '/')
+    {
+        char *cwd;
+        if ((cwd = getcwd(NULL, PATH_MAX)) == NULL)
+        {
+            result = false;
+        }
+        else
+        {
+            entrypointExecutable
+                .assign(cwd)
+                .append("/")
+                .append(path);
+            result = true;
+            free(cwd);
+        }
+    }
+    else
+    {
+        entrypointExecutable.assign(path);
+        result = true;
+    }
 #else
 
 #if HAVE_GETAUXVAL && defined(AT_EXECFN)
@@ -124,7 +158,7 @@ bool GetEntrypointExecutableAbsolutePath(std::string& entrypointExecutable)
     // On other OSs, return the symlink that will be resolved by GetAbsolutePath
     // to fetch the entrypoint EXE absolute path, inclusive of filename.
     result = GetAbsolutePath(symlinkEntrypointExecutable, entrypointExecutable);
-#endif 
+#endif
 
     return result;
 }
@@ -216,8 +250,14 @@ void AddFilesFromDirectoryToTpaList(const char* directory, std::string& tpaList)
         // For all entries in the directory
         while ((entry = readdir(dir)) != nullptr)
         {
+#if HAVE_DIRENT_D_TYPE
+            int dirEntryType = entry->d_type;
+#else
+            int dirEntryType = DT_UNKNOWN;
+#endif
+
             // We are interested in files only
-            switch (entry->d_type)
+            switch (dirEntryType)
             {
             case DT_REG:
                 break;
@@ -272,11 +312,11 @@ void AddFilesFromDirectoryToTpaList(const char* directory, std::string& tpaList)
                 tpaList.append(":");
             }
         }
-        
+
         // Rewind the directory stream to be able to iterate over it for the next extension
         rewinddir(dir);
     }
-    
+
     closedir(dir);
 }
 
@@ -291,6 +331,26 @@ const char* GetEnvValueBoolean(const char* envVariable)
     return (std::strcmp(envValue, "1") == 0 || strcasecmp(envValue, "true") == 0) ? "true" : "false";
 }
 
+static void *TryLoadHostPolicy(const char *hostPolicyPath)
+{
+#if defined(__APPLE__)
+    static const char LibrarySuffix[] = ".dylib";
+#else // Various Linux-related OS-es
+    static const char LibrarySuffix[] = ".so";
+#endif
+
+    std::string hostPolicyCompletePath(hostPolicyPath);
+    hostPolicyCompletePath.append(LibrarySuffix);
+
+    void *libraryPtr = dlopen(hostPolicyCompletePath.c_str(), RTLD_LAZY);
+    if (libraryPtr == nullptr)
+    {
+        fprintf(stderr, "Failed to load mock hostpolicy at path '%s'. Error: %s", hostPolicyCompletePath.c_str(), dlerror());
+    }
+
+    return libraryPtr;
+}
+
 int ExecuteManagedAssembly(
             const char* currentExeAbsolutePath,
             const char* clrFilesAbsolutePath,
@@ -301,11 +361,11 @@ int ExecuteManagedAssembly(
     // Indicates failure
     int exitCode = -1;
 
-#ifdef _ARM_
+#ifdef HOST_ARM
     // libunwind library is used to unwind stack frame, but libunwind for ARM
     // does not support ARM vfpv3/NEON registers in DWARF format correctly.
     // Therefore let's disable stack unwinding using DWARF information
-    // See https://github.com/dotnet/coreclr/issues/6698
+    // See https://github.com/dotnet/runtime/issues/6479
     //
     // libunwind use following methods to unwind stack frame.
     // UNW_ARM_METHOD_ALL          0xFF
@@ -313,7 +373,7 @@ int ExecuteManagedAssembly(
     // UNW_ARM_METHOD_FRAME        0x02
     // UNW_ARM_METHOD_EXIDX        0x04
     putenv(const_cast<char *>("UNW_ARM_UNWIND_METHOD=6"));
-#endif // _ARM_
+#endif // HOST_ARM
 
     std::string coreClrDllPath(clrFilesAbsolutePath);
     coreClrDllPath.append("/");
@@ -330,15 +390,6 @@ int ExecuteManagedAssembly(
     GetDirectory(managedAssemblyAbsolutePath, appPath);
 
     std::string tpaList;
-    if (strlen(managedAssemblyAbsolutePath) > 0)
-    {
-        // Target assembly should be added to the tpa list. Otherwise corerun.exe
-        // may find wrong assembly to execute.
-        // Details can be found at https://github.com/dotnet/coreclr/issues/5631
-        tpaList = managedAssemblyAbsolutePath;
-        tpaList.append(":");
-    }
-
     // Construct native search directory paths
     std::string nativeDllSearchDirs(appPath);
     char *coreLibraries = getenv("CORE_LIBRARIES");
@@ -351,7 +402,6 @@ int ExecuteManagedAssembly(
             AddFilesFromDirectoryToTpaList(coreLibraries, tpaList);
         }
     }
-
     nativeDllSearchDirs.append(":");
     nativeDllSearchDirs.append(clrFilesAbsolutePath);
 
@@ -359,10 +409,9 @@ int ExecuteManagedAssembly(
     char* mockHostpolicyPath = getenv("MOCK_HOSTPOLICY");
     if (mockHostpolicyPath)
     {
-        hostpolicyLib = dlopen(mockHostpolicyPath, RTLD_LAZY);
+        hostpolicyLib = TryLoadHostPolicy(mockHostpolicyPath);
         if (hostpolicyLib == nullptr)
         {
-            fprintf(stderr, "Failed to load mock hostpolicy at path '%s'. Error: %s", mockHostpolicyPath, dlerror());
             return -1;
         }
     }
@@ -439,12 +488,12 @@ int ExecuteManagedAssembly(
             unsigned int domainId;
 
             int st = initializeCoreCLR(
-                        currentExeAbsolutePath, 
-                        "unixcorerun", 
-                        sizeof(propertyKeys) / sizeof(propertyKeys[0]), 
-                        propertyKeys, 
-                        propertyValues, 
-                        &hostHandle, 
+                        currentExeAbsolutePath,
+                        "unixcorerun",
+                        sizeof(propertyKeys) / sizeof(propertyKeys[0]),
+                        propertyKeys,
+                        propertyValues,
+                        &hostHandle,
                         &domainId);
 
             if (!SUCCEEDED(st))
@@ -452,7 +501,7 @@ int ExecuteManagedAssembly(
                 fprintf(stderr, "coreclr_initialize failed - status: 0x%08x\n", st);
                 exitCode = -1;
             }
-            else 
+            else
             {
                 st = executeAssembly(
                         hostHandle,
