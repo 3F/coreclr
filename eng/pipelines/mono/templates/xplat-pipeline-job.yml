@@ -11,7 +11,6 @@ parameters:
   pool: ''
   runtimeVariant: ''
   liveRuntimeBuildConfig: 'release'
-  templatePath: 'templates'
 
   # arcade-specific parameters
   condition: true
@@ -28,7 +27,6 @@ parameters:
 jobs:
 - template: /eng/pipelines/common/templates/runtimes/xplat-job.yml
   parameters:
-    templatePath: ${{ parameters.templatePath }}
     buildConfig: ${{ parameters.buildConfig }}
     archType: ${{ parameters.archType }}
     osGroup: ${{ parameters.osGroup }}
@@ -52,18 +50,22 @@ jobs:
 
     variables:
     - name: coreClrProductArtifactName
-      value: 'CoreCLRProduct__$(osGroup)$(osSubgroup)_$(archType)_${{ parameters.liveRuntimeBuildConfig }}'
+      value: 'CoreCLRProduct___$(osGroup)$(osSubgroup)_$(archType)_${{ parameters.liveRuntimeBuildConfig }}'
 
     - name: coreClrProductRootFolderPath
       value: '$(Build.SourcesDirectory)/artifacts/bin/coreclr/$(osGroup).$(archType).$(liveRuntimeBuildConfigUpper)'
 
     - name: buildProductArtifactName
-      value: 'MonoProduct_${{ parameters.runtimeVariant }}_$(osGroup)$(osSubgroup)_$(archType)_$(buildConfig)'
+      value: 'MonoProduct__${{ parameters.runtimeVariant }}_$(osGroup)$(osSubgroup)_$(archType)_$(buildConfig)'
 
-    # minijit and monointerpreter do not use seperate product builds.
+    # minijit and monointerpreter do not use separate product builds.
     - ${{ if or(eq(parameters.runtimeVariant, 'minijit'), eq(parameters.runtimeVariant, 'monointerpreter')) }}:
       - name : buildProductArtifactName
-        value : 'MonoProduct__$(osGroup)$(osSubgroup)_$(archType)_$(buildConfig)'
+        value : 'MonoProduct___$(osGroup)$(osSubgroup)_$(archType)_$(buildConfig)'
+
+    - ${{ if eq(parameters.runtimeVariant, 'llvmfullaot') }}:
+      - name : buildProductArtifactName
+        value : 'MonoProduct__llvmaot_$(osGroup)$(osSubgroup)_$(archType)_$(buildConfig)'
 
     - name: binTestsPath
       value: '$(Build.SourcesDirectory)/artifacts/tests/coreclr'
@@ -105,7 +107,7 @@ jobs:
         value: 'Checked'
       ${{ if eq(parameters.liveRuntimeBuildConfig, 'debug') }}:
         value: 'Debug'
-        
+
     - name: priorityArg
       value: ''
 

@@ -86,7 +86,7 @@ public:
         } CONTRACTL_END;
 
         DWORD spinCount = 0;
-        while(FastInterlockExchange(&m_lock, 0) != -1)
+        while(InterlockedExchange(&m_lock, 0) != -1)
         {
             GCX_PREEMP();
             __SwitchToThread(0, spinCount++);
@@ -204,8 +204,6 @@ inline Object* Alloc(size_t size, GC_ALLOC_FLAGS flags)
         GC_TRIGGERS;
         MODE_COOPERATIVE; // returns an objref without pinning it => cooperative
     } CONTRACTL_END;
-
-    _ASSERTE(!NingenEnabled() && "You cannot allocate managed objects inside the ngen compilation process.");
 
 #ifdef _DEBUG
     if (g_pConfig->ShouldInjectFault(INJECTFAULT_GCHEAP))
@@ -371,8 +369,6 @@ OBJECTREF AllocateSzArray(MethodTable* pArrayMT, INT32 cElements, GC_ALLOC_FLAGS
         MODE_COOPERATIVE; // returns an objref without pinning it => cooperative
     } CONTRACTL_END;
 
-    // IBC Log MethodTable access
-    g_IBCLogger.LogMethodTableAccess(pArrayMT);
     SetTypeHandleOnThreadForAlloc(TypeHandle(pArrayMT));
 
     _ASSERTE(pArrayMT->CheckInstanceActivated());
@@ -546,8 +542,6 @@ OBJECTREF AllocateArrayEx(MethodTable *pArrayMT, INT32 *pArgs, DWORD dwNumArgs, 
     }
 #endif
 
-    // IBC Log MethodTable access
-    g_IBCLogger.LogMethodTableAccess(pArrayMT);
     SetTypeHandleOnThreadForAlloc(TypeHandle(pArrayMT));
 
     // keep original flags in case the call is recursive (jugged array case)
@@ -922,8 +916,6 @@ OBJECTREF AllocateObject(MethodTable *pMT
     // not set becuase it isn't until near the end of the fcn at which point we can allow
     // the check.
     _UNCHECKED_OBJECTREF oref;
-
-    g_IBCLogger.LogMethodTableAccess(pMT);
     SetTypeHandleOnThreadForAlloc(TypeHandle(pMT));
 
 
@@ -1120,7 +1112,7 @@ extern "C" HCIMPL2_RAW(VOID, JIT_CheckedWriteBarrier, Object **dst, Object *ref)
         break;
     default:
         // It should be some member of the enumeration.
-        _ASSERTE_ALL_BUILDS(__FILE__, false);
+        _ASSERTE_ALL_BUILDS(false);
         break;
     }
 #endif // FEATURE_COUNT_GC_WRITE_BARRIERS

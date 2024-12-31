@@ -5,6 +5,9 @@
 #include <coreclrhost.h>
 
 #include "corerun.hpp"
+#include "dotenv.hpp"
+
+#include <fstream>
 
 using char_t = pal::char_t;
 using string_t = pal::string_t;
@@ -50,6 +53,9 @@ struct configuration
 
     // Perform self test.
     bool self_test;
+
+    // configured .env file to load
+    dotenv dotenv_configuration;
 };
 
 namespace envvar
@@ -199,6 +205,11 @@ public:
 static void* CurrentClrInstance;
 static unsigned int CurrentAppDomainId;
 
+static void log_error_info(const char* line)
+{
+    std::fprintf(stderr, "%s\n", line);
+}
+
 static int run(const configuration& config)
 {
     platform_specific_actions actions;
@@ -216,12 +227,6 @@ static int run(const configuration& config)
         pal::split_path_to_dir_filename(config.entry_assembly_fullpath, app_path, file);
         pal::ensure_trailing_delimiter(app_path);
     }
-
-    // Define the NI app_path.
-    string_t app_path_ni = app_path + W("NI");
-    pal::ensure_trailing_delimiter(app_path_ni);
-    app_path_ni.append(1, pal::env_path_delim);
-    app_path_ni.append(app_path);
 
     // Accumulate path for native search path.
     pal::stringstream_t native_search_dirs;
@@ -268,6 +273,8 @@ static int run(const configuration& config)
         }
     }
 
+    config.dotenv_configuration.load_into_current_process();
+
     actions.before_coreclr_load();
 
     // Attempt to load CoreCLR.
@@ -280,6 +287,7 @@ static int run(const configuration& config)
     // Get CoreCLR exports
     coreclr_initialize_ptr coreclr_init_func = nullptr;
     coreclr_execute_assembly_ptr coreclr_execute_func = nullptr;
+    coreclr_set_error_writer_ptr coreclr_set_error_writer_func = nullptr;
     coreclr_shutdown_2_ptr coreclr_shutdown2_func = nullptr;
     if (!try_get_export(coreclr_mod, "coreclr_initialize", (void**)&coreclr_init_func)
         || !try_get_export(coreclr_mod, "coreclr_execute_assembly", (void**)&coreclr_execute_func)
@@ -288,11 +296,13 @@ static int run(const configuration& config)
         return -1;
     }
 
+    // The coreclr_set_error_writer is optional
+    (void)try_get_export(coreclr_mod, "coreclr_set_error_writer", (void**)&coreclr_set_error_writer_func);
+
     // Construct CoreCLR properties.
-    pal::string_utf8_t tpa_list_utf8 = pal::convert_to_utf8(std::move(tpa_list));
-    pal::string_utf8_t app_path_utf8 = pal::convert_to_utf8(std::move(app_path));
-    pal::string_utf8_t app_path_ni_utf8 = pal::convert_to_utf8(std::move(app_path_ni));
-    pal::string_utf8_t native_search_dirs_utf8 = pal::convert_to_utf8(native_search_dirs.str());
+    pal::string_utf8_t tpa_list_utf8 = pal::convert_to_utf8(tpa_list.c_str());
+    pal::string_utf8_t app_path_utf8 = pal::convert_to_utf8(app_path.c_str());
+    pal::string_utf8_t native_search_dirs_utf8 = pal::convert_to_utf8(native_search_dirs.str().c_str());
 
     std::vector<pal::string_utf8_t> user_defined_keys_utf8;
     std::vector<pal::string_utf8_t> user_defined_values_utf8;
@@ -315,11 +325,6 @@ static int run(const configuration& config)
     propertyKeys.push_back("APP_PATHS");
     propertyValues.push_back(app_path_utf8.c_str());
 
-    // APP_NI_PATHS
-    // - The list of additional paths that the assembly loader will probe for ngen images
-    propertyKeys.push_back("APP_NI_PATHS");
-    propertyValues.push_back(app_path_ni_utf8.c_str());
-
     // NATIVE_DLL_SEARCH_DIRECTORIES
     // - The list of paths that will be probed for native DLLs called by PInvoke
     propertyKeys.push_back("NATIVE_DLL_SEARCH_DIRECTORIES");
@@ -338,7 +343,7 @@ static int run(const configuration& config)
     int propertyCount = (int)propertyKeys.size();
 
     // Construct arguments
-    pal::string_utf8_t exe_path_utf8 = pal::convert_to_utf8(std::move(exe_path));
+    pal::string_utf8_t exe_path_utf8 = pal::convert_to_utf8(exe_path.c_str());
     std::vector<pal::string_utf8_t> argv_lifetime;
     pal::malloc_ptr<const char*> argv_utf8{ pal::convert_argv_to_utf8(config.entry_assembly_argc, config.entry_assembly_argv, argv_lifetime) };
     pal::string_utf8_t entry_assembly_utf8 = pal::convert_to_utf8(config.entry_assembly_fullpath.c_str());
@@ -347,6 +352,11 @@ static int run(const configuration& config)
         exe_path_utf8.c_str(),
         propertyCount, propertyKeys.data(), propertyValues.data(),
         entry_assembly_utf8.c_str(), config.entry_assembly_argc, argv_utf8.get() };
+
+    if (coreclr_set_error_writer_func != nullptr)
+    {
+        coreclr_set_error_writer_func(log_error_info);
+    }
 
     int result;
     result = coreclr_init_func(
@@ -363,6 +373,11 @@ static int run(const configuration& config)
         logger.dump_details();
         pal::fprintf(stderr, W("END: coreclr_initialize failed - Error: 0x%08x\n"), result);
         return -1;
+    }
+
+    if (coreclr_set_error_writer_func != nullptr)
+    {
+        coreclr_set_error_writer_func(nullptr);
     }
 
     int exit_code;
@@ -416,6 +431,7 @@ static void display_usage()
         W("                   If a property value contains spaces, quote the entire argument.\n")
         W("                   May be supplied multiple times. Format: <key>=<value>.\n")
         W("  -d, --debug - causes corerun to wait for a debugger to attach before executing.\n")
+        W("  -e, --env - path to a .env file with environment variables that corerun should set.\n")
         W("  -?, -h, --help - show this help.\n")
         W("\n")
         W("The runtime binary is searched for in --clr-path, CORE_ROOT environment variable, then\n")
@@ -520,6 +536,18 @@ static bool parse_args(
             config.self_test = true;
             return true;
         }
+        else if (pal::strcmp(option, W("e")) == 0 || (pal::strcmp(option, W("env")) == 0))
+        {
+            i++;
+            if (i >= argc)
+            {
+                pal::fprintf(stderr, W("Option %s: missing .env file path\n"), arg);
+                break;
+            }
+
+            std::ifstream dotenvFile{ pal::convert_to_utf8(argv[i]) };
+            config.dotenv_configuration = dotenv{ pal::string_t{ argv[i] }, dotenvFile};
+        }
         else if ((pal::strcmp(option, W("?")) == 0 || (pal::strcmp(option, W("h")) == 0 || (pal::strcmp(option, W("help")) == 0))))
         {
             display_usage();
@@ -555,16 +583,13 @@ int MAIN(const int argc, const char_t* argv[])
     return exit_code;
 }
 
-#ifdef TARGET_WINDOWS
-// Used by CoreShim to determine running CoreCLR details.
-extern "C" __declspec(dllexport) HRESULT __cdecl GetCurrentClrDetails(void** clrInstance, unsigned int* appDomainId)
+extern "C" DLL_EXPORT HRESULT CDECL GetCurrentClrDetails(void** clrInstance, unsigned int* appDomainId)
 {
     assert(clrInstance != nullptr && appDomainId != nullptr);
     *clrInstance = CurrentClrInstance;
     *appDomainId = CurrentAppDomainId;
     return S_OK;
 }
-#endif // TARGET_WINDOWS
 
 //
 // Self testing for corerun.
@@ -651,6 +676,9 @@ static int self_test()
             THROW_IF_FALSE(pal::string_ends_with(W("ab.cd"), W(".cd")));
             THROW_IF_FALSE(!pal::string_ends_with(W("ab.cd"), W(".cde")));
             THROW_IF_FALSE(!pal::string_ends_with(W("ab.cd"), W("ab.cde")));
+        }
+        {
+            dotenv::self_test();
         }
     }
     catch (const char_t msg[])

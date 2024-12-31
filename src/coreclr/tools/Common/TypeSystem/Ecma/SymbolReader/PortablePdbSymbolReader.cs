@@ -26,7 +26,7 @@ namespace Internal.TypeSystem.Ecma
             try
             {
                 // Create stream because CreateFromFile(string, ...) uses FileShare.None which is too strict
-                fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, false);
+                fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1);
                 mappedFile = MemoryMappedFile.CreateFromFile(
                     fileStream, null, fileStream.Length, MemoryMappedFileAccess.Read, HandleInheritability.None, true);
 
@@ -56,28 +56,32 @@ namespace Internal.TypeSystem.Ecma
             }
             finally
             {
-                if (accessor != null)
-                    accessor.Dispose();
-                if (mappedFile != null)
-                    mappedFile.Dispose();
-                if (fileStream != null)
-                    fileStream.Dispose();
+                accessor?.Dispose();
+                mappedFile?.Dispose();
+                fileStream?.Dispose();
             }
         }
 
-        public static PdbSymbolReader TryOpen(string pdbFilename, MetadataStringDecoder stringDecoder)
+        public static PdbSymbolReader TryOpen(string pdbFilename, MetadataStringDecoder stringDecoder, BlobContentId expectedContentId)
         {
             MemoryMappedViewAccessor mappedViewAccessor;
             MetadataReader reader = TryOpenMetadataFile(pdbFilename, stringDecoder, out mappedViewAccessor);
             if (reader == null)
                 return null;
 
+            var foundContentId = new BlobContentId(reader.DebugMetadataHeader.Id);
+            if (foundContentId != expectedContentId)
+            {
+                mappedViewAccessor.Dispose();
+                return null;
+            }
+
             return new PortablePdbSymbolReader(reader, mappedViewAccessor);
         }
 
         public static PdbSymbolReader TryOpenEmbedded(PEReader peReader, MetadataStringDecoder stringDecoder)
         {
-            foreach (DebugDirectoryEntry debugEntry in peReader.ReadDebugDirectory())
+            foreach (DebugDirectoryEntry debugEntry in peReader.SafeReadDebugDirectory())
             {
                 if (debugEntry.Type != DebugDirectoryEntryType.EmbeddedPortablePdb)
                     continue;

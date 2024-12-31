@@ -1,40 +1,38 @@
-trigger:
-  batch: false
+# This pipeline only runs on GitHub PRs, not on merges.
+trigger: none
+
+# Only run on changes to the JIT directory. Don't run if the JIT-EE GUID has changed,
+# since there won't be any SuperPMI collections with the new GUID until the collection
+# pipeline completes after this PR is merged.
+pr:
   branches:
     include:
     - main
   paths:
     include:
     - src/coreclr/jit/*
+    - src/coreclr/tools/superpmi/*
+    exclude:
     - src/coreclr/inc/jiteeversionguid.h
 
-# This pipeline is supposed to be run only on merged changes
-# and should not be triggerable from a PR. 
-pr: none
+jobs:
 
-extends:
-  template: /eng/pipelines/common/templates/pipeline-with-resources.yml
+- template: /eng/pipelines/common/platform-matrix.yml
   parameters:
-    stages:
-    - stage: Build
-      jobs:
+    jobTemplate: /eng/pipelines/coreclr/templates/build-jit-job.yml
+    buildConfig: checked
+    platforms:
+    - windows_x64
+    - windows_x86
+    jobParameters:
+      uploadAs: 'pipelineArtifacts'
 
-      - template: /eng/pipelines/common/platform-matrix.yml
-        parameters:
-          jobTemplate: /eng/pipelines/coreclr/templates/build-jit-job.yml
-          buildConfig: checked
-          platforms:
-          - windows_x64
-          - windows_x86
-          jobParameters:
-            uploadAs: 'pipelineArtifacts'
-
-      - template: /eng/pipelines/common/platform-matrix.yml
-        parameters:
-          jobTemplate: /eng/pipelines/coreclr/templates/superpmi-replay-job.yml
-          buildConfig: checked
-          platforms:
-          - windows_x64
-          - windows_x86
-          helixQueueGroup: ci
-          helixQueuesTemplate: /eng/pipelines/coreclr/templates/helix-queues-setup.yml
+- template: /eng/pipelines/common/platform-matrix.yml
+  parameters:
+    jobTemplate: /eng/pipelines/coreclr/templates/superpmi-replay-job.yml
+    buildConfig: checked
+    platforms:
+    - windows_x64
+    - windows_x86
+    helixQueueGroup: ci
+    helixQueuesTemplate: /eng/pipelines/coreclr/templates/helix-queues-setup.yml

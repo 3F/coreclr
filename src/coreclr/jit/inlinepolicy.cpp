@@ -326,6 +326,14 @@ void DefaultPolicy::NoteBool(InlineObservation obs, bool value)
                 m_ArgFeedsRangeCheck++;
                 break;
 
+            case InlineObservation::CALLEE_CONST_ARG_FEEDS_ISCONST:
+                m_ConstArgFeedsIsKnownConst = true;
+                break;
+
+            case InlineObservation::CALLEE_ARG_FEEDS_ISCONST:
+                m_ArgFeedsIsKnownConst = true;
+                break;
+
             case InlineObservation::CALLEE_UNSUPPORTED_OPCODE:
                 propagate = true;
                 break;
@@ -969,7 +977,7 @@ int DefaultPolicy::CodeSizeEstimate()
     {
         // This is not something the DefaultPolicy explicitly computed,
         // since it uses a blended evaluation model (mixing size and time
-        // together for overall profitability). But it's effecitvely an
+        // together for overall profitability). But it's effectively an
         // estimate of the size impact.
         return (m_CalleeNativeSizeEstimate - m_CallsiteNativeSizeEstimate);
     }
@@ -1371,7 +1379,7 @@ void ExtendedDefaultPolicy::NoteInt(InlineObservation obs, int value)
             {
                 SetNever(InlineObservation::CALLEE_DOES_NOT_RETURN);
             }
-            else if (!m_IsForceInline && !m_HasProfile)
+            else if (!m_IsForceInline && !m_HasProfile && !m_ConstArgFeedsIsKnownConst && !m_ArgFeedsIsKnownConst)
             {
                 unsigned bbLimit = (unsigned)JitConfig.JitExtDefaultPolicyMaxBB();
                 if (m_IsPrejitRoot)
@@ -1381,6 +1389,7 @@ void ExtendedDefaultPolicy::NoteInt(InlineObservation obs, int value)
                     bbLimit += 5 + m_Switch * 10;
                 }
                 bbLimit += m_FoldableBranch + m_FoldableSwitch * 10;
+
                 if ((unsigned)value > bbLimit)
                 {
                     SetNever(InlineObservation::CALLEE_TOO_MANY_BASIC_BLOCKS);
@@ -1499,7 +1508,7 @@ double ExtendedDefaultPolicy::DetermineMultiplier()
         // TODO: handle 'if (SomeMethod(constArg))' patterns in fgFindJumpTargets
         // The previous version of inliner optimistically assumed this is "has const arg that feeds a conditional"
         multiplier += 3.0;
-        JITDUMP("\nCallsite passes a consant.  Multiplier increased to %g.", multiplier);
+        JITDUMP("\nCallsite passes a constant.  Multiplier increased to %g.", multiplier);
     }
 
     if ((m_FoldableBox > 0) && m_NonGenericCallsGeneric)
@@ -2283,7 +2292,7 @@ void DiscretionaryPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo
     // model for actual inlining.
     EstimateCodeSize();
 
-    // Estimate peformance impact. This is just for model
+    // Estimate performance impact. This is just for model
     // evaluation purposes -- we'll still use the legacy policy's
     // model for actual inlining.
     EstimatePerformanceImpact();
@@ -2400,7 +2409,7 @@ void DiscretionaryPolicy::MethodInfoObservations(CORINFO_METHOD_INFO* methodInfo
 // On the inlines in CoreCLR's CoreLib, release windows x64, this
 // yields scores of R=0.42, MSE=228, and MAE=7.25.
 //
-// This estimate can be improved slighly by refitting, resulting in
+// This estimate can be improved slightly by refitting, resulting in
 //
 //  -1.451 +
 //   0.095 * m_CalleeNativeSizeEstimate +
@@ -2447,7 +2456,7 @@ void DiscretionaryPolicy::EstimateCodeSize()
 }
 
 //------------------------------------------------------------------------
-// EstimatePeformanceImpact: produce performance estimates based on
+// EstimatePerformanceImpact: produce performance estimates based on
 // observations.
 //
 // Notes:
@@ -2638,6 +2647,8 @@ void DiscretionaryPolicy::DumpData(FILE* file) const
     fprintf(file, ",%u", m_ArgFeedsConstantTest);
     fprintf(file, ",%u", m_MethodIsMostlyLoadStore ? 1 : 0);
     fprintf(file, ",%u", m_ArgFeedsRangeCheck);
+    fprintf(file, ",%u", m_ConstArgFeedsIsKnownConst ? 1 : 0);
+    fprintf(file, ",%u", m_ArgFeedsIsKnownConst ? 1 : 0);
     fprintf(file, ",%u", m_ConstantArgFeedsConstantTest);
     fprintf(file, ",%d", m_CalleeNativeSizeEstimate);
     fprintf(file, ",%d", m_CallsiteNativeSizeEstimate);
@@ -2917,7 +2928,7 @@ void ProfilePolicy::NoteInt(InlineObservation obs, int value)
             return;
         }
 
-        // If we're mimicing the default policy because there's no PGO
+        // If we're mimicking the default policy because there's no PGO
         // data for this call, also fail if thereare too many basic blocks.
         //
         if (!m_HasProfile && !m_IsForceInline && (value > MAX_BASIC_BLOCKS))
@@ -3383,7 +3394,7 @@ bool ReplayPolicy::FindContext(InlineContext* context)
     // Token and Hash we're looking for.
     mdMethodDef contextToken  = m_RootCompiler->info.compCompHnd->getMethodDefFromMethod(context->GetCallee());
     unsigned    contextHash   = m_RootCompiler->compMethodHash(context->GetCallee());
-    unsigned    contextOffset = (unsigned)context->GetOffset();
+    unsigned    contextOffset = (unsigned)context->GetLocation().GetOffset();
 
     return FindInline(contextToken, contextHash, contextOffset);
 }
@@ -3573,7 +3584,7 @@ bool ReplayPolicy::FindInline(CORINFO_METHOD_HANDLE callee)
     int offset = -1;
     if (m_Offset != BAD_IL_OFFSET)
     {
-        offset = (int)jitGetILoffs(m_Offset);
+        offset = m_Offset;
     }
 
     unsigned calleeOffset = (unsigned)offset;
@@ -3633,7 +3644,7 @@ void ReplayPolicy::DetermineProfitability(CORINFO_METHOD_INFO* methodInfo)
         m_IsForceInline = m_WasForceInline;
     }
 
-    // Try and find this candiate in the Xml.
+    // Try and find this candidate in the Xml.
     // If we fail to find it, then don't inline.
     bool accept = false;
 

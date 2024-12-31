@@ -48,6 +48,18 @@ HRESULT GetServerHeapData(CLRDATA_ADDRESS addr, DacpHeapSegmentData *pSegment)
     pSegment->next = (CLRDATA_ADDRESS)dac_cast<TADDR>(pHeapSegment->next);
     pSegment->gc_heap = (CLRDATA_ADDRESS)pHeapSegment->heap;
 
+    TADDR heapAddress = TO_TADDR(pSegment->gc_heap);
+    dac_gc_heap heap = LoadGcHeapData(heapAddress);
+
+    if (pSegment->segmentAddr == heap.ephemeral_heap_segment.GetAddr())
+    {
+        pSegment->highAllocMark = (CLRDATA_ADDRESS)(ULONG_PTR)heap.alloc_allocated;
+    }
+    else
+    {
+        pSegment->highAllocMark = pSegment->allocated;
+    }
+
     return S_OK;
 }
 
@@ -134,7 +146,7 @@ ClrDataAccess::ServerGCHeapDetails(CLRDATA_ADDRESS heapAddr, DacpGcHeapDetails *
     detailsData->card_table = (CLRDATA_ADDRESS)pHeap->card_table;
     detailsData->mark_array = (CLRDATA_ADDRESS)pHeap->mark_array;
     detailsData->next_sweep_obj = (CLRDATA_ADDRESS)pHeap->next_sweep_obj;
-    if (IsRegion())
+    if (IsRegionGCEnabled())
     {
         // with regions, we don't have these variables anymore
         // use special value -1 in saved_sweep_ephemeral_seg to signal the region case
@@ -263,7 +275,7 @@ ClrDataAccess::EnumSvrGlobalMemoryRegions(CLRDataEnumMemoryFlags flags)
         EnumGenerationTable(generationTable);
         DacEnumMemoryRegion(dac_cast<TADDR>(pHeap->finalize_queue), sizeof(dac_finalize_queue));
 
-        ULONG first = IsRegion() ? 0 : (*g_gcDacGlobals->max_gen);
+        ULONG first = IsRegionGCEnabled() ? 0 : (*g_gcDacGlobals->max_gen);
         // enumerating the first to max + 2 gives you
         // the segment list for all the normal segments plus the pinned heap segment (max + 2)
         // this is the convention in the GC so it is repeated here
@@ -291,7 +303,7 @@ DWORD DacGetNumHeaps()
 
 HRESULT DacHeapWalker::InitHeapDataSvr(HeapData *&pHeaps, size_t &pCount)
 {
-    bool regions = IsRegion();
+    bool regions = IsRegionGCEnabled();
 
     if (g_gcDacGlobals->n_heaps == nullptr || g_gcDacGlobals->g_heaps == nullptr)
         return S_OK;
@@ -306,7 +318,7 @@ HRESULT DacHeapWalker::InitHeapDataSvr(HeapData *&pHeaps, size_t &pCount)
     for (int i = 0; i < heaps; ++i)
     {
         // Basic heap info.
-        TADDR heapAddress = HeapTableIndex(g_gcDacGlobals->g_heaps, i);
+        TADDR heapAddress = HeapTableIndex(g_gcDacGlobals->g_heaps, i);    
         dac_gc_heap heap = LoadGcHeapData(heapAddress);
         dac_gc_heap* pHeap = &heap;
         dac_generation gen0 = ServerGenerationTableIndex(heapAddress, 0);
@@ -425,8 +437,8 @@ HRESULT DacHeapWalker::InitHeapDataSvr(HeapData *&pHeaps, size_t &pCount)
 
             seg = seg->next;
         }
+        _ASSERTE(count == j);
     }
-
     return S_OK;
 }
 

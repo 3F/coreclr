@@ -927,7 +927,7 @@ void GCToEEInterface::StompWriteBarrier(WriteBarrierParameters* args)
         //     On architectures with strong ordering, we only need to prevent compiler reordering.
         //     Otherwise we put a process-wide fence here (so that we could use an ordinary read in the barrier)
 
-#if defined(HOST_ARM64) || defined(HOST_ARM)
+#if defined(HOST_ARM64) || defined(HOST_ARM) || defined(HOST_LOONGARCH64)
         if (!is_runtime_suspended)
         {
             // If runtime is not suspended, force all threads to see the changed table before seeing updated heap boundaries.
@@ -939,7 +939,7 @@ void GCToEEInterface::StompWriteBarrier(WriteBarrierParameters* args)
         g_lowest_address = args->lowest_address;
         g_highest_address = args->highest_address;
 
-#if defined(HOST_ARM64) || defined(HOST_ARM)
+#if defined(HOST_ARM64) || defined(HOST_ARM) || defined(HOST_LOONGARCH64)
         // Need to reupdate for changes to g_highest_address g_lowest_address
         stompWBCompleteActions |= ::StompWriteBarrierResize(is_runtime_suspended, args->requires_upper_bounds_check);
 
@@ -979,7 +979,7 @@ void GCToEEInterface::StompWriteBarrier(WriteBarrierParameters* args)
         //       (we care only about managed threads and suspend/resume will do full fences - good enough for us).
         //
 
-#if defined(HOST_ARM64) || defined(HOST_ARM)
+#if defined(HOST_ARM64) || defined(HOST_ARM) || defined(HOST_LOONGARCH64)
         is_runtime_suspended = (stompWBCompleteActions & SWB_EE_RESTART) || is_runtime_suspended;
         if (!is_runtime_suspended)
         {
@@ -1002,6 +1002,9 @@ void GCToEEInterface::StompWriteBarrier(WriteBarrierParameters* args)
         assert(args->ephemeral_high != nullptr);
         g_ephemeral_low = args->ephemeral_low;
         g_ephemeral_high = args->ephemeral_high;
+        g_region_to_generation_table = args->region_to_generation_table;
+        g_region_shr = args->region_shr;
+        g_region_use_bitwise_write_barrier = args->region_use_bitwise_write_barrier;
         stompWBCompleteActions |= ::StompWriteBarrierEphemeral(args->is_runtime_suspended);
         break;
     case WriteBarrierOp::Initialize:
@@ -1026,6 +1029,9 @@ void GCToEEInterface::StompWriteBarrier(WriteBarrierParameters* args)
 
         g_lowest_address = args->lowest_address;
         g_highest_address = args->highest_address;
+        g_region_to_generation_table = args->region_to_generation_table;
+        g_region_shr = args->region_shr;
+        g_region_use_bitwise_write_barrier = args->region_use_bitwise_write_barrier;
         stompWBCompleteActions |= ::StompWriteBarrierResize(true, false);
 
         // StompWriteBarrierResize does not necessarily bash g_ephemeral_low
@@ -1601,10 +1607,42 @@ uint32_t GCToEEInterface::GetTotalNumSizedRefHandles()
     return SystemDomain::System()->GetTotalNumSizedRefHandles();
 }
 
+NormalizedTimer analysisTimer;
+
+bool GenAwareMatchingGeneration(int condemnedGeneration)
+{
+    return (gcGenAnalysisState == GcGenAnalysisState::Enabled) && (condemnedGeneration == gcGenAnalysisGen);
+}
+
+bool GenAwareMatchingCondition(size_t gcIndex, int condemnedGeneration, uint64_t promoted_bytes, uint64_t elapsed)
+{
+    if (!GenAwareMatchingGeneration(condemnedGeneration))
+    {
+        return false;
+    }
+    if (gcIndex < (uint64_t)gcGenAnalysisIndex)
+    {
+        return false;
+    }
+    if ((gcGenAnalysisBytes > 0) && (promoted_bytes <= gcGenAnalysisBytes))
+    {
+        return false;
+    }
+    if ((gcGenAnalysisTime > 0) && (elapsed <= gcGenAnalysisTime))
+    {
+        return false;
+    }
+    return true;
+}
 
 bool GCToEEInterface::AnalyzeSurvivorsRequested(int condemnedGeneration)
 {
     LIMITED_METHOD_CONTRACT;
+
+    if (GenAwareMatchingGeneration(condemnedGeneration) && gcGenAnalysisTime > 0)
+    {
+        analysisTimer.Start();
+    }
 
     // Is the list active?
     GcNotifications gn(g_pGcNotificationTable);
@@ -1624,6 +1662,13 @@ void GCToEEInterface::AnalyzeSurvivorsFinished(size_t gcIndex, int condemnedGene
 {
     LIMITED_METHOD_CONTRACT;
 
+    uint64_t elapsed = 0;
+    if (GenAwareMatchingGeneration(condemnedGeneration) && gcGenAnalysisTime > 0)
+    {
+        analysisTimer.Stop();
+        elapsed = analysisTimer.Elapsed100nsTicks();
+    }
+
     // Is the list active?
     GcNotifications gn(g_pGcNotificationTable);
     if (gn.IsActive())
@@ -1638,7 +1683,7 @@ void GCToEEInterface::AnalyzeSurvivorsFinished(size_t gcIndex, int condemnedGene
     if (gcGenAnalysisState == GcGenAnalysisState::Enabled)
     {
 #ifndef GEN_ANALYSIS_STRESS
-        if ((condemnedGeneration == gcGenAnalysisGen) && (promoted_bytes > (uint64_t)gcGenAnalysisBytes) && (gcIndex > (uint64_t)gcGenAnalysisIndex))
+        if (GenAwareMatchingCondition(gcIndex, condemnedGeneration, promoted_bytes, elapsed))
 #endif
         {
             if (gcGenAnalysisTrace)
@@ -1656,7 +1701,9 @@ void GCToEEInterface::AnalyzeSurvivorsFinished(size_t gcIndex, int condemnedGene
             {
                 EX_TRY
                 {
-                    GenerateDump (GENAWARE_DUMP_FILE_NAME, 2, GenerateDumpFlagsNone);
+                    WCHAR outputPath[MAX_PATH];
+                    ReplacePid(GENAWARE_DUMP_FILE_NAME, outputPath, MAX_PATH);
+                    GenerateDump (outputPath, 2, GenerateDumpFlagsNone, nullptr, 0);
                 }
                 EX_CATCH {}
                 EX_END_CATCH(SwallowAllExceptions);
@@ -1699,7 +1746,8 @@ void GCToEEInterface::UpdateGCEventStatus(int currentPublicLevel, int currentPub
     BOOL prv_gcprv_informational = EventXplatEnabledBGCBegin() || EventPipeEventEnabledBGCBegin();
     BOOL prv_gcprv_verbose = EventXplatEnabledPinPlugAtGCTime() || EventPipeEventEnabledPinPlugAtGCTime();
 
-    int publicProviderLevel = keyword_gc_verbose ? GCEventLevel_Verbose : (keyword_gc_informational ? GCEventLevel_Information : GCEventLevel_None);
+    int publicProviderLevel = keyword_gc_verbose ? GCEventLevel_Verbose : 
+                                 ((keyword_gc_informational || keyword_gc_heapsurvival_and_movement_informational) ? GCEventLevel_Information : GCEventLevel_None);
     int publicProviderKeywords = (keyword_gc_informational ? GCEventKeyword_GC : GCEventKeyword_None) |
                                  (keyword_gchandle_informational ? GCEventKeyword_GCHandle : GCEventKeyword_None) |
                                  (keyword_gc_heapsurvival_and_movement_informational ? GCEventKeyword_GCHeapSurvivalAndMovement : GCEventKeyword_None);
@@ -1736,4 +1784,9 @@ uint32_t GCToEEInterface::GetCurrentProcessCpuCount()
 void GCToEEInterface::DiagAddNewRegion(int generation, uint8_t* rangeStart, uint8_t* rangeEnd, uint8_t* rangeEndReserved)
 {
     ProfilerAddNewRegion(generation, rangeStart, rangeEnd, rangeEndReserved);
+}
+
+void GCToEEInterface::LogErrorToHost(const char *message)
+{
+    ::LogErrorToHost("GC: %s", message);
 }

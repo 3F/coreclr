@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.Reflection.Metadata;
 using RuntimeTypeCache = System.RuntimeType.RuntimeTypeCache;
 
 namespace System.Reflection
@@ -33,8 +34,7 @@ namespace System.Reflection
             return
                 o is MdFieldInfo m &&
                 m.m_tkField == m_tkField &&
-                m_declaringType.GetTypeHandleInternal().GetModuleHandle().Equals(
-                    m.m_declaringType.GetTypeHandleInternal().GetModuleHandle());
+                ReferenceEquals(m_declaringType, m.m_declaringType);
         }
         #endregion
 
@@ -43,6 +43,17 @@ namespace System.Reflection
 
         public override int MetadataToken => m_tkField;
         internal override RuntimeModule GetRuntimeModule() { return m_declaringType.GetRuntimeModule(); }
+
+        public override bool Equals(object? obj) =>
+            ReferenceEquals(this, obj) ||
+            (MetadataUpdater.IsSupported &&
+                obj is MdFieldInfo fi &&
+                fi.m_tkField == m_tkField &&
+                ReferenceEquals(fi.m_declaringType, m_declaringType) &&
+                ReferenceEquals(fi.m_reflectedTypeCache.GetRuntimeType(), m_reflectedTypeCache.GetRuntimeType()));
+
+        public override int GetHashCode() =>
+            HashCode.Combine(m_tkField.GetHashCode(), m_declaringType.GetUnderlyingNativeHandle().GetHashCode());
         #endregion
 
         #region FieldInfo Overrides
@@ -80,7 +91,7 @@ namespace System.Reflection
         {
             // Cannot cache these because they could be user defined non-agile enumerations
 
-            object? value = MdConstant.GetValue(GetRuntimeModule().MetadataImport, m_tkField, FieldType.GetTypeHandleInternal(), raw);
+            object? value = MdConstant.GetValue(GetRuntimeModule().MetadataImport, m_tkField, FieldType.TypeHandle, raw);
 
             if (value == DBNull.Value)
                 throw new NotSupportedException(SR.Arg_EnumLitValueNotFound);

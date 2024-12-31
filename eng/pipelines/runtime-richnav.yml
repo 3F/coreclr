@@ -8,15 +8,13 @@ trigger:
     include:
     - '*'
     exclude:
+    - '**.md'
     - eng/Version.Details.xml
+    - .devcontainer/*
     - .github/*
     - docs/*
-    - CODE-OF-CONDUCT.md
-    - CONTRIBUTING.md
     - LICENSE.TXT
     - PATENTS.TXT
-    - README.md
-    - SECURITY.md
     - THIRD-PARTY-NOTICES.TXT
 
 pr: none
@@ -24,40 +22,30 @@ pr: none
 variables:
   - template: /eng/pipelines/common/variables.yml
 
-extends:
-  template: /eng/pipelines/common/templates/pipeline-with-resources.yml
+jobs:
+
+- template: /eng/pipelines/common/platform-matrix.yml
   parameters:
-    stages:
-    - stage: Build
-      jobs:
-      #
-      # Evaluate paths
-      #
-      - ${{ if eq(variables.dependOnEvaluatePaths, true) }}:
-        - template: /eng/pipelines/common/evaluate-default-paths.yml
+    jobTemplate: /eng/pipelines/common/global-build-job.yml
+    buildConfig: debug
+    platforms:
+      - windows_x64
+    jobParameters:
+      enableRichCodeNavigation: true
+      richCodeNavigationEnvironment: "production"
+      richCodeNavigationLanguage: "csharp"
+      timeoutInMinutes: 240
+      buildArgs: -s libs.sfx+libs.oob -allConfigurations
 
-      - template: /eng/pipelines/common/platform-matrix.yml
-        parameters:
-          jobTemplate: /eng/pipelines/common/global-build-job.yml
-          buildConfig: debug
-          platforms:
-            - windows_x64
-          jobParameters:
-            enableRichCodeNavigation: true
-            richCodeNavigationEnvironment: "production"
-            richCodeNavigationLanguage: "csharp"
-            timeoutInMinutes: 240
-            buildArgs: -s libs.ref+libs.src -c debug -allConfigurations
-
-      - template: /eng/pipelines/common/platform-matrix.yml
-        parameters:
-          jobTemplate: /eng/pipelines/common/global-build-job.yml
-          buildConfig: debug
-          platforms:
-            - windows_x64
-          jobParameters:
-            enableRichCodeNavigation: true
-            nameSuffix: Mono
-            richCodeNavigationEnvironment: "production"
-            richCodeNavigationLanguage: "csharp,cpp"
-            buildArgs: -s mono -c debug
+- template: /eng/pipelines/common/platform-matrix.yml
+  parameters:
+    jobTemplate: /eng/pipelines/common/global-build-job.yml
+    buildConfig: debug
+    platforms:
+      - windows_x64
+    jobParameters:
+      enableRichCodeNavigation: true
+      nameSuffix: Mono
+      richCodeNavigationEnvironment: "production"
+      richCodeNavigationLanguage: "csharp,cpp"
+      buildArgs: -s mono -c debug

@@ -5,7 +5,7 @@ parameters:
   osSubgroup: ''
   container: ''
   runtimeVariant: ''
-  framework: net6.0 # Specify the appropriate framework when running release branches (ie netcoreapp3.0 for release/3.0)
+  framework: net7.0 # Specify the appropriate framework when running release branches (ie net6.0 for release/6.0)
   liveLibrariesBuildConfig: ''
   variables: {}
   runtimeType: 'coreclr'
@@ -19,6 +19,13 @@ parameters:
   pgoRunType: ''
   javascriptEngine: 'NoJS'
   iOSLlvmBuild: 'False'
+  skipLiveLibrariesDownload: false
+  collectHelixLogsScript: ''
+  timeoutInMinutes: 320
+  compare: false
+  onlySanityCheck: false
+  downloadSpecificBuild: null # buildId, pipeline, branchName, project
+  perfForkToUse: {} # url, branch
 
 ### Perf job
 
@@ -48,22 +55,32 @@ jobs:
     pgoRunType: ${{ parameters.pgoRunType }}
     javascriptEngine: ${{ parameters.javascriptEngine }}
     iosLlvmBuild: ${{ parameters.iosLlvmBuild }}
+    timeoutInMintues: ${{ parameters.timeoutInMinutes }}
+
+    ${{ if and(eq(parameters.runtimeType, 'wasm'), eq(parameters.codeGenType, 'aot')) }}:
+      helixTypeSuffix: '/wasm/aot'
+    ${{ if and(eq(parameters.runtimeType, 'wasm'), ne(parameters.codeGenType, 'aot')) }}:
+      helixTypeSuffix: '/wasm'
+
+    collectHelixLogsScript: ${{ parameters.collectHelixLogsScript }}
+
     # Test job depends on the corresponding build job
-    dependsOn:
-    - ${{ if not(in(parameters.runtimeType, 'AndroidMono', 'iOSMono')) }}:
-      - ${{ format('coreclr_{0}_product_build_{1}{2}_{3}_{4}', parameters.runtimeVariant, parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.buildConfig) }}
-    - ${{ if ne(parameters.liveLibrariesBuildConfig, '') }}:
-      - ${{ format('libraries_build_{0}{1}_{2}_{3}', parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.liveLibrariesBuildConfig) }}
-    - ${{ if and(eq(parameters.runtimeType, 'mono'), ne(parameters.codeGenType, 'AOT')) }}:
-      - ${{ format('mono_{0}_product_build_{1}{2}_{3}_{4}', parameters.runtimeVariant, parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.buildConfig) }}
-    - ${{ if eq(parameters.runtimeType, 'wasm')}}:
-      - ${{ format('build_{0}{1}_{2}_{3}_{4}', 'Browser', '', 'wasm', parameters.buildConfig, parameters.runtimeType) }}
-    - ${{ if and(eq(parameters.codeGenType, 'AOT'), ne(parameters.runtimeType, 'wasm'))}}:
-      - ${{ format('build_{0}{1}_{2}_{3}_{4}', parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.buildConfig, parameters.codeGenType) }}
-    - ${{ if eq(parameters.runtimeType, 'AndroidMono')}}:
-      - ${{ 'build_Android_arm64_release_AndroidMono' }}
-    - ${{ if eq(parameters.runtimeType, 'iOSMono')}}:
-      - ${{ 'build_iOS_arm64_release_iOSMono' }}
+    ${{ if eq(parameters.downloadSpecificBuild.buildId, '') }}:
+      dependsOn:
+      - ${{ if not(in(parameters.runtimeType, 'AndroidMono', 'iOSMono', 'wasm')) }}:
+        - ${{ format('coreclr_{0}_product_build_{1}{2}_{3}_{4}', parameters.runtimeVariant, parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.buildConfig) }}
+      - ${{ if and(ne(parameters.liveLibrariesBuildConfig, ''), eq(parameters.skipLiveLibrariesDownload, 'false')) }}:
+        - ${{ format('libraries_build_{0}{1}_{2}_{3}', parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.liveLibrariesBuildConfig) }}
+      - ${{ if and(eq(parameters.runtimeType, 'mono'), ne(parameters.codeGenType, 'AOT')) }}:
+        - ${{ format('mono_{0}_product_build_{1}{2}_{3}_{4}', parameters.runtimeVariant, parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.buildConfig) }}
+      - ${{ if eq(parameters.runtimeType, 'wasm')}}:
+        - ${{ format('build_{0}{1}_{2}_{3}_{4}_{5}', 'Browser', '', 'wasm', 'Linux', parameters.buildConfig, parameters.runtimeType) }}
+      - ${{ if and(eq(parameters.codeGenType, 'AOT'), ne(parameters.runtimeType, 'wasm'))}}:
+        - ${{ format('build_{0}{1}_{2}_{3}_{4}', parameters.osGroup, parameters.osSubgroup, parameters.archType, parameters.buildConfig, parameters.codeGenType) }}
+      - ${{ if eq(parameters.runtimeType, 'AndroidMono')}}:
+        - ${{ 'build_Android_arm64_release_AndroidMono' }}
+      - ${{ if eq(parameters.runtimeType, 'iOSMono')}}:
+        - ${{ 'build_iOS_arm64_release_iOSMono' }}
 
     ${{ if and(eq(parameters.osGroup, 'windows'), not(in(parameters.runtimeType, 'AndroidMono', 'iOSMono'))) }}:
       ${{ if eq(parameters.runtimeType, 'mono') }}:
@@ -74,21 +91,37 @@ jobs:
       ${{ if and(eq(parameters.runtimeType, 'mono'), ne(parameters.codeGenType, 'AOT')) }}:
         extraSetupParameters: --architecture ${{ parameters.archType }} --monodotnet $(Build.SourcesDirectory)/.dotnet-mono
       ${{ if and(eq(parameters.runtimeType, 'wasm'), ne(parameters.codeGenType, 'AOT')) }}:
-        extraSetupParameters: --architecture ${{ parameters.archType }} --wasm $(librariesDownloadDir)/bin/wasm --javascriptengine ${{ parameters.javascriptEngine }}
+        extraSetupParameters: --architecture ${{ parameters.archType }} --wasmbundle $(librariesDownloadDir)/bin/wasm --javascriptengine ${{ parameters.javascriptEngine }} $(extraSetupParametersSuffix)
       ${{ if and(eq(parameters.runtimeType, 'wasm'), eq(parameters.codeGenType, 'AOT')) }}:
-        extraSetupParameters: --architecture ${{ parameters.archType }} --wasm $(librariesDownloadDir)/bin/wasm --wasmaot --javascriptengine ${{ parameters.javascriptEngine }}
+        extraSetupParameters: --architecture ${{ parameters.archType }} --wasmbundle $(librariesDownloadDir)/bin/wasm --wasmaot --javascriptengine ${{ parameters.javascriptEngine }} $(extraSetupParametersSuffix)
       ${{ if and(eq(parameters.codeGenType, 'AOT'), ne(parameters.runtimeType, 'wasm')) }}:
         extraSetupParameters: --architecture ${{ parameters.archType }} --monoaot $(librariesDownloadDir)/bin/aot
       ${{ if and(eq(parameters.runtimeType, 'coreclr'), ne(parameters.osSubGroup, '_musl')) }}:
         extraSetupParameters: --corerootdirectory $(Build.SourcesDirectory)/artifacts/tests/coreclr/${{ parameters.osGroup }}.${{ parameters.archType }}.Release/Tests/Core_Root --architecture ${{ parameters.archType }}
       ${{ if and(eq(parameters.runtimeType, 'coreclr'), eq(parameters.osSubGroup, '_musl')) }}:
         extraSetupParameters: --corerootdirectory $(Build.SourcesDirectory)/artifacts/tests/coreclr/${{ parameters.osGroup }}.${{ parameters.archType }}.Release/Tests/Core_Root --architecture ${{ parameters.archType }} --alpine
-    ${{ if eq(parameters.runtimeType, 'AndroidMono') }}:
+    ${{ if in(parameters.runtimeType, 'AndroidMono') }}:
       extraSetupParameters: -Architecture ${{ parameters.archType }} -AndroidMono
-    ${{ if eq(parameters.runtimeType, 'iosMono') }}:
-      extraSetupParameters: -Architecture ${{ parameters.archType }} -iOSMono -iOSLlvmBuild:$${{ parameters.iOSLlvmBuild }}
+    ${{ if in(parameters.runtimeType, 'iosMono') }}:
+      extraSetupParameters: --architecture ${{ parameters.archType }} --iosmono --iosllvmbuild ${{ parameters.iOSLlvmBuild }}
 
-    variables: ${{ parameters.variables }}
+    variables:
+    - ${{ each variable in parameters.variables }}:
+      - name: ${{ variable.name }}
+        value: ${{ variable.value }}
+
+    - name: _compareArg
+      ${{ if eq(parameters.compare, 'true') }}:
+        value: '--compare'
+    - name: _onlySanityCheckArg
+      ${{ if eq(parameters.onlySanityCheck, 'true') }}:
+        value: '--only-sanity'
+    - name: _perfForkArg
+      ${{ if ne(parameters.perfForkToUse.url, '') }}:
+        value: --perffork ${{ parameters.perfForkToUse.url }} --perfforkbranch ${{ coalesce(parameters.perfForkToUse.branch, 'main') }}
+
+    - name: extraSetupParametersSuffix
+      value: "$(_compareArg) $(_onlySanityCheckArg) $(_perfForkArg)"
 
     frameworks:
       - ${{ parameters.framework }}
@@ -97,9 +130,9 @@ jobs:
     - script: |
         $(Build.SourcesDirectory)/eng/common/msbuild.sh $(Build.SourcesDirectory)/eng/testing/performance/add_properties_to_pipeline.proj /t:SetVariables
       displayName: Add Properties To Pipeline Env
-      
+
     # Optionally download live-built libraries
-    - ${{ if ne(parameters.liveLibrariesBuildConfig, '') }}:
+    - ${{ if and(ne(parameters.liveLibrariesBuildConfig, ''), eq(parameters.skipLiveLibrariesDownload, 'false')) }}:
       - template: /eng/pipelines/common/download-artifact-step.yml
         parameters:
           unpackFolder: $(librariesDownloadDir)
@@ -109,7 +142,7 @@ jobs:
           displayName: 'live-built libraries'
 
     # Download coreclr
-    - ${{ if not(in(parameters.runtimeType, 'AndroidMono', 'iOSMono')) }}:
+    - ${{ if not(in(parameters.runtimeType, 'AndroidMono', 'iOSMono', 'wasm')) }}:
       - template: /eng/pipelines/common/download-artifact-step.yml
         parameters:
           unpackFolder: $(buildProductRootFolderPath)
@@ -117,7 +150,7 @@ jobs:
           artifactName: '$(buildProductArtifactName)'
           displayName: 'Coreclr product build'
 
-    # Download mono 
+    # Download mono
     - ${{ if and(eq(parameters.runtimeType, 'mono'), ne(parameters.codeGenType, 'AOT')) }}:
       - template: /eng/pipelines/common/download-artifact-step.yml
         parameters:
@@ -129,14 +162,29 @@ jobs:
 
     # Download wasm
     - ${{ if eq(parameters.runtimeType, 'wasm') }}:
-      - template: /eng/pipelines/common/download-artifact-step.yml
-        parameters:
-          unpackFolder: $(librariesDownloadDir)/BrowserWasm
-          artifactFileName: BrowserWasm.zip
-          artifactName: BrowserWasm
-          displayName: BrowserWasm
+      - ${{ if eq(parameters.downloadSpecificBuild.buildId, '') }}:
+        - template: /eng/pipelines/common/download-artifact-step.yml
+          parameters:
+            unpackFolder: $(librariesDownloadDir)/BrowserWasm
+            artifactFileName: BrowserWasm.zip
+            artifactName: BrowserWasm
+            displayName: BrowserWasm
+      - ${{ if ne(parameters.downloadSpecificBuild.buildId, '') }}:
+        - template: /eng/pipelines/common/download-specific-artifact-step.yml
+          parameters:
+            unpackFolder: $(librariesDownloadDir)/BrowserWasm
+            artifactFileName: BrowserWasm.zip
+            artifactName: BrowserWasm
+            displayName: BrowserWasm
+            ${{ insert }}: ${{ parameters.downloadSpecificBuild }}
 
-      - script: "mkdir $(librariesDownloadDir)/bin/wasm;unzip -o $(librariesDownloadDir)/BrowserWasm/artifacts/packages/Release/Shipping/Microsoft.NETCore.App.Runtime.Mono.browser-wasm.6.0.0-ci.nupkg data/* runtimes/* -d $(librariesDownloadDir)/bin/wasm;cp src/mono/wasm/runtime-test.js $(librariesDownloadDir)/bin/wasm/runtime-test.js;find $(librariesDownloadDir)/bin/wasm -type f -exec chmod 664 {} \\;"
+      - script: >-
+          mkdir -p $(librariesDownloadDir)/bin/wasm/wasm-data &&
+          mkdir -p $(librariesDownloadDir)/bin/wasm/dotnet &&
+          cp -r $(librariesDownloadDir)/BrowserWasm/staging/dotnet-net7/* $(librariesDownloadDir)/bin/wasm/dotnet &&
+          cp src/mono/wasm/test-main.js $(librariesDownloadDir)/bin/wasm/wasm-data/test-main.js &&
+          find $(librariesDownloadDir)/bin/wasm -type d &&
+          find $(librariesDownloadDir)/bin/wasm -type f -exec chmod 664 {} \;
         displayName: "Create wasm directory (Linux)"
 
     # Download mono AOT
@@ -151,37 +199,55 @@ jobs:
       - script: "mkdir -p $(librariesDownloadDir)/bin/aot/sgen;mkdir -p $(librariesDownloadDir)/bin/aot/pack;cp -r $(librariesDownloadDir)/LinuxMonoAOT/artifacts/obj/mono/Linux.${{ parameters.archType }}.Release/mono/* $(librariesDownloadDir)/bin/aot/sgen;cp -r $(librariesDownloadDir)/LinuxMonoAOT/artifacts/bin/microsoft.netcore.app.runtime.linux-${{ parameters.archType }}/Release/* $(librariesDownloadDir)/bin/aot/pack"
         displayName: "Create aot directory (Linux)"
 
-    # Download AndroidMono
+    # Download artifacts for Android Testing
     - ${{ if eq(parameters.runtimeType, 'AndroidMono')}}:
       - template: /eng/pipelines/common/download-artifact-step.yml
         parameters:
-          unpackFolder: $(Build.SourcesDirectory)
+          unpackFolder: $(Build.SourcesDirectory)/androidHelloWorld
           cleanUnpackFolder: false
           artifactFileName: 'AndroidMonoarm64.tar.gz'
           artifactName: 'AndroidMonoarm64'
-          displayName: 'Mono Android runtime'
-    
+          displayName: 'Mono Android HelloWorld'
+      
     # Download iOSMono tests
-    - ${{ if eq(parameters.runtimeType, 'iOSMono') }}:
+    - ${{ if eq(parameters.runtimeType, 'iOSMono') }}: 
       - template: /eng/pipelines/common/download-artifact-step.yml
         parameters:
           unpackFolder: $(Build.SourcesDirectory)/iosHelloWorld/nollvm
           cleanUnpackFolder: false
-          artifactFileName: 'iOSSampleAppNoLLVM.tar.gz'
+          artifactFileName: 'iOSSampleAppNoLLVM.zip'
           artifactName: 'iOSSampleAppNoLLVM'
           displayName: 'iOS Sample App NoLLVM'
       - template: /eng/pipelines/common/download-artifact-step.yml
         parameters:
           unpackFolder: $(Build.SourcesDirectory)/iosHelloWorld/llvm
           cleanUnpackFolder: false
-          artifactFileName: 'iOSSampleAppLLVM.tar.gz'
+          artifactFileName: 'iOSSampleAppLLVM.zip'
           artifactName: 'iOSSampleAppLLVM'
           displayName: 'iOS Sample App LLVM'
+      # same artifact as above but don't extract .zip
+      - task: DownloadBuildArtifacts@0
+        displayName: 'Download iOS Sample App NoLLVM'
+        inputs:
+          buildType: current
+          downloadType: single
+          downloadPath: '$(Build.SourcesDirectory)/iosHelloWorldZip/nollvmzip'
+          artifactName: 'iOSSampleAppNoLLVM'
+          checkDownloadedFiles: true
+      # same artifact as above but don't extract .zip
+      - task: DownloadBuildArtifacts@0
+        displayName: 'Download iOS Sample App LLVM'
+        inputs:
+          buildType: current
+          downloadType: single
+          downloadPath: '$(Build.SourcesDirectory)/iosHelloWorldZip/llvmzip'
+          artifactName: 'iOSSampleAppLLVM'
+          checkDownloadedFiles: true
 
     # Create Core_Root
     - script: $(Build.SourcesDirectory)/src/tests/build$(scriptExt) $(buildConfig) $(archType) generatelayoutonly $(librariesOverrideArg)
       displayName: Create Core_Root
-      condition: and(succeeded(), ne(variables.runtimeFlavorName, 'Mono'))
+      condition: and(succeeded(), ne(variables.runtimeFlavorName, 'Mono'), ne('${{ parameters.runtimeType }}', 'wasm'))
 
     # Copy the runtime directory into the testhost folder to include OOBs.
     - script: "build.cmd -subset libs.pretest -configuration release -ci -arch $(archType) -testscope innerloop /p:RuntimeArtifactsPath=$(librariesDownloadDir)\\bin\\mono\\$(osGroup).$(archType).$(buildConfigUpper) /p:RuntimeFlavor=mono;xcopy $(Build.SourcesDirectory)\\artifacts\\bin\\runtime\\$(_Framework)-$(osGroup)-$(buildConfigUpper)-$(archType)\\* $(Build.SourcesDirectory)\\artifacts\\bin\\testhost\\$(_Framework)-$(osGroup)-$(buildConfigUpper)-$(archType)\\shared\\Microsoft.NETCore.App\\$(productVersion) /E /I /Y;xcopy $(Build.SourcesDirectory)\\artifacts\\bin\\testhost\\$(_Framework)-$(osGroup)-$(buildConfigUpper)-$(archType)\\* $(Build.SourcesDirectory)\\.dotnet-mono /E /I /Y;copy $(Build.SourcesDirectory)\\artifacts\\bin\\coreclr\\$(osGroup).$(archType).$(buildConfigUpper)\\corerun.exe $(Build.SourcesDirectory)\\.dotnet-mono\\shared\\Microsoft.NETCore.App\\$(productVersion)\\corerun.exe"

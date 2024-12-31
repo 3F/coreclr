@@ -89,7 +89,7 @@ There are 2 types of namespace collisions that must be handled.
    implementation (with some_function)
 
     [side note : for the Win32 PAL, this can be accomplished without touching
-    pal.h. In Windows, symbols in in dynamic libraries are resolved at
+    pal.h. In Windows, symbols in dynamic libraries are resolved at
     compile time. if an application that uses some_function is only linked to
     pal.dll, some_function will be resolved to the version in that DLL,
     even if other DLLs in the system provide other implementations. In addition,
@@ -178,18 +178,14 @@ function_name() to call the system's implementation
 #define strcat DUMMY_strcat
 #define strncat DUMMY_strncat
 #define strcpy DUMMY_strcpy
-#define strcspn DUMMY_strcspn
 #define strncmp DUMMY_strncmp
 #define strncpy DUMMY_strncpy
 #define strchr DUMMY_strchr
 #define strrchr DUMMY_strrchr
 #define strpbrk DUMMY_strpbrk
 #define strtod DUMMY_strtod
-#define strspn DUMMY_strspn
 #define tolower DUMMY_tolower
 #define toupper DUMMY_toupper
-#define islower DUMMY_islower
-#define isupper DUMMY_isupper
 #define isprint DUMMY_isprint
 #define isdigit DUMMY_isdigit
 #define iswalpha DUMMY_iswalpha
@@ -221,6 +217,7 @@ function_name() to call the system's implementation
 #define sqrt DUMMY_sqrt
 #define tan DUMMY_tan
 #define tanh DUMMY_tanh
+#define trunc DUMMY_trunc
 #define ceilf DUMMY_ceilf
 #define cosf DUMMY_cosf
 #define coshf DUMMY_coshf
@@ -233,6 +230,7 @@ function_name() to call the system's implementation
 #define sqrtf DUMMY_sqrtf
 #define tanf DUMMY_tanf
 #define tanhf DUMMY_tanhf
+#define truncf DUMMY_truncf
 
 /* RAND_MAX needed to be renamed to avoid duplicate definition when including
    stdlib.h header files. PAL_RAND_MAX should have the same value as RAND_MAX
@@ -366,7 +364,6 @@ function_name() to call the system's implementation
 #undef strstr
 #undef strcmp
 #undef strcat
-#undef strcspn
 #undef strncat
 #undef strcpy
 #undef strncmp
@@ -377,13 +374,10 @@ function_name() to call the system's implementation
 #undef strtoul
 #undef strtoull
 #undef strtod
-#undef strspn
 #undef strtok
 #undef strdup
 #undef tolower
 #undef toupper
-#undef islower
-#undef isupper
 #undef isprint
 #undef isdigit
 #undef isspace
@@ -430,7 +424,6 @@ function_name() to call the system's implementation
 #undef va_list
 #undef va_start
 #undef va_end
-#undef va_arg
 #undef va_copy
 #undef stdin
 #undef stdout
@@ -465,6 +458,7 @@ function_name() to call the system's implementation
 #undef sqrt
 #undef tan
 #undef tanh
+#undef trunc
 #undef acosf
 #undef acoshf
 #undef asinf
@@ -493,6 +487,7 @@ function_name() to call the system's implementation
 #undef sqrtf
 #undef tanf
 #undef tanhf
+#undef truncf
 #undef rand
 #undef srand
 #undef errno
@@ -527,8 +522,6 @@ function_name() to call the system's implementation
 #undef wcsstr
 #undef wcscmp
 #undef wcsncpy
-#undef wcstok
-#undef wcscspn
 #undef iswupper
 #undef iswspace
 #undef towlower
@@ -617,8 +610,6 @@ function_name() to call the system's implementation
 
 #undef assert
 #define assert (Use__ASSERTE_instead_of_assert) assert
-
-#define string_countof(a) (sizeof(a) / sizeof(a[0]) - 1)
 
 #ifndef __ANDROID__
 #define TEMP_DIRECTORY_PATH "/tmp/"

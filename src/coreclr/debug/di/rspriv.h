@@ -168,12 +168,16 @@ private:
     USHORT m_usPort;
 };
 
+#ifdef DACCESS_COMPILE
+    #error This header cannot be used in the DAC
+#endif
+
 extern forDbiWorker forDbi;
 
 // for dbi we just default to new, but we need to have these defined for both dac and dbi
 inline void * operator new(size_t lenBytes, const forDbiWorker &)
 {
-    void * result = new BYTE[lenBytes];
+    void * result = new (nothrow) BYTE[lenBytes];
     if (result == NULL)
     {
         ThrowOutOfMemory();
@@ -183,7 +187,7 @@ inline void * operator new(size_t lenBytes, const forDbiWorker &)
 
 inline void * operator new[](size_t lenBytes, const forDbiWorker &)
 {
-    void * result = new BYTE[lenBytes];
+    void * result = new (nothrow) BYTE[lenBytes];
     if (result == NULL)
     {
         ThrowOutOfMemory();
@@ -198,6 +202,11 @@ void DeleteDbiMemory(T *p)
     delete p;
 }
 
+template<class T> inline
+void DeleteDbiArrayMemory(T *p, int)
+{
+    delete[] p;
+}
 
 
 //---------------------------------------------------------------------------------------
@@ -221,7 +230,7 @@ public:
         m_cElements = 0;
     }
 
-    // Is the array emtpy?
+    // Is the array empty?
     bool IsEmpty() const
     {
         return (m_pArray == NULL);
@@ -271,7 +280,7 @@ public:
         m_cElements = 0;
     }
 
-    // Array lookup. Caller gaurantees this is in range.
+    // Array lookup. Caller guarantees this is in range.
     // Used for reading
     T* operator [] (unsigned int index) const
     {
@@ -290,7 +299,7 @@ public:
         m_pArray[index].Assign(pValue);
     }
 
-    // Get lenght of array in elements.
+    // Get length of array in elements.
     unsigned int Length() const
     {
         return m_cElements;
@@ -536,7 +545,7 @@ protected:
 
 
 //-----------------------------------------------------------------------------
-// Simple Holder for RS object intialization to cooperate with Neutering
+// Simple Holder for RS object initialization to cooperate with Neutering
 // semantics.
 // The ctor will do an addref.
 // The dtor (invoked in exception) will neuter and release the object. This
@@ -837,7 +846,7 @@ typedef RSLock::RSInverseLockHolder RSInverseLockHolder;
  * ------------------------------------------------------------------------- */
 
 // This serves as glue for exceptions. Eventually, we shouldn't have unrecoverable
-// error, and instead, errors should just propogate up.
+// error, and instead, errors should just propagate up.
 #define SetUnrecoverableIfFailed(__p, __hr) \
     if (FAILED(__hr)) \
     { \
@@ -1184,17 +1193,6 @@ public:
     static LONG s_CordbObjectUID;    // Unique ID for each object.
     static LONG s_TotalObjectCount; // total number of outstanding objects.
 
-
-    void ValidateObject()
-    {
-        if( !IsValidObject() )
-        {
-            STRESS_LOG1(LF_ASSERT, LL_ALWAYS, "CordbCommonBase::IsValidObject() failed: %x\n", this);
-            _ASSERTE(!"CordbCommonBase::IsValidObject() failed");
-            FreeBuildDebugBreak();
-        }
-    }
-
     bool IsValidObject()
     {
         return (m_signature == CORDB_COMMON_BASE_SIGNATURE);
@@ -1212,7 +1210,7 @@ public:
 
     void init(UINT_PTR id, enumCordbDerived type)
     {
-        // To help us track object leaks, we want to log when we create & destory CordbBase objects.
+        // To help us track object leaks, we want to log when we create & destroy CordbBase objects.
 #ifdef _DEBUG
         InterlockedIncrement(&s_TotalObjectCount);
         InterlockedIncrement(&s_CordbObjectUID);
@@ -1253,7 +1251,7 @@ public:
         //    m_sdThis[m_type][m_dwInstance] = NULL;
         //}
 #endif
-        // To help us track object leaks, we want to log when we create & destory CordbBase objects.
+        // To help us track object leaks, we want to log when we create & destroy CordbBase objects.
         LOG((LF_CORDB, LL_EVERYTHING, "Memory: CordbBase object deleted: this=%p, id=%p, Refcount=0x%x\n", this, m_id, m_RefCount));
 
 #ifdef _DEBUG
@@ -1563,7 +1561,7 @@ _____Neuter_Status_Already_Marked = 0; \
 // 1) it means that we have no synchronization (can't take the Stop-Go lock)
 // 2) none of our backpointers are usable (they may be nulled out at anytime by another thread).
 //    - this also means we absolutely can't send IPC events (since that requires a CordbProcess)
-// 3) The only safe data are blittalbe embedded fields (eg, a pid or stack range)
+// 3) The only safe data are blittable embedded fields (eg, a pid or stack range)
 //
 // Any usage of this macro should clearly specify why this is safe.
 #define OK_IF_NEUTERED(pThis) \
@@ -2202,7 +2200,7 @@ public:
     COM_METHOD SetManagedHandler(ICorDebugManagedCallback *pCallback);
     COM_METHOD SetUnmanagedHandler(ICorDebugUnmanagedCallback *pCallback);
     COM_METHOD CreateProcess(LPCWSTR lpApplicationName,
-                             __in_z LPWSTR lpCommandLine,
+                             _In_z_ LPWSTR lpCommandLine,
                              LPSECURITY_ATTRIBUTES lpProcessAttributes,
                              LPSECURITY_ATTRIBUTES lpThreadAttributes,
                              BOOL bInheritHandles,
@@ -2234,7 +2232,7 @@ public:
 
     COM_METHOD CreateProcessEx(ICorDebugRemoteTarget * pRemoteTarget,
                                LPCWSTR lpApplicationName,
-                               __in_z LPWSTR lpCommandLine,
+                               _In_z_ LPWSTR lpCommandLine,
                                LPSECURITY_ATTRIBUTES lpProcessAttributes,
                                LPSECURITY_ATTRIBUTES lpThreadAttributes,
                                BOOL bInheritHandles,
@@ -2258,7 +2256,7 @@ public:
 
     HRESULT CreateProcessCommon(ICorDebugRemoteTarget * pRemoteTarget,
                                 LPCWSTR lpApplicationName,
-                                __in_z LPWSTR lpCommandLine,
+                                _In_z_ LPWSTR lpCommandLine,
                                 LPSECURITY_ATTRIBUTES lpProcessAttributes,
                                 LPSECURITY_ATTRIBUTES lpThreadAttributes,
                                 BOOL bInheritHandles,
@@ -2318,9 +2316,7 @@ public:
 
     PathString& GetDacModulePath() { return m_dacModulePath; }
 
-#ifdef FEATURE_CORESYSTEM
     HMODULE GetTargetCLR() { return m_targetCLR; }
-#endif
 
 private:
     bool IsCreateProcessSupported();
@@ -2343,11 +2339,7 @@ private:
 
     PathString m_dacModulePath;
 
-//Note - this code could be useful outside coresystem, but keeping the change localized
-// because we are late in the win8 release
-#ifdef FEATURE_CORESYSTEM
     HMODULE m_targetCLR;
-#endif
 };
 
 
@@ -2459,7 +2451,7 @@ public:
     // Returns the friendly name of the AppDomain
     COM_METHOD GetName(ULONG32   cchName,
                        ULONG32 * pcchName,
-                       __out_ecount_part_opt(cchName, *pcchName) WCHAR     szName[]);
+                       _Out_writes_to_opt_(cchName, *pcchName) WCHAR     szName[]);
 
     /*
      * GetObject returns the runtime app domain object.
@@ -2507,13 +2499,13 @@ public:
     CordbModule * GetModuleFromMetaDataInterface(IUnknown *pIMetaData);
 
     // Lookup a module from the cache.  Create and to the cache if needed.
-    CordbModule * LookupOrCreateModule(VMPTR_Module vmModuleToken, VMPTR_DomainFile vmDomainFileToken);
+    CordbModule * LookupOrCreateModule(VMPTR_Module vmModuleToken, VMPTR_DomainAssembly vmDomainAssemblyToken);
 
     // Lookup a module from the cache.  Create and to the cache if needed.
-    CordbModule * LookupOrCreateModule(VMPTR_DomainFile vmDomainFileToken);
+    CordbModule * LookupOrCreateModule(VMPTR_DomainAssembly vmDomainAssemblyToken);
 
     // Callback from DAC for module enumeration
-    static void ModuleEnumerationCallback(VMPTR_DomainFile vmModule, void * pUserData);
+    static void ModuleEnumerationCallback(VMPTR_DomainAssembly vmModule, void * pUserData);
 
     // Use DAC to add any modules for this assembly.
     void PrepopulateModules();
@@ -2545,7 +2537,7 @@ public:
     // Cache of modules in this appdomain. In the VM, modules live in an assembly.
     // This cache lives on the appdomain because we generally want to do appdomain (or process)
     // wide lookup.
-    // This is indexed by VMPTR_DomainFile, which has appdomain affinity.
+    // This is indexed by VMPTR_DomainAssembly, which has appdomain affinity.
     // This is populated by code:CordbAppDomain::LookupOrCreateModule (which may be invoked
     // anytime the RS gets hold of a VMPTR), and are removed at the unload event.
     CordbSafeHashTable<CordbModule>      m_modules;
@@ -2642,12 +2634,12 @@ public:
      */
     COM_METHOD GetCodeBase(ULONG32   cchName,
                            ULONG32 * pcchName,
-                           __out_ecount_part_opt(cchName, *pcchName) WCHAR     szName[]);
+                           _Out_writes_to_opt_(cchName, *pcchName) WCHAR     szName[]);
 
     // returns the filename of the assembly, or "<unknown>" for in-memory assemblies
     COM_METHOD GetName(ULONG32   cchName,
                        ULONG32 * pcchName,
-                       __out_ecount_part_opt(cchName, *pcchName) WCHAR     szName[]);
+                       _Out_writes_to_opt_(cchName, *pcchName) WCHAR     szName[]);
 
 
     //-----------------------------------------------------------
@@ -2971,10 +2963,10 @@ public:
     //-----------------------------------------------------------
     // IMetaDataLookup
     // -----------------------------------------------------------
-    IMDInternalImport * LookupMetaData(VMPTR_PEFile vmPEFile, bool &isILMetaDataForNGENImage);
+    IMDInternalImport * LookupMetaData(VMPTR_PEAssembly vmPEAssembly, bool &isILMetaDataForNGENImage);
 
     // Helper functions for LookupMetaData implementation
-    IMDInternalImport * LookupMetaDataFromDebugger(VMPTR_PEFile vmPEFile,
+    IMDInternalImport * LookupMetaDataFromDebugger(VMPTR_PEAssembly vmPEAssembly,
                                                    bool &isILMetaDataForNGENImage,
                                                    CordbModule * pModule);
 
@@ -3075,7 +3067,7 @@ public:
     /*
      * ModifyLogSwitch modifies the specified switch's severity level.
      */
-    COM_METHOD ModifyLogSwitch(__in_z WCHAR *pLogSwitchName, LONG lLevel);
+    COM_METHOD ModifyLogSwitch(_In_z_ WCHAR *pLogSwitchName, LONG lLevel);
 
     COM_METHOD EnumerateAppDomains(ICorDebugAppDomainEnum **ppAppDomains);
     COM_METHOD GetObject(ICorDebugValue **ppObject);
@@ -3288,6 +3280,10 @@ public:
 #endif
     }
 
+#ifdef OUT_OF_PROCESS_SETTHREADCONTEXT
+    void HandleSetThreadContextNeeded(DWORD dwThreadId);
+#endif
+
     //
     // Shim  callbacks to simulate fake attach events.
     //
@@ -3385,7 +3381,7 @@ public:
 
     bool IsWin32EventThread();
 
-    void HandleSyncCompleteRecieved();
+    void HandleSyncCompleteReceived();
 
     // Send a truly asynchronous IPC event.
     void SendAsyncIPCEvent(DebuggerIPCEventType t);
@@ -3456,9 +3452,9 @@ public:
 
     // Looks up a previously constructed CordbClass instance without creating. May return NULL if the
     // CordbClass instance doesn't exist.
-    CordbClass * LookupClass(ICorDebugAppDomain * pAppDomain, VMPTR_DomainFile vmDomainFile, mdTypeDef classToken);
+    CordbClass * LookupClass(ICorDebugAppDomain * pAppDomain, VMPTR_DomainAssembly vmDomainAssembly, mdTypeDef classToken);
 
-    CordbModule * LookupOrCreateModule(VMPTR_DomainFile vmDomainFile);
+    CordbModule * LookupOrCreateModule(VMPTR_DomainAssembly vmDomainAssembly);
 
 #ifdef FEATURE_INTEROP_DEBUGGING
     CordbUnmanagedThread *GetUnmanagedThread(DWORD dwThreadId)
@@ -3835,7 +3831,7 @@ private:
     // m_syncCompleteReceived tells us if the runtime is _actually_ sychronized. It goes
     // high once we get a SyncComplete, and it goes low once we actually send the continue.
     // This is always set by the thread that receives the sync-complete. In interop, that's the w32et.
-    // Thus this is the most accurate indication of wether the Debuggee is _actually_ synchronized or not.
+    // Thus this is the most accurate indication of whether the Debuggee is _actually_ synchronized or not.
     bool                  m_syncCompleteReceived;
 
 
@@ -3954,7 +3950,7 @@ public:
 
     // The array of entries. (The patchtable is a hash implemented as a single-array)
     // This array includes empty entries.
-    // There is an auxillary bucket structure used to map hash codes to array indices.
+    // There is an auxiliary bucket structure used to map hash codes to array indices.
     // We traverse the array, and we recognize an empty slot
     // if DebuggerControllerPatch::opcode == 0.
     // If we haven't gotten the table, then m_pPatchTable is NULL
@@ -3975,7 +3971,7 @@ public:
     ULONG               *m_rgNextPatch;
 
     // This has m_cPatch elements.
-    PRD_TYPE             *m_rgUncommitedOpcode;
+    PRD_TYPE             *m_rgUncommittedOpcode;
 
     // CORDB_ADDRESS's are UINT_PTR's (64 bit under HOST_64BIT, 32 bit otherwise)
 #if defined(TARGET_64BIT)
@@ -4087,7 +4083,7 @@ private:
     // DAC
     //
 
-    // Try to initalize DAC, may fail
+    // Try to initialize DAC, may fail
     BOOL TryInitializeDac();
 
     // Expect DAC initialize to succeed.
@@ -4143,7 +4139,7 @@ class CordbModule : public CordbBase,
 public:
     CordbModule(CordbProcess *      process,
                 VMPTR_Module        vmModule,
-                VMPTR_DomainFile    vmDomainFile);
+                VMPTR_DomainAssembly    vmDomainAssembly);
 
     virtual ~CordbModule();
     virtual void Neuter();
@@ -4176,7 +4172,7 @@ public:
     COM_METHOD GetProcess(ICorDebugProcess **ppProcess);
     COM_METHOD GetBaseAddress(CORDB_ADDRESS *pAddress);
     COM_METHOD GetAssembly(ICorDebugAssembly **ppAssembly);
-    COM_METHOD GetName(ULONG32 cchName, ULONG32 *pcchName, __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+    COM_METHOD GetName(ULONG32 cchName, ULONG32 *pcchName, _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
     COM_METHOD EnableJITDebugging(BOOL bTrackJITInfo, BOOL bAllowJitOpts);
     COM_METHOD EnableClassLoadCallbacks(BOOL bClassLoadCallbacks);
 
@@ -4248,7 +4244,7 @@ public:
 #endif // _DEBUG
 
     // Internal help to get the "name" (filename or pretty name) of the module.
-    HRESULT GetNameWorker(ULONG32 cchName, ULONG32 *pcchName, __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+    HRESULT GetNameWorker(ULONG32 cchName, ULONG32 *pcchName, _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
     // Marks that the module's metadata has become invalid and needs to be refetched.
     void RefreshMetaData();
@@ -4350,9 +4346,9 @@ public:
 
     const WCHAR * GetNGenImagePath();
 
-    const VMPTR_DomainFile GetRuntimeDomainFile ()
+    const VMPTR_DomainAssembly GetRuntimeDomainAssembly ()
     {
-        return m_vmDomainFile;
+        return m_vmDomainAssembly;
     }
 
     const VMPTR_Module GetRuntimeModule()
@@ -4364,7 +4360,7 @@ public:
     IDacDbiInterface::SymbolFormat GetInMemorySymbolStream(IStream ** ppStream);
 
     // accessor for PE file
-    VMPTR_PEFile GetPEFile();
+    VMPTR_PEAssembly GetPEFile();
 
 
     IMetaDataImport * GetMetaDataImporter();
@@ -4387,7 +4383,7 @@ public:
 
     // The real handle into the VM for a module. This is appdomain aware.
     // This is the primary VM counterpart for the CordbModule.
-    VMPTR_DomainFile m_vmDomainFile;
+    VMPTR_DomainAssembly m_vmDomainAssembly;
 
     VMPTR_Module m_vmModule;
 
@@ -4415,9 +4411,9 @@ private:
     // "Global" class for this module. Global functions + vars exist in this class.
     RSSmartPtr<CordbClass> m_pClass;
 
-    // Handle to PEFile, useful for metadata lookups.
+    // Handle to PEAssembly, useful for metadata lookups.
     // this should always be non-null.
-    VMPTR_PEFile    m_vmPEFile;
+    VMPTR_PEAssembly    m_vmPEFile;
 
 
     // Public metadata importer. This is lazily initialized and accessed from code:GetMetaDataImporter
@@ -4480,15 +4476,15 @@ public:
     // Get the string for the type of the MDA. Never empty.
     // This is a convenient performant alternative to getting the XML stream and extracting
     // the type from that based off the schema.
-    COM_METHOD GetName(ULONG32 cchName, ULONG32 * pcchName, __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+    COM_METHOD GetName(ULONG32 cchName, ULONG32 * pcchName, _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
     // Get a string description of the MDA. This may be empty (0-length).
-    COM_METHOD GetDescription(ULONG32 cchName, ULONG32 * pcchName, __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+    COM_METHOD GetDescription(ULONG32 cchName, ULONG32 * pcchName, _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
     // Get the full associated XML for the MDA. This may be empty.
     // This could be a potentially expensive operation if the xml stream is large.
     // See the MDA documentation for the schema for this XML stream.
-    COM_METHOD GetXML(ULONG32 cchName, ULONG32 * pcchName, __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+    COM_METHOD GetXML(ULONG32 cchName, ULONG32 * pcchName, _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
     COM_METHOD GetFlags(CorDebugMDAFlags * pFlags);
 
@@ -4693,7 +4689,7 @@ public:
 // This lets us reuse the existing hash table scheme to build
 // up instantiated types of arbitrary size.
 //
-// Array types are similar, excpet that they start with a head type
+// Array types are similar, excepet that they start with a head type
 // for the "type constructor", e.g. "_ []" is a type constructor with rank 1
 // and m_elementType = ELEMENT_TYPE_SZARRAY.  These head constructors are
 // stored in the m_sharedtypes table in the appdomain.  The actual instantiations
@@ -4802,7 +4798,7 @@ public:
     void DestNaryType(Instantiation *pInst);
 
     CorElementType GetElementType() { return m_elementType; }
-    VMPTR_DomainFile GetDomainFile();
+    VMPTR_DomainAssembly GetDomainAssembly();
     VMPTR_Module GetModule();
 
     // If this is a ptr type, get the CordbType that it points to.
@@ -4825,7 +4821,7 @@ public:
                                              CordbClass * tycon,
                                              CordbType ** pRes);
 
-    // Prepare data to send back to left-side during Init() and FuncEval.  Fail if the the exact
+    // Prepare data to send back to left-side during Init() and FuncEval.  Fail if the exact
     // type data is requested but was not fetched correctly during Init()
     HRESULT TypeToBasicTypeData(DebuggerIPCE_BasicTypeData *data);
     void TypeToExpandedTypeData(DebuggerIPCE_ExpandedTypeData *data);
@@ -6262,10 +6258,6 @@ public:
    BOOL ConvertFrameForILMethodWithoutMetadata(ICorDebugFrame *           pFrame,
                                                ICorDebugInternalFrame2 ** ppInternalFrame2);
 
-    // Gets/sets m_fCreationEventQueued
-    bool CreateEventWasQueued();
-    void SetCreateEventQueued();
-
     //-----------------------------------------------------------
     // Data members
     //-----------------------------------------------------------
@@ -6322,11 +6314,6 @@ private:
     // and a debugger may normally just skip the first one knowing it can stop on the 2nd once.
     // Both events will set this bit high. Be careful not to reset this bit inbetween them.
     bool                  m_fException;
-
-    // True if a creation event has been queued for this thread
-    // The event may or may not have been dispatched yet
-    // Bugfix DevDiv2\DevDiv 77523 - this is only being set from ShimProcess::QueueFakeThreadAttachEventsNativeOrder
-    bool                  m_fCreationEventQueued;
 
     // Object handle for Exception object in debuggee.
     VMPTR_OBJECTHANDLE    m_vmExcepObjHandle;
@@ -9147,7 +9134,7 @@ public:
 
     RefValueHome             m_valueHome;
 
-    // Indicates when we last syncronized our stored data (m_info) from the left side
+    // Indicates when we last synchronized our stored data (m_info) from the left side
     UINT                     m_continueCounterLastSync;
 };
 
@@ -9288,7 +9275,7 @@ public:
     COM_METHOD GetLength(ULONG32 * pcchString);
     COM_METHOD GetString(ULONG32   cchString,
                          ULONG32 * ppcchStrin,
-                         __out_ecount_opt(cchString) WCHAR     szString[]);
+                         _Out_writes_bytes_opt_(cchString) WCHAR     szString[]);
 
     //-----------------------------------------------------------
     // ICorDebugExceptionObjectValue
@@ -9735,7 +9722,7 @@ public:
     COM_METHOD GetRank(ULONG32 * pnRank);
     COM_METHOD GetCount(ULONG32 * pnCount);
     COM_METHOD GetDimensions(ULONG32 cdim, ULONG32 dims[]);
-    COM_METHOD HasBaseIndicies(BOOL * pbHasBaseIndices);
+    COM_METHOD HasBaseIndicies(BOOL * pbHasBaseIndicies);
     COM_METHOD GetBaseIndicies(ULONG32 cdim, ULONG32 indices[]);
     COM_METHOD GetElement(ULONG32 cdim, ULONG32 indices[], ICorDebugValue ** ppValue);
     COM_METHOD GetElementAtPosition(ULONG32 nIndex, ICorDebugValue ** ppValue);
@@ -9897,7 +9884,7 @@ private:
     // EE object handle pointer. Can be casted to OBJECTHANDLE when go to LS
     // This instance owns the handle object and must call into the VM to release
     // it.
-    // If this is non-null, then we increment code:CordbProces::IncrementOutstandingHandles.
+    // If this is non-null, then we increment code:CordbProcess::IncrementOutstandingHandles.
     // Once it goes null, we should decrement the count.
     // Use AssignHandle, ClearHandle to keep this in sync.
     VMPTR_OBJECTHANDLE  m_vmHandle;
@@ -10075,7 +10062,7 @@ public:
     VMPTR_OBJECTHANDLE  m_vmThreadOldExceptionHandle; // object handle for thread's managed exception object.
 
 #ifdef _DEBUG
-    // Func-eval should perturb the the thread's current appdomain. So we remember it at start
+    // Func-eval should perturb the thread's current appdomain. So we remember it at start
     // and then ensure that the func-eval complete restores it.
     CordbAppDomain *           m_DbgAppDomainStarted;
 #endif
@@ -10116,7 +10103,7 @@ public:
 
     HRESULT SendCreateProcessEvent(MachineInfo machineInfo,
                                    LPCWSTR programName,
-                                   __in_z LPWSTR  programArgs,
+                                   _In_z_ LPWSTR  programArgs,
                                    LPSECURITY_ATTRIBUTES lpProcessAttributes,
                                    LPSECURITY_ATTRIBUTES lpThreadAttributes,
                                    BOOL bInheritHandles,
@@ -10503,7 +10490,7 @@ public:
 
     HRESULT LoadTLSArrayPtr();
 
-    // Hijacks this thread to a hijack worker function which recieves the current
+    // Hijacks this thread to a hijack worker function which receives the current
     // context and the provided exception record. The reason determines what code
     // the hijack worker executes
     HRESULT SetupFirstChanceHijack(EHijackReason::EHijackReason reason, const EXCEPTION_RECORD * pExceptionRecord);
@@ -10807,7 +10794,7 @@ public:
      */
     COM_METHOD GetDisplayName(ULONG32 cchName,
                                 ULONG32 *pcchName,
-                                __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+                                _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
     CorpubProcess   *GetNextProcess () { return m_pNext;}
     void SetNext (CorpubProcess *pNext) { m_pNext = pNext;}
@@ -10834,7 +10821,7 @@ private:
 class CorpubAppDomain  : public CordbCommonBase, public ICorPublishAppDomain
 {
 public:
-    CorpubAppDomain (__in LPWSTR szAppDomainName, ULONG Id);
+    CorpubAppDomain (_In_ LPWSTR szAppDomainName, ULONG Id);
     virtual ~CorpubAppDomain();
 
 #ifdef _DEBUG
@@ -10869,7 +10856,7 @@ public:
      */
     COM_METHOD GetName (ULONG32 cchName,
                         ULONG32 *pcchName,
-                        __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+                        _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
     CorpubAppDomain *GetNextAppDomain () { return m_pNext;}
     void SetNext (CorpubAppDomain *pNext) { m_pNext = pNext;}
@@ -11138,7 +11125,7 @@ private:
 void CheckAgainstDAC(CordbFunction * pFunc, void * pIP, mdMethodDef mdExpected);
 #endif
 
-HRESULT CopyOutString(const WCHAR * pInputString, ULONG32 cchName, ULONG32 * pcchName, __out_ecount_part_opt(cchName, *pcchName) WCHAR szName[]);
+HRESULT CopyOutString(const WCHAR * pInputString, ULONG32 cchName, ULONG32 * pcchName, _Out_writes_to_opt_(cchName, *pcchName) WCHAR szName[]);
 
 
 
@@ -11220,7 +11207,7 @@ public:
     void NotifyTakeLock(RSLock * pLock);
     void NotifyReleaseLock(RSLock * pLock);
 
-    // Used to map other resources (like thread access) into the lock hierachy.
+    // Used to map other resources (like thread access) into the lock hierarchy.
     // Note this only effects lock leveling checks and doesn't effect HoldsAnyLock().
     void TakeVirtualLock(RSLock::ERSLockLevel level);
     void ReleaseVirtualLock(RSLock::ERSLockLevel level);

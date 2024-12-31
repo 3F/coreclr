@@ -3,6 +3,10 @@
 
 #include "createdump.h"
 
+#if defined(__arm__) || defined(__aarch64__) || defined(__loongarch64)
+long g_pageSize = 0;
+#endif
+
 //
 // The Linux/MacOS create dump code
 //
@@ -13,6 +17,12 @@ CreateDump(const CreateDumpOptions& options)
     DumpWriter dumpWriter(*crashInfo);
     std::string dumpPath;
     bool result = false;
+
+    // Initialize PAGE_SIZE
+#if defined(__arm__) || defined(__aarch64__) || defined(__loongarch64)
+    g_pageSize = sysconf(_SC_PAGESIZE);
+#endif
+    TRACE("PAGE_SIZE %d\n", PAGE_SIZE);
 
     // Initialize the crash info 
     if (!crashInfo->Initialize())
@@ -58,7 +68,7 @@ CreateDump(const CreateDumpOptions& options)
         crashInfo->CombineMemoryRegions();
     
         printf_status("Writing %s to file %s\n", options.DumpType, dumpPath.c_str());
-    
+
         // Write the actual dump file
         if (!dumpWriter.OpenDump(dumpPath.c_str()))
         {
@@ -66,7 +76,7 @@ CreateDump(const CreateDumpOptions& options)
         }
         if (!dumpWriter.WriteDump())
         {
-            printf_error( "Writing dump FAILED\n");
+            printf_error("Writing dump FAILED\n");
 
             // Delete the partial dump file on error
             remove(dumpPath.c_str());

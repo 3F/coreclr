@@ -131,6 +131,7 @@ public:
         if (milliseconds != INFINITE)
         {
             uint64_t nanoseconds = (uint64_t)milliseconds * tccMilliSecondsToNanoSeconds;
+            NanosecondsToTimeSpec(nanoseconds, &endTime);
             endMachTime = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + nanoseconds;
         }
 #elif HAVE_PTHREAD_CONDATTR_SETCLOCK
@@ -219,10 +220,9 @@ public:
     {
         pthread_mutex_lock(&m_mutex);
         m_state = true;
-        pthread_mutex_unlock(&m_mutex);
-
         // Unblock all threads waiting for the condition variable
         pthread_cond_broadcast(&m_condition);
+        pthread_mutex_unlock(&m_mutex);
     }
 
     void Reset()

@@ -193,7 +193,7 @@ NOINLINE static Object* GetClassHelper(OBJECTREF objRef)
     return OBJECTREFToObject(refType);
 }
 
-// This routine is called by the Object.GetType() routine.   It is a major way to get the Sytem.Type
+// This routine is called by the Object.GetType() routine.   It is a major way to get the System.Type
 FCIMPL1(Object*, ObjectNative::GetClass, Object* pThis)
 {
     CONTRACTL
@@ -224,7 +224,7 @@ FCIMPL1(Object*, ObjectNative::AllocateUninitializedClone, Object* pObjUNSAFE)
 {
     FCALL_CONTRACT;
 
-    // Delegate error handling to managed side (it will throw NullRefenceException)
+    // Delegate error handling to managed side (it will throw NullReferenceException)
     if (pObjUNSAFE == NULL)
         return NULL;
 
@@ -321,7 +321,7 @@ FCIMPL1(FC_BOOL_RET, ObjectNative::IsLockHeld, Object* pThisUNSAFE)
 }
 FCIMPLEND
 
-INT64 QCALLTYPE ObjectNative::GetMonitorLockContentionCount()
+extern "C" INT64 QCALLTYPE ObjectNative_GetMonitorLockContentionCount()
 {
     QCALL_CONTRACT;
 

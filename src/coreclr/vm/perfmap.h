@@ -54,10 +54,10 @@ protected:
     void OpenFile(SString& path);
 
     // Does the actual work to log an image
-    void LogImage(PEFile * pFile);
+    void LogImage(PEAssembly * pPEAssembly);
 
     // Get the image signature and store it as a string.
-    static void GetNativeImageSignature(PEFile * pFile, WCHAR * pwszSig, unsigned int nSigSize);
+    static void GetNativeImageSignature(PEAssembly * pPEAssembly, WCHAR * pwszSig, unsigned int nSigSize);
 
 public:
     // Write a line to the map file.
@@ -67,7 +67,7 @@ public:
     static void Initialize();
 
     // Log a native image load to the map.
-    static void LogImageLoad(PEFile * pFile);
+    static void LogImageLoad(PEAssembly * pPEAssembly);
 
     // Log a JIT compiled method to the map.
     static void LogJITCompiledMethod(MethodDesc * pMethod, PCODE pCode, size_t codeSize, PrepareCodeConfig *pConfig);

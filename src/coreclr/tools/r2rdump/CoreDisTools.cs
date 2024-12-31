@@ -51,7 +51,7 @@ namespace R2RDump
                 instrSize = DumpInstruction(Disasm, new IntPtr(rtf.StartAddress + rtfOffset), ptr, new IntPtr(rtf.Size));
             }
             IntPtr pBuffer = GetOutputBuffer();
-            instr = Marshal.PtrToStringAnsi(pBuffer);
+            instr = Marshal.PtrToStringUTF8(pBuffer);
             ClearOutputBuffer();
             return instrSize;
         }
@@ -396,17 +396,17 @@ namespace R2RDump
                 {
                     if (targetName != null)
                     {
-                        translated.AppendFormat("[{0}]", targetName);
+                        translated.Append($"[{targetName}]");
                     }
                     else
                     {
-                        translated.AppendFormat("[0x{0:x4}]", target);
+                        translated.Append($"[0x{target:x4}]");
                     }
                     translated.Append(instruction, rightBracketPlusOne, instruction.Length - rightBracketPlusOne);
                 }
                 else
                 {
-                    translated.AppendFormat("[0x{0:x4}]", target);
+                    translated.Append($"[0x{target:x4}]");
                     translated.Append(instruction, rightBracketPlusOne, instruction.Length - rightBracketPlusOne);
                     if (targetName != null)
                     {
@@ -449,17 +449,17 @@ namespace R2RDump
                 {
                     if (targetName != null)
                     {
-                        translated.AppendFormat("[{0}]", targetName);
+                        translated.Append($"[{targetName}]");
                     }
                     else
                     {
-                        translated.AppendFormat("[0x{0:x4}]", target);
+                        translated.Append($"[0x{target:x4}]");
                     }
                     translated.Append(instruction, rightBracketPlusOne, instruction.Length - rightBracketPlusOne);
                 }
                 else
                 {
-                    translated.AppendFormat("[0x{0:x4}]", target);
+                    translated.Append($"[0x{target:x4}]");
                     translated.Append(instruction, rightBracketPlusOne, instruction.Length - rightBracketPlusOne);
                     if (targetName != null)
                     {
@@ -818,7 +818,7 @@ namespace R2RDump
                     }
                     else
                     {
-                        translated.AppendFormat("#0x{0:x4}", targetPage);
+                        translated.Append($"#0x{targetPage:x4}");
                     }
 
                     instruction = translated.ToString();
@@ -843,7 +843,7 @@ namespace R2RDump
                 }
                 else
                 {
-                    translated.AppendFormat("#0x{0:x}", target & 0xfff);
+                    translated.Append($"#0x{target & 0xfff:x}");
                     if (targetName != null)
                     {
                         AppendComment(translated, "import{" + targetName + "}");

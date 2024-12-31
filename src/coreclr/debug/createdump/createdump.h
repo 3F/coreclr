@@ -6,16 +6,13 @@
 #define ___in       _SAL1_Source_(__in, (), _In_)
 #define ___out      _SAL1_Source_(__out, (), _Out_)
 
-#ifndef _countof
-#define _countof(x) (sizeof(x)/sizeof(x[0]))
-#endif
-
-extern void trace_printf(const char* format, ...);
-extern void trace_verbose_printf(const char* format, ...);
 extern bool g_diagnostics;
 extern bool g_diagnosticsVerbose;
 
 #ifdef HOST_UNIX
+extern bool g_checkForSingleFile;
+extern void trace_printf(const char* format, ...);
+extern void trace_verbose_printf(const char* format, ...);
 #define TRACE(args...) trace_printf(args)
 #define TRACE_VERBOSE(args...) trace_verbose_printf(args)
 #else
@@ -123,6 +120,7 @@ typedef struct
 #include "crashinfo.h"
 #include "crashreportwriter.h"
 #include "dumpwriter.h"
+#include "runtimeinfo.h"
 #endif
 
 #ifndef MAX_LONGPATH
@@ -132,10 +130,6 @@ typedef struct
 extern bool CreateDump(const CreateDumpOptions& options);
 extern bool FormatDumpName(std::string& name, const char* pattern, const char* exename, int pid);
 
-#ifdef HOST_WINDOWS
-extern DWORD GetTempPathWrapper(IN DWORD nBufferLength, OUT LPSTR lpBuffer);
-#else
-#define GetTempPathWrapper GetTempPathA
-#endif
+extern std::string GetLastErrorString();
 extern void printf_status(const char* format, ...);
 extern void printf_error(const char* format, ...);

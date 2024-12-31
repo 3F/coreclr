@@ -63,11 +63,12 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
                         continue;
                     }
 
-                    if (!factory.CompilationModuleGroup.VersionsWithMethodBody(inlinee))
+                    if (!factory.CompilationModuleGroup.VersionsWithMethodBody(inlinee) && !factory.CompilationModuleGroup.CrossModuleInlineable(inlinee))
                     {
                         // We cannot record inlining info across version bubble as cross-bubble assemblies
-                        // are not guaranteed to preserve token values. Only non-versionable methods may be
-                        // inlined across the version bubble.
+                        // are not guaranteed to preserve token values unless CrossModule inlining is in place
+                        // Otherwise non-versionable methods may be inlined across the version bubble.
+
                         Debug.Assert(inlinee.IsNonVersionable());
                         continue;
                     }
@@ -325,12 +326,12 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             _debugLocInfos = DebugInfoTableNode.CreateBoundsBlobForMethod(debugLocInfos);
         }
 
-        public void InitializeDebugVarInfos(NativeVarInfo[] debugVarInfos, TargetDetails target)
+        public void InitializeDebugVarInfos(NativeVarInfo[] debugVarInfos)
         {
             Debug.Assert(_debugVarInfos == null);
             // Process the debug info from JIT format to R2R format immediately as it is large
             // and not used in the rest of the process except to emit.
-            _debugVarInfos = DebugInfoTableNode.CreateVarBlobForMethod(debugVarInfos, target);
+            _debugVarInfos = DebugInfoTableNode.CreateVarBlobForMethod(debugVarInfos, _method.Context.Target);
         }
 
         public void InitializeDebugEHClauseInfos(DebugEHClauseInfo[] debugEHClauseInfos)

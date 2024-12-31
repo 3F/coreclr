@@ -25,11 +25,9 @@ steps:
     TargetFolder: '$(Build.StagingDirectory)/IntermediateArtifacts/${{ parameters.name }}'
     CleanTargetFolder: true
 
-- template: /eng/pipelines/common/templates/publish-build-artifacts.yml
-  parameters:
-    isOfficialBuild: true
-    displayName: Publish intermediate artifacts
-    inputs:
-      PathtoPublish: '$(Build.StagingDirectory)/IntermediateArtifacts'
-      ArtifactName: IntermediateArtifacts
-      ArtifactType: container
+- task: PublishBuildArtifacts@1
+  displayName: Publish intermediate artifacts
+  inputs:
+    pathToPublish: '$(Build.StagingDirectory)/IntermediateArtifacts'
+    artifactName: IntermediateArtifacts
+    artifactType: container

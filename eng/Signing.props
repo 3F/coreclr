@@ -1,5 +1,4 @@
 <Project>
-
   <PropertyGroup>
     <!--
       Windows arm/arm64 jobs don't have MSIs to sign. Keep it simple: allow not finding any matches
@@ -20,19 +19,23 @@
     <!-- apphost and comhost template files are not signed, by design. -->
     <FileSignInfo Include="apphost.exe;singlefilehost.exe;comhost.dll" CertificateName="None" />
 
-    <!-- Third-party components which should be signed.  -->
-    <FileSignInfo Include="Newtonsoft.Json.dll" CertificateName="3PartySHA2" />
-    <FileSignInfo Include="Mono.Cecil.dll" CertificateName="3PartySHA2" />
-    <FileSignInfo Include="Mono.Cecil.Mdb.dll" CertificateName="3PartySHA2" />
-    <FileSignInfo Include="Mono.Cecil.Pdb.dll" CertificateName="3PartySHA2" />
-    <FileSignInfo Include="Mono.Cecil.Rocks.dll" CertificateName="3PartySHA2" />
-
     <!--
       The DAC and the DBI must go through special signing provisioning using a system separate
       from MicroBuild.
     -->
     <FileSignInfo Include="mscordaccore.dll" CertificateName="None" />
     <FileSignInfo Include="mscordbi.dll" CertificateName="None" />
+
+    <!-- We don't need to code sign .js files because they are not used in Windows Script Host. -->
+    <!-- WARNING: Needs to happed outside of any target -->
+    <FileExtensionSignInfo Update=".js" CertificateName="None" />
+
+    <!-- Third-party components which should be signed.  -->
+    <FileSignInfo Include="Newtonsoft.Json.dll" CertificateName="3PartySHA2" />
+    <FileSignInfo Include="Mono.Cecil.dll" CertificateName="3PartySHA2" />
+    <FileSignInfo Include="Mono.Cecil.Mdb.dll" CertificateName="3PartySHA2" />
+    <FileSignInfo Include="Mono.Cecil.Pdb.dll" CertificateName="3PartySHA2" />
+    <FileSignInfo Include="Mono.Cecil.Rocks.dll" CertificateName="3PartySHA2" />
 
     <!-- Exclude symbol packages from have a NuGet signature. These are never pushed to NuGet.org or
          other feeds (in fact, that have identical identity to their non-symbol variant) -->
@@ -52,13 +55,14 @@
     <FileSignInfo Update="@(FileSignInfo->WithMetadataValue('CertificateName','Microsoft400'))" CertificateName="MicrosoftDotNet500" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(PrepareArtifacts)' == 'true' and '$(PostBuildSign)' == 'true'">
+  <ItemGroup Condition="'$(PrepareArtifacts)' == 'true'">
     <ItemsToSignWithPaths Include="$(DownloadDirectory)**\*.msi" />
     <ItemsToSignWithPaths Include="$(DownloadDirectory)**\*.exe" />
     <ItemsToSignWithPaths Include="$(DownloadDirectory)**\*.nupkg" />
     <ItemsToSignWithPaths Include="$(DownloadDirectory)**\*.zip" />
 
     <ItemsToSignWithoutPaths Include="@(ItemsToSignWithPaths->'%(Filename)%(Extension)')" />
-    <ItemsToSignPostBuild Include="@(ItemsToSignWithoutPaths->Distinct())" />
+    <ItemsToSignPostBuild Include="@(ItemsToSignWithoutPaths->Distinct())" Condition="'$(PostBuildSign)' == 'true'" />
+    <ItemsToSign Include="@(ItemsToSignWithPaths->Distinct())" Condition="'$(PostBuildSign)' != 'true'" />
   </ItemGroup>
 </Project>

@@ -21,16 +21,16 @@ private:
         static const WCHAR DirectorySeparatorChar;
         static const WCHAR AltDirectorySeparatorChar;
 public:
-        static BOOL IsExtended(SString & path);
-        static BOOL IsUNCExtended(SString & path);
         static BOOL ContainsDirectorySeparator(SString & path);
         static BOOL IsDirectorySeparator(WCHAR c);
-        static BOOL IsPathNotFullyQualified(SString & path);
-        static BOOL IsDevice(SString & path);
+        static BOOL IsPathNotFullyQualified(const SString & path);
 
         static HRESULT NormalizePath(SString& path);
 
 #ifdef HOST_WINDOWS
+        static BOOL IsExtended(const SString & path);
+        static BOOL IsUNCExtended(const SString & path);
+        static BOOL IsDevice(const SString & path);
         static void NormalizeDirectorySeparators(SString& path);
 #endif
 };
@@ -50,18 +50,15 @@ LoadLibraryExWrapper(
 
     HRESULT hr   = S_OK;
     HMODULE ret = NULL;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
-
         LongPathString path(LongPathString::Literal, lpLibFileName);
 
         if (LongFile::IsPathNotFullyQualified(path) || SUCCEEDED(LongFile::NormalizePath(path)))
         {
 #ifdef HOST_WINDOWS
-            //Adding the assert to ensure relative paths which are not just filenames are not used for LoadLibrary Calls
-            _ASSERTE(!LongFile::IsPathNotFullyQualified(path) || !LongFile::ContainsDirectorySeparator(path));
             LongFile::NormalizeDirectorySeparators(path);
 #endif //HOST_WINDOWS
 
@@ -102,7 +99,7 @@ CreateFileWrapper(
     CONTRACTL_END;
 
     HRESULT hr = S_OK;
-    DWORD lastError;
+    DWORD lastError = 0;
     HANDLE ret = INVALID_HANDLE_VALUE;
 
     EX_TRY
@@ -150,7 +147,7 @@ GetFileAttributesWrapper(
 
     HRESULT hr = S_OK;
     DWORD  ret = INVALID_FILE_ATTRIBUTES;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -194,7 +191,7 @@ GetFileAttributesExWrapper(
 
     HRESULT hr = S_OK;
     BOOL   ret = FALSE;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -239,7 +236,7 @@ DeleteFileWrapper(
 
     HRESULT hr = S_OK;
     BOOL   ret = FALSE;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -268,54 +265,6 @@ DeleteFileWrapper(
     return ret;
 }
 
-BOOL
-MoveFileExWrapper(
-        _In_     LPCWSTR lpExistingFileName,
-        _In_opt_ LPCWSTR lpNewFileName,
-        _In_     DWORD    dwFlags
-        )
-{
-    CONTRACTL
-    {
-        NOTHROW;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr  = S_OK;
-    BOOL    ret = FALSE;
-    DWORD lastError;
-
-    EX_TRY
-    {
-        LongPathString Existingpath(LongPathString::Literal, lpExistingFileName);
-        LongPathString Newpath(LongPathString::Literal, lpNewFileName);
-
-        if (SUCCEEDED(LongFile::NormalizePath(Existingpath)) && SUCCEEDED(LongFile::NormalizePath(Newpath)))
-        {
-            ret = MoveFileExW(
-                    Existingpath.GetUnicode(),
-                    Newpath.GetUnicode(),
-                    dwFlags
-                    );
-        }
-
-        lastError = GetLastError();
-    }
-    EX_CATCH_HRESULT(hr);
-
-    if (hr != S_OK )
-    {
-        SetLastError(hr);
-    }
-    else if(ret == FALSE)
-    {
-        SetLastError(lastError);
-    }
-
-    return ret;
-
-}
-
 DWORD
 SearchPathWrapper(
         _In_opt_ LPCWSTR lpPath,
@@ -334,7 +283,7 @@ SearchPathWrapper(
 
     HRESULT hr  = S_OK;
     DWORD    ret = 0;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -424,7 +373,7 @@ GetModuleFileNameWrapper(
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -482,7 +431,7 @@ UINT WINAPI GetTempFileNameWrapper(
 
     HRESULT hr = S_OK;
     UINT ret = 0;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -515,6 +464,47 @@ UINT WINAPI GetTempFileNameWrapper(
     return ret;
 }
 
+DWORD WINAPI GetTempPathWrapper(
+    SString& lpBuffer
+    )
+{
+    CONTRACTL
+    {
+        NOTHROW;
+    }
+    CONTRACTL_END;
+
+    HRESULT hr = S_OK;
+    DWORD ret = 0;
+    DWORD lastError = 0;
+
+    EX_TRY
+    {
+        //Change the behaviour in Redstone to retry
+        COUNT_T size = MAX_LONGPATH;
+
+        ret = GetTempPathW(
+            size,
+            lpBuffer.OpenUnicodeBuffer(size - 1)
+            );
+
+        lastError = GetLastError();
+        lpBuffer.CloseBuffer(ret);
+    }
+    EX_CATCH_HRESULT(hr);
+
+    if (hr != S_OK)
+    {
+        SetLastError(hr);
+    }
+    else if (ret == 0)
+    {
+        SetLastError(lastError);
+    }
+
+    return ret;
+}
+
 DWORD WINAPI GetCurrentDirectoryWrapper(
     SString&  lpBuffer
     )
@@ -527,7 +517,7 @@ DWORD WINAPI GetCurrentDirectoryWrapper(
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -569,7 +559,7 @@ DWORD WINAPI GetEnvironmentVariableWrapper(
 
     HRESULT hr = S_OK;
     DWORD ret = 0;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -584,7 +574,7 @@ DWORD WINAPI GetEnvironmentVariableWrapper(
 
         // We loop round getting the length of the env var and then trying to copy
         // the value into a the allocated buffer. Usually we'll go through this loop
-        // precisely once, but the caution is ncessary in case the variable mutates
+        // precisely once, but the caution is necessary in case the variable mutates
         // beneath us, as the environment variable can be modified by another thread
         //between two calls to GetEnvironmentVariableW
 
@@ -637,7 +627,7 @@ CopyFileExWrapper(
 
     HRESULT hr  = S_OK;
     BOOL    ret = FALSE;
-    DWORD lastError;
+    DWORD lastError = 0;
 
     EX_TRY
     {
@@ -671,58 +661,6 @@ CopyFileExWrapper(
 
     return ret;
 }
-
-HANDLE
-FindFirstFileExWrapper(
-        _In_ LPCWSTR lpFileName,
-        _In_ FINDEX_INFO_LEVELS fInfoLevelId,
-        _Out_writes_bytes_(sizeof(WIN32_FIND_DATAW)) LPVOID lpFindFileData,
-        _In_ FINDEX_SEARCH_OPS fSearchOp,
-        _Reserved_ LPVOID lpSearchFilter,
-        _In_ DWORD dwAdditionalFlags
-        )
-{
-    CONTRACTL
-    {
-        NOTHROW;
-    }
-    CONTRACTL_END;
-
-    HRESULT hr = S_OK;
-    HANDLE ret = INVALID_HANDLE_VALUE;
-    DWORD lastError;
-
-    EX_TRY
-    {
-        LongPathString path(LongPathString::Literal, lpFileName);
-
-        if (SUCCEEDED(LongFile::NormalizePath(path)))
-        {
-            ret = FindFirstFileExW(
-                    path.GetUnicode(),
-                    fInfoLevelId,
-                    lpFindFileData,
-                    fSearchOp,
-                    lpSearchFilter,
-                    dwAdditionalFlags
-                    );
-        }
-
-        lastError = GetLastError();
-    }
-    EX_CATCH_HRESULT(hr);
-
-    if (hr != S_OK )
-    {
-        SetLastError(hr);
-    }
-    else if(ret == INVALID_HANDLE_VALUE)
-    {
-        SetLastError(lastError);
-    }
-
-    return ret;
-}
 #endif // HOST_WINDOWS
 
 //Implementation of LongFile Helpers
@@ -746,15 +684,14 @@ void LongFile::NormalizeDirectorySeparators(SString& path)
     }
 }
 
-BOOL LongFile::IsExtended(SString & path)
+BOOL LongFile::IsExtended(const SString & path)
 {
-    return path.BeginsWith(ExtendedPrefix);
+    return path.BeginsWith(SL(ExtendedPrefix));
 }
 
-BOOL LongFile::IsUNCExtended(SString & path)
+BOOL LongFile::IsUNCExtended(const SString & path)
 {
-
-    return path.BeginsWith(UNCExtendedPathPrefix);
+    return path.BeginsWith(SL(UNCExtendedPathPrefix));
 }
 
 // Relative here means it could be relative to current directory on the relevant drive
@@ -765,7 +702,7 @@ BOOL LongFile::IsUNCExtended(SString & path)
 // Handles paths that use the alternate directory separator.  It is a frequent mistake to
 // assume that rooted paths (Path.IsPathRooted) are not relative.  This isn't the case.
 
-BOOL LongFile::IsPathNotFullyQualified(SString & path)
+BOOL LongFile::IsPathNotFullyQualified(const SString & path)
 {
     if (path.GetCount() < 2)
     {
@@ -782,9 +719,9 @@ BOOL LongFile::IsPathNotFullyQualified(SString & path)
             && IsDirectorySeparator(path[2]));
 }
 
-BOOL LongFile::IsDevice(SString & path)
+BOOL LongFile::IsDevice(const SString & path)
 {
-    return path.BeginsWith(DevicePathPrefix);
+    return path.BeginsWith(SL(DevicePathPrefix));
 }
 
 // This function will normalize paths if the path length exceeds MAX_PATH
@@ -808,7 +745,7 @@ HRESULT LongFile::NormalizePath(SString & path)
     SString prefix(ExtendedPrefix);
     prefixLen = prefix.GetCount();
 
-    if (path.BeginsWith(UNCPathPrefix))
+    if (path.BeginsWith(SL(UNCPathPrefix)))
     {
         prefix.Set(UNCExtendedPathPrefix);
         //In this case if path is \\server the extended syntax should be like  \\?\UNC\server
@@ -858,9 +795,8 @@ HRESULT LongFile::NormalizePath(SString & path)
 	SString fullpath(SString::Literal,buffer + prefixLen);
 
     //Check if the resolved path is a UNC. By default we assume relative path to resolve to disk
-    if (fullpath.BeginsWith(UNCPathPrefix) && prefixLen != prefix.GetCount() - (COUNT_T)wcslen(UNCPATHPREFIX))
+    if (fullpath.BeginsWith(SL(UNCPathPrefix)) && prefixLen != prefix.GetCount() - (COUNT_T)wcslen(UNCPATHPREFIX))
     {
-
         //Remove the leading '\\' from the UNC path to be replaced with UNCExtendedPathPrefix
         fullpath.Replace(fullpath.Begin(), (COUNT_T)wcslen(UNCPATHPREFIX), UNCExtendedPathPrefix);
         path.CloseBuffer();
@@ -878,24 +814,9 @@ HRESULT LongFile::NormalizePath(SString & path)
     return S_OK;
 }
 #else
-BOOL LongFile::IsExtended(SString & path)
-{
-    return FALSE;
-}
-
-BOOL LongFile::IsUNCExtended(SString & path)
-{
-    return FALSE;
-}
-
-BOOL LongFile::IsPathNotFullyQualified(SString & path)
+BOOL LongFile::IsPathNotFullyQualified(const SString & path)
 {
     return TRUE;
-}
-
-BOOL LongFile::IsDevice(SString & path)
-{
-    return FALSE;
 }
 
 //Don't need to do anything For XPlat
@@ -914,6 +835,3 @@ BOOL LongFile::IsDirectorySeparator(WCHAR c)
 {
     return c == DirectorySeparatorChar || c == AltDirectorySeparatorChar;
 }
-
-
-

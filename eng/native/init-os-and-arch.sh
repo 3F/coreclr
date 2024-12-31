@@ -37,6 +37,14 @@ case "$CPUName" in
         arch=arm64
         ;;
 
+    loongarch64)
+        arch=loongarch64
+        ;;
+
+    riscv64)
+        arch=riscv64
+        ;;
+
     amd64|x86_64)
         arch=x64
         ;;
@@ -49,6 +57,10 @@ case "$CPUName" in
         fi
         ;;
 
+    armv6l)
+        arch=armv6
+        ;;
+
     i[3-6]86)
         echo "Unsupported CPU $CPUName detected, build might not succeed!"
         arch=x86
@@ -58,6 +70,9 @@ case "$CPUName" in
         arch=s390x
 	;;
 
+    ppc64le)
+	arch=ppc64le
+	;;
     *)
         echo "Unknown CPU $CPUName detected, configuring as if for x64"
         arch=x64

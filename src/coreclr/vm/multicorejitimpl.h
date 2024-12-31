@@ -88,7 +88,7 @@ inline unsigned Pack8_24(unsigned up, unsigned low)
 //   m_JitInfoArray is an array of RecorderInfo (12 bytes on 32-bit systems, 16 bytes on 64-bit systems), with MAX_METHODS elements.
 //
 //   1. Modules.
-//     For modules RecorderInfo::data2 and RecorderInfo::ptr are set to 0. RecorderInfo::ptr == 0 is also a flag that RecorderInfo correponds to module.
+//     For modules RecorderInfo::data2 and RecorderInfo::ptr are set to 0. RecorderInfo::ptr == 0 is also a flag that RecorderInfo corresponds to module.
 //     RecorderInfo::data1 is non-zero and represents info for module.
 //
 //     Info for module includes module index and requested load level, with some additional data in higher bits (MULTICOREJIT_MODULEDEPENDENCY_RECORD_ID tag).
@@ -148,8 +148,7 @@ public:
     unsigned short build;
     unsigned short revision;
 
-    unsigned       versionFlags         :31;
-    unsigned       hasNativeImage:1;
+    unsigned       versionFlags;
 
     GUID           mvid;
 
@@ -176,13 +175,6 @@ public:
         }
 
         return false;
-    }
-
-    bool NativeImageFlagDiff(const ModuleVersion & other) const
-    {
-        LIMITED_METHOD_CONTRACT;
-
-        return hasNativeImage != other.hasNativeImage;
     }
 };
 
@@ -212,7 +204,7 @@ public:
 
     ModuleRecord(unsigned lenName = 0, unsigned lenAssemblyName = 0);
 
-    bool MatchWithModule(ModuleVersion & version, bool & gotVersion, Module * pModule, bool & shouldAbort) const;
+    bool MatchWithModule(ModuleVersion & version, bool & gotVersion, Module * pModule) const;
 
     unsigned ModuleNameLen() const
     {
@@ -274,14 +266,13 @@ class MulticoreJitProfilePlayer
 friend class MulticoreJitRecorder;
 
 private:
-    ICLRPrivBinder * m_pBinderContext;
+    AssemblyBinder                   * m_pBinder;
     LONG                               m_nMySession;
     unsigned                           m_nStartTime;
     BYTE                             * m_pFileBuffer;
     unsigned                           m_nFileSize;
     MulticoreJitPlayerStat           & m_stats;
     MulticoreJitCounter              & m_appdomainSession;
-    bool                               m_shouldAbort;
 
     Thread                           * m_pThread;
 
@@ -319,7 +310,7 @@ private:
 
 public:
 
-    MulticoreJitProfilePlayer(ICLRPrivBinder * pBinderContext, LONG nSession);
+    MulticoreJitProfilePlayer(AssemblyBinder * pBinder, LONG nSession);
 
     ~MulticoreJitProfilePlayer();
 
@@ -614,7 +605,7 @@ class MulticoreJitRecorder
 {
 private:
     AppDomain               * m_pDomain;            // AutoStartProfile could be called from SystemDomain
-    ICLRPrivBinder * m_pBinderContext;
+    AssemblyBinder          * m_pBinder;
     SString                   m_fullFileName;
     MulticoreJitPlayerStat  & m_stats;
 
@@ -655,26 +646,22 @@ private:
 
 public:
 
-    MulticoreJitRecorder(AppDomain * pDomain, ICLRPrivBinder * pBinderContext)
+    MulticoreJitRecorder(AppDomain * pDomain, AssemblyBinder * pBinder)
         : m_stats(pDomain->GetMulticoreJitManager().GetStats())
         , m_ModuleList(nullptr)
         , m_JitInfoArray(nullptr)
     {
         LIMITED_METHOD_CONTRACT;
 
-        m_pDomain           = pDomain;
-        m_pBinderContext    = pBinderContext;
+        m_pDomain = pDomain;
+        m_pBinder = pBinder;
 
-        m_ModuleCount       = 0;
+        m_ModuleCount = 0;
+        m_ModuleDepCount = 0;
 
-        m_ModuleDepCount    = 0;
-
-        m_JitInfoCount      = 0;
-
-        m_fFirstMethod      = true;
-        m_fAborted          = false;
-
-
+        m_JitInfoCount = 0;
+        m_fFirstMethod = true;
+        m_fAborted = false;
         m_stats.Clear();
     }
 

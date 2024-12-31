@@ -39,7 +39,7 @@ SET_DEFAULT_DEBUG_CHANNEL(PAL); // some headers have code with asserts, so do th
 #include "pal/numa.h"
 #include "pal/stackstring.hpp"
 #include "pal/cgroup.h"
-#include <getexepath.h>
+#include <minipal/getexepath.h>
 
 #if HAVE_MACH_EXCEPTIONS
 #include "../exception/machexception.h"
@@ -88,7 +88,12 @@ int CacheLineSize;
 #endif
 #endif
 
+#ifdef __FreeBSD__
+#include <sys/user.h>
+#endif
+
 #include <algorithm>
+#include <clrconfignocache.h>
 
 using namespace CorUnix;
 
@@ -100,6 +105,12 @@ using namespace CorUnix;
 extern "C" BOOL CRTInitStdStreams( void );
 
 extern bool g_running_in_exe;
+
+#if defined(HOST_ARM64)
+// Flag to check if atomics feature is available on
+// the machine
+bool g_arm64_atomics_present = false;
+#endif
 
 Volatile<INT> init_count = 0;
 Volatile<BOOL> shutdown_intent = 0;
@@ -268,17 +279,13 @@ Abstract:
 void
 InitializeDefaultStackSize()
 {
-    char* defaultStackSizeStr = getenv("COMPlus_DefaultStackSize");
-    if (defaultStackSizeStr != nullptr)
+    CLRConfigNoCache defStackSize = CLRConfigNoCache::Get("DefaultStackSize", /*noprefix*/ false, &getenv);
+    if (defStackSize.IsSet())
     {
-        errno = 0;
-        // Like all numeric values specific by the COMPlus_xxx variables, it is a
-        // hexadecimal string without any prefix.
-        long int size = strtol(defaultStackSizeStr, nullptr, 16);
-
-        if (errno == 0)
+        DWORD size;
+        if (defStackSize.TryAsInteger(16, size))
         {
-            g_defaultStackSize = std::max(size, (long int)PTHREAD_STACK_MIN);
+            g_defaultStackSize = std::max(size, (DWORD)PTHREAD_STACK_MIN);
         }
     }
 
@@ -406,15 +413,11 @@ Initialize(
 #endif // ENSURE_PRIMARY_STACK_SIZE
 
 #ifdef FEATURE_ENABLE_NO_ADDRESS_SPACE_RANDOMIZATION
-        char* useDefaultBaseAddr = getenv("COMPlus_UseDefaultBaseAddr");
-        if (useDefaultBaseAddr != nullptr)
+        CLRConfigNoCache useDefaultBaseAddr = CLRConfigNoCache::Get("UseDefaultBaseAddr", /*noprefix*/ false, &getenv);
+        if (useDefaultBaseAddr.IsSet())
         {
-            errno = 0;
-            // Like all numeric values specific by the COMPlus_xxx variables, it is a
-            // hexadecimal string without any prefix.
-            long int flag = strtol(useDefaultBaseAddr, nullptr, 16);
-
-            if (errno == 0)
+            DWORD flag;
+            if (useDefaultBaseAddr.TryAsInteger(16, flag))
             {
                 g_useDefaultBaseAddr = (BOOL) flag;
             }
@@ -854,14 +857,18 @@ PAL_IsDebuggerPresent()
     close(status_fd);
 
     return debugger_present;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__FreeBSD__)
     struct kinfo_proc info = {};
     size_t size = sizeof(info);
     int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
     int ret = sysctl(mib, sizeof(mib)/sizeof(*mib), &info, &size, nullptr, 0);
 
     if (ret == 0)
+#if defined(__APPLE__)
         return ((info.kp_proc.p_flag & P_TRACED) != 0);
+#else // __FreeBSD__
+        return ((info.ki_flag & P_TRACED) != 0);
+#endif
 
     return FALSE;
 #elif defined(__NetBSD__)
@@ -1040,14 +1047,14 @@ void PALSetShutdownIntent()
 Function:
   PALInitLock
 
-Take the initializaiton critical section (init_critsec). necessary to serialize
+Take the initialization critical section (init_critsec). necessary to serialize
 TerminateProcess along with PAL_Terminate and PAL_Initialize
 
 (no parameters)
 
 Return value :
     TRUE if critical section existed (and was acquired)
-    FALSE if critical section doens't exist yet
+    FALSE if critical section doesn't exist yet
 --*/
 BOOL PALInitLock(void)
 {
@@ -1138,7 +1145,7 @@ Abstract:
 
 Parameters :
     int argc : number of arguments in argv
-    char **argv : argument list in an array of nullptr-terminated strings
+    char **argv : argument list in an array of NULL-terminated strings
 
 Return value :
     pointer to Unicode command line. This is a buffer allocated with malloc;
@@ -1220,7 +1227,7 @@ static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
         }
         *command_ptr++=' ';
     }
-    /* replace the last space with a nullptr terminator */
+    /* replace the last space with a NULL terminator */
     command_ptr--;
     *command_ptr='\0';
 
@@ -1241,7 +1248,7 @@ static LPWSTR INIT_FormatCommandLine (int argc, const char * const *argv)
         return nullptr;
     }
 
-    if(!MultiByteToWideChar(CP_ACP, 0,command_line, i, retval, i))
+    if(!MultiByteToWideChar(CP_ACP, 0,command_line, -1, retval, i))
     {
         ASSERT("MultiByteToWideChar failure\n");
         free(retval);
@@ -1271,7 +1278,7 @@ static LPWSTR INIT_GetCurrentEXEPath()
     LPWSTR return_value;
     INT return_size;
 
-    char* path = getexepath();
+    char* path = minipal_getexepath();
     if (!path)
     {
         ERROR( "Cannot get current exe path\n" );
@@ -1370,5 +1377,5 @@ static BOOL INIT_SharedFilesPath(void)
     return gSharedFilesPath->Set(TEMP_DIRECTORY_PATH);
 
     // We can verify statically the non sandboxed case, since the size is known during compile time
-    static_assert_no_msg(string_countof(TEMP_DIRECTORY_PATH) + SHARED_MEMORY_MAX_FILE_PATH_CHAR_COUNT + 1 /* null terminator */ <= MAX_LONGPATH);
+    static_assert_no_msg(STRING_LENGTH(TEMP_DIRECTORY_PATH) + SHARED_MEMORY_MAX_FILE_PATH_CHAR_COUNT + 1 /* null terminator */ <= MAX_LONGPATH);
 }

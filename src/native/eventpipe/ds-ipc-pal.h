@@ -35,9 +35,6 @@ ds_ipc_alloc (
 void
 ds_ipc_free (DiagnosticsIpc *ipc);
 
-void
-ds_ipc_reset (DiagnosticsIpc *ipc);
-
 // Poll
 // Parameters:
 // - IpcPollHandle * poll_handles_data: Array of IpcPollHandles to poll

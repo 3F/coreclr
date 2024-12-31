@@ -6,12 +6,12 @@ endif(FEATURE_GDBJIT)
 
 set(CLR_SOURCES
     mscoree.cpp
-    unixinterface.cpp
+    exports.cpp
 )
 
 if(CLR_CMAKE_TARGET_WIN32)
 list(APPEND CLR_SOURCES
-    ${CLR_SRC_NATIVE_DIR}/common/delayloadhook_windows.cpp
+    ${CLR_SRC_NATIVE_DIR}/libs/Common/delayloadhook_windows.cpp
     Native.rc
 )
 

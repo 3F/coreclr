@@ -27,10 +27,8 @@ unsigned emitOutput_Thumb2Instr(BYTE* dst, code_t code);
 /*             Debug-only routines to display instructions              */
 /************************************************************************/
 
-#ifdef DEBUG
-
 void emitDispInst(instruction ins, insFlags flags);
-void emitDispImm(int imm, bool addComma, bool alwaysHex = false);
+void emitDispImm(int imm, bool addComma, bool alwaysHex = false, bool isAddrOffset = false);
 void emitDispReloc(BYTE* addr);
 void emitDispCond(int cond);
 void emitDispShiftOpts(insOpts opt);
@@ -43,6 +41,14 @@ void emitDispAddrRR(regNumber reg1, regNumber reg2, emitAttr attr);
 void emitDispAddrRRI(regNumber reg1, regNumber reg2, int imm, emitAttr attr);
 void emitDispAddrPUW(regNumber reg, int imm, insOpts opt, emitAttr attr);
 void emitDispGC(emitAttr attr);
+void emitDispLargeJmp(instrDesc* id,
+                      bool       isNew,
+                      bool       doffs,
+                      bool       asmfm,
+                      unsigned   offs = 0,
+                      BYTE*      code = 0,
+                      size_t     sz   = 0,
+                      insGroup*  ig   = NULL);
 
 void emitDispInsHelp(instrDesc* id,
                      bool       isNew,
@@ -52,16 +58,6 @@ void emitDispInsHelp(instrDesc* id,
                      BYTE*      code = 0,
                      size_t     sz   = 0,
                      insGroup*  ig   = NULL);
-void emitDispIns(instrDesc* id,
-                 bool       isNew,
-                 bool       doffs,
-                 bool       asmfm,
-                 unsigned   offs = 0,
-                 BYTE*      code = 0,
-                 size_t     sz   = 0,
-                 insGroup*  ig   = NULL);
-
-#endif // DEBUG
 
 /************************************************************************/
 /*  Private members that deal with target-dependent instr. descriptors  */
@@ -201,6 +197,12 @@ inline static unsigned getBitWidth(emitAttr size)
 }
 
 /************************************************************************/
+/*                   Output target-independent instructions             */
+/************************************************************************/
+
+void emitIns_J(instruction ins, BasicBlock* dst, int instrCount = 0);
+
+/************************************************************************/
 /*           The public entry points to output instructions             */
 /************************************************************************/
 
@@ -314,24 +316,8 @@ void emitIns_R_ARX(
 
 enum EmitCallType
 {
-
-    // I have included here, but commented out, all the values used by the x86 emitter.
-    // However, ARM has a much reduced instruction set, and so the ARM emitter only
-    // supports a subset of the x86 variants.  By leaving them commented out, it becomes
-    // a compile time error if code tries to use them (and hopefully see this comment
-    // and know why they are unavailible on ARM), while making it easier to stay
-    // in-sync with x86 and possibly add them back in if needed.
-
-    EC_FUNC_TOKEN, //   Direct call to a helper/static/nonvirtual/global method
-                   //  EC_FUNC_TOKEN_INDIR,    // Indirect call to a helper/static/nonvirtual/global method
-    EC_FUNC_ADDR,  // Direct call to an absolute address
-
-    //  EC_FUNC_VIRTUAL,        // Call to a virtual method (using the vtable)
-    EC_INDIR_R, // Indirect call via register
-                //  EC_INDIR_SR,            // Indirect call via stack-reference (local var)
-                //  EC_INDIR_C,             // Indirect call via static class var
-                //  EC_INDIR_ARD,           // Indirect call via an addressing mode
-
+    EC_FUNC_TOKEN, // Direct call to a helper/static/nonvirtual/global method
+    EC_INDIR_R,    // Indirect call via register
     EC_COUNT
 };
 
@@ -344,12 +330,12 @@ void emitIns_Call(EmitCallType          callType,
                   VARSET_VALARG_TP ptrVars,
                   regMaskTP        gcrefRegs,
                   regMaskTP        byrefRegs,
-                  IL_OFFSETX       ilOffset = BAD_IL_OFFSET,
-                  regNumber        ireg     = REG_NA,
-                  regNumber        xreg     = REG_NA,
-                  unsigned         xmul     = 0,
-                  ssize_t          disp     = 0,
-                  bool             isJump   = false);
+                  const DebugInfo& di     = DebugInfo(),
+                  regNumber        ireg   = REG_NA,
+                  regNumber        xreg   = REG_NA,
+                  unsigned         xmul   = 0,
+                  ssize_t          disp   = 0,
+                  bool             isJump = false);
 
 /*****************************************************************************
  *
@@ -363,7 +349,7 @@ inline bool emitIsCondJump(instrDesc* jmp)
 
 /*****************************************************************************
  *
- *  Given an instrDesc, return true if it's a comapre and jump.
+ *  Given an instrDesc, return true if it's a compare and jump.
  */
 
 inline bool emitIsCmpJump(instrDesc* jmp)

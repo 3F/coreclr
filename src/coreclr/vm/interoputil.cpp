@@ -22,7 +22,6 @@
 #include "comcallablewrapper.h"
 #include "../md/compiler/custattr.h"
 #include "siginfo.hpp"
-#include "eemessagebox.h"
 #include "finalizerthread.h"
 #include "interoplibinterface.h"
 
@@ -43,7 +42,6 @@
 #include "commtmemberinfomap.h"
 #include "olevariant.h"
 #include "stdinterfaces.h"
-#include "notifyexternals.h"
 #include "typeparse.h"
 #include "interoputil.inl"
 #include "typestring.h"
@@ -53,7 +51,7 @@
 #define GET_ENUMERATOR_METHOD_NAME          W("GetEnumerator")
 
 #ifdef _DEBUG
-    VOID IntializeInteropLogging();
+    VOID InitializeInteropLogging();
 #endif
 
 struct ByrefArgumentInfo
@@ -72,7 +70,6 @@ void AllocateComClassObject(ComClassFactory* pComClsFac, OBJECTREF* pComObj);
 #endif // FEATURE_COMINTEROP
 
 
-#ifndef CROSSGEN_COMPILE
 //------------------------------------------------------------------
 // setup error info for exception object
 //
@@ -137,15 +134,6 @@ HRESULT SetupErrorInfo(OBJECTREF pThrownObject)
                         else
                             PrintToStdOutW(W("No exception info available"));
                     }
-
-                    if (g_pConfig->ShouldExposeExceptionsInCOMToMsgBox())
-                    {
-                        GCX_PREEMP();
-                        if (!message.IsEmpty())
-                            EEMessageBoxNonLocalizedDebugOnly((LPWSTR)message.GetUnicode(), W(".NET exception in COM"), MB_ICONSTOP | MB_OK);
-                        else
-                            EEMessageBoxNonLocalizedDebugOnly(W("No exception information available"), W(".NET exception in COM"),MB_ICONSTOP | MB_OK);
-                    }
                 }
                 EX_CATCH
                 {
@@ -191,6 +179,7 @@ HRESULT SetupErrorInfo(OBJECTREF pThrownObject)
     return hr;
 }
 
+#if FEATURE_COMINTEROP
 //-------------------------------------------------------------------
  // Used to populate ExceptionData with COM data
 //-------------------------------------------------------------------
@@ -224,7 +213,7 @@ void FillExceptionData(
         }
     }
 }
-#endif // CROSSGEN_COMPILE
+#endif // FEATURE_COMINTEROP
 
 //---------------------------------------------------------------------------
 // If pImport has the DefaultDllImportSearchPathsAttribute,
@@ -258,7 +247,7 @@ BOOL GetDefaultDllImportSearchPathsAttributeValue(Module *pModule, mdToken token
     CaArg args[1];
     args[0].InitEnum(SERIALIZATION_TYPE_U4, (ULONG)0);
 
-    ParseKnownCaArgs(ca, args, lengthof(args));
+    ParseKnownCaArgs(ca, args, ARRAY_SIZE(args));
     *pDllImportSearchPathFlags = args[0].val.u4;
     return TRUE;
 }
@@ -289,7 +278,7 @@ int GetLCIDParameterIndex(MethodDesc *pMD)
         CustomAttributeParser caLCID(pVal, cbVal);
         CaArg args[1];
         args[0].Init(SERIALIZATION_TYPE_I4, 0);
-        IfFailGo(ParseKnownCaArgs(caLCID, args, lengthof(args)));
+        IfFailGo(ParseKnownCaArgs(caLCID, args, ARRAY_SIZE(args)));
         iLCIDParam = args[0].val.i4;
     }
 
@@ -297,7 +286,6 @@ ErrExit:
     return iLCIDParam;
 }
 
-#ifndef CROSSGEN_COMPILE
 //---------------------------------------------------------------------------
 // Transforms an LCID into a CultureInfo.
 void GetCultureInfoForLCID(LCID lcid, OBJECTREF *pCultureObj)
@@ -333,7 +321,6 @@ void GetCultureInfoForLCID(LCID lcid, OBJECTREF *pCultureObj)
     GCPROTECT_END();
 }
 
-#endif // CROSSGEN_COMPILE
 
 //---------------------------------------------------------------------------
 // This method determines if a member is visible from COM.
@@ -439,7 +426,6 @@ BOOL IsMemberVisibleFromCom(MethodTable *pDeclaringMT, mdToken tk, mdMethodDef m
     return TRUE;
 }
 
-#ifndef CROSSGEN_COMPILE
 // This method checks whether the given IErrorInfo is actually a managed CLR object.
 BOOL IsManagedObject(IUnknown *pIUnknown)
 {
@@ -462,7 +448,6 @@ BOOL IsManagedObject(IUnknown *pIUnknown)
 #endif
     return FALSE;
 }
-#endif
 
 ULONG GetStringizedMethodDef(MethodTable *pDeclaringMT, mdToken tkMb, CQuickArray<BYTE> &rDef, ULONG cbCur)
 {
@@ -926,7 +911,7 @@ ReadBestFitCustomAttribute(Module* pModule, mdTypeDef cl, BOOL* BestFit, BOOL* T
 }
 
 
-int InternalWideToAnsi(__in_ecount(iNumWideChars) LPCWSTR szWideString, int iNumWideChars, __out_ecount_opt(cbAnsiBufferSize) LPSTR szAnsiString, int cbAnsiBufferSize, BOOL fBestFit, BOOL fThrowOnUnmappableChar)
+int InternalWideToAnsi(_In_reads_(iNumWideChars) LPCWSTR szWideString, int iNumWideChars, _Out_writes_bytes_opt_(cbAnsiBufferSize) LPSTR szAnsiString, int cbAnsiBufferSize, BOOL fBestFit, BOOL fThrowOnUnmappableChar)
 {
     CONTRACTL
     {
@@ -1033,7 +1018,7 @@ namespace
         if (FAILED(cap.ValidateProlog()))
             return COR_E_BADIMAGEFORMAT;
 
-        U1 u1;
+        UINT8 u1;
         if (FAILED(cap.GetU1(&u1)))
             return COR_E_BADIMAGEFORMAT;
 
@@ -1070,7 +1055,7 @@ CorClassIfaceAttr ReadClassInterfaceTypeCustomAttribute(TypeHandle type)
     {
         // Check the class interface attribute at the assembly level.
         Assembly *pAssembly = type.GetAssembly();
-        hr = TryParseClassInterfaceAttribute(pAssembly->GetManifestModule(), pAssembly->GetManifestToken(), &attrValueMaybe);
+        hr = TryParseClassInterfaceAttribute(pAssembly->GetModule(), pAssembly->GetManifestToken(), &attrValueMaybe);
         if (FAILED(hr))
             ThrowHR(hr, BFA_BAD_CLASS_INT_CA_FORMAT);
     }
@@ -1230,7 +1215,6 @@ HRESULT SafeQueryInterfacePreemp(IUnknown* pUnk, REFIID riid, IUnknown** pResUnk
 #include <optdefault.h>
 
 #if defined(FEATURE_COMINTEROP) || defined(FEATURE_COMWRAPPERS)
-#ifndef CROSSGEN_COMPILE
 
 //--------------------------------------------------------------------------------
 // Cleanup helpers
@@ -1314,11 +1298,9 @@ void CleanupSyncBlockComData(InteropSyncBlockInfo* pInteropInfo)
 #endif // FEATURE_COMWRAPPERS
 }
 
-#endif // !CROSSGEN_COMPILE
 #endif // FEATURE_COMINTEROP || FEATURE_COMWRAPPERS
 
 #ifdef FEATURE_COMINTEROP
-#ifndef CROSSGEN_COMPILE
 
 //--------------------------------------------------------------------------------
 //  Helper to release all of the RCWs in the specified context across all caches.
@@ -1719,8 +1701,8 @@ void SafeReleaseStream(IStream *pStream)
         HRESULT hr = CoReleaseMarshalData(pStream);
 
 #ifdef _DEBUG
-        WCHAR      logStr[200];
-        swprintf_s(logStr, NumItems(logStr), W("Object gone: CoReleaseMarshalData returned %x, file %S, line %d\n"), hr, __FILE__, __LINE__);
+        UTF8 logStr[512];
+        sprintf_s(logStr, ARRAY_SIZE(logStr), "Object gone: CoReleaseMarshalData returned %x, file %s, line %d\n", hr, __FILE__, __LINE__);
         LogInterop(logStr);
         if (hr != S_OK)
         {
@@ -1730,7 +1712,7 @@ void SafeReleaseStream(IStream *pStream)
             ULARGE_INTEGER li2;
             pStream->Seek(li, STREAM_SEEK_SET, &li2);
             hr = CoReleaseMarshalData(pStream);
-            swprintf_s(logStr, NumItems(logStr), W("Object gone: CoReleaseMarshalData returned %x, file %S, line %d\n"), hr, __FILE__, __LINE__);
+            sprintf_s(logStr, ARRAY_SIZE(logStr), "Object gone: CoReleaseMarshalData returned %x, file %s, line %d\n", hr, __FILE__, __LINE__);
             LogInterop(logStr);
         }
 #endif
@@ -1778,7 +1760,6 @@ BOOL IsIClassX(MethodTable *pMT, REFIID riid, ComMethodTable **ppComMT)
     return FALSE;
 }
 
-#endif //#ifndef CROSSGEN_COMPILE
 
 
 //---------------------------------------------------------------------------
@@ -1798,7 +1779,6 @@ BOOL ClassSupportsIClassX(MethodTable *pMT)
 }
 
 
-#ifndef CROSSGEN_COMPILE
 
 #ifdef FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
 //---------------------------------------------------------------------------
@@ -1824,7 +1804,6 @@ OBJECTREF AllocateComObject_ForManaged(MethodTable* pMT)
 }
 #endif // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
 
-#endif //#ifndef CROSSGEN_COMPILE
 
 //---------------------------------------------------------------------------
 // This method returns the default interface for the class.
@@ -2002,7 +1981,6 @@ DefaultInterfaceType GetDefaultInterfaceForClassWrapper(TypeHandle hndClass, Typ
     }
     CONTRACTL_END;
 
-#ifndef CROSSGEN_COMPILE
     if (!hndClass.IsTypeDesc())
     {
         ComCallWrapperTemplate *pTemplate = hndClass.AsMethodTable()->GetComCallWrapperTemplate();
@@ -2016,13 +1994,11 @@ DefaultInterfaceType GetDefaultInterfaceForClassWrapper(TypeHandle hndClass, Typ
             return itfType;
         }
     }
-#endif // CROSSGEN_COMPILE
 
     return GetDefaultInterfaceForClassInternal(hndClass, pHndDefClass);
 }
 
 
-#ifndef CROSSGEN_COMPILE
 
 HRESULT TryGetDefaultInterfaceForClass(TypeHandle hndClass, TypeHandle *pHndDefClass, DefaultInterfaceType *pDefItfType)
 {
@@ -2517,8 +2493,8 @@ HRESULT GetTypeLibGuidForAssembly(Assembly *pAssembly, GUID *pGuid)
     CQuickArray<BYTE> rName;            // String for guid.
     ULONG       cbData;                 // Size of the string in bytes.
 
-    // Get GUID from Assembly, else from Manifest Module, else Generate from name.
-    hr = pAssembly->GetManifestImport()->GetItemGuid(TokenFromRid(1, mdtAssembly), pGuid);
+    // Get GUID from Assembly, else Generate from name.
+    hr = pAssembly->GetMDImport()->GetItemGuid(TokenFromRid(1, mdtAssembly), pGuid);
 
     if (*pGuid == GUID_NULL)
     {
@@ -2564,7 +2540,7 @@ HRESULT GetTypeLibVersionForAssembly(
     ULONG cbData = 0;
 
     // Check to see if the TypeLibVersionAttribute is set.
-    IfFailRet(pAssembly->GetManifestImport()->GetCustomAttributeByName(TokenFromRid(1, mdtAssembly), INTEROP_TYPELIBVERSION_TYPE, (const void**)&pbData, &cbData));
+    IfFailRet(pAssembly->GetMDImport()->GetCustomAttributeByName(TokenFromRid(1, mdtAssembly), INTEROP_TYPELIBVERSION_TYPE, (const void**)&pbData, &cbData));
 
     // For attribute contents, see https://docs.microsoft.com/dotnet/api/system.runtime.interopservices.typelibversionattribute
     if (cbData >= (2 + 2 * sizeof(UINT32)))
@@ -2593,7 +2569,6 @@ HRESULT GetTypeLibVersionForAssembly(
     return S_OK;
 } // HRESULT TypeLibExporter::GetTypeLibVersionFromAssembly()
 
-#endif //CROSSGEN_COMPILE
 
 
 //---------------------------------------------------------------------------
@@ -2749,93 +2724,7 @@ BOOL IsTypeVisibleFromCom(TypeHandle hndType)
     return SpecialIsGenericTypeVisibleFromCom(hndType);
 }
 
-#ifdef FEATURE_PREJIT
-//---------------------------------------------------------------------------
-// Determines if a method is likely to be used for forward COM/WinRT interop.
-BOOL MethodNeedsForwardComStub(MethodDesc *pMD, DataImage *pImage)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-    }
-    CONTRACTL_END;
 
-    MethodTable *pMT = pMD->GetMethodTable();
-
-    if (pMT->HasInstantiation())
-    {
-        // method is declared on an unsupported generic type -> stub not needed
-        return FALSE;
-    }
-
-    GUID guid;
-    pMT->GetGuid(&guid, FALSE);
-
-    if (guid != GUID_NULL)
-    {
-        // explicit GUID defined in metadata -> stub needed
-        return TRUE;
-    }
-
-    return FALSE;
-}
-
-//---------------------------------------------------------------------------
-// Determines if a method is visible from COM in a way that requires a marshaling
-// stub, i.e. it allows early binding.
-BOOL MethodNeedsReverseComStub(MethodDesc *pMD)
-{
-    CONTRACTL
-    {
-        THROWS;
-        GC_TRIGGERS;
-        MODE_ANY;
-        PRECONDITION(CheckPointer(pMD));
-    }
-    CONTRACTL_END;
-
-    BOOL fIsAllowedCtorOrStatic = FALSE;
-    MethodTable *pMT = pMD->GetMethodTable();
-
-    if (pMT->IsInterface())
-    {
-        if (!pMT->IsComImport() && !IsTypeVisibleFromCom(TypeHandle(pMT)))
-            return FALSE;
-
-        if (pMT->HasInstantiation())
-            return FALSE;
-
-        // declaring interface must be InterfaceIsIUnknown or InterfaceIsDual
-        if (pMT->GetComInterfaceType() == ifDispatch)
-            return FALSE;
-    }
-    else
-    {
-        if (!IsTypeVisibleFromCom(TypeHandle(pMT)))
-            return FALSE;
-
-        if (pMT->IsDelegate())
-        {
-            return FALSE;
-        }
-
-        // declaring class must be AutoDual
-        if (pMT->GetComClassInterfaceType() != clsIfAutoDual)
-            return FALSE;
-    }
-
-    // NGen can't compile stubs for var arg methods
-    if (pMD->IsVarArg())
-        return FALSE;
-
-    return IsMethodVisibleFromCom(pMD);
-}
-#endif // FEATURE_PREJIT
-
-
-#ifndef CROSSGEN_COMPILE
 
 //--------------------------------------------------------------------------------
 // Validate that the given target is valid for the specified type.
@@ -2886,7 +2775,7 @@ BOOL IsComTargetValidForType(REFLECTCLASSBASEREF* pRefClassObj, OBJECTREF* pTarg
     return FALSE;
 }
 
-DISPID ExtractStandardDispId(__in_z LPWSTR strStdDispIdMemberName)
+DISPID ExtractStandardDispId(_In_z_ LPWSTR strStdDispIdMemberName)
 {
     CONTRACTL
     {
@@ -3310,7 +3199,7 @@ void IUInvokeDispMethod(
         RCWHolder pRCW(GetThread());
         RCWPROTECT_BEGIN(pRCW, *pTarget);
 
-        // Retrieve the IDispath pointer from the wrapper.
+        // Retrieve the IDispatch pointer from the wrapper.
         pDisp = (IDispatch*)pRCW->GetIDispatch();
         if (!pDisp)
             COMPlusThrow(kTargetInvocationException, IDS_EE_NO_IDISPATCH_ON_TARGET);
@@ -3418,7 +3307,7 @@ void IUInvokeDispMethod(
                     vDispIDElement.pMT = pInvokedMT;
                     vDispIDElement.strNameLength = strNameLength;
                     vDispIDElement.lcid = lcid;
-                    wcscpy_s(vDispIDElement.strName, COUNTOF(vDispIDElement.strName), aNamesToConvert[0]);
+                    wcscpy_s(vDispIDElement.strName, ARRAY_SIZE(vDispIDElement.strName), aNamesToConvert[0]);
 
                     // Only look up if the cache has already been created.
                     DispIDCache* pDispIDCache = GetAppDomain()->GetRefDispIDCache();
@@ -3782,7 +3671,6 @@ void GetComClassFromCLSID(REFCLSID clsid, _In_opt_z_ PCWSTR wszServer, OBJECTREF
 
 #endif // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION && FEATURE_COMINTEROP
 
-#endif //#ifndef CROSSGEN_COMPILE
 
 
 #ifdef FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
@@ -3803,7 +3691,7 @@ ClassFactoryBase *GetComClassFactory(MethodTable* pClassMT)
     }
     CONTRACT_END;
 
-    // Work our way up the hierachy until we find the first COM import type.
+    // Work our way up the hierarchy until we find the first COM import type.
     while (!pClassMT->IsComImport())
     {
         pClassMT = pClassMT->GetParentMethodTable();
@@ -3862,16 +3750,13 @@ void InitializeComInterop()
 #ifdef TARGET_X86
     ComPlusCall::Init();
 #endif
-#ifndef CROSSGEN_COMPILE
     CtxEntryCache::Init();
     ComCallWrapperTemplate::Init();
 #ifdef _DEBUG
-    IntializeInteropLogging();
+    InitializeInteropLogging();
 #endif //_DEBUG
-#endif //CROSSGEN_COMPILE
 }
 
-#ifndef CROSSGEN_COMPILE
 
 #ifdef _DEBUG
 //-------------------------------------------------------------------
@@ -3881,23 +3766,17 @@ void InitializeComInterop()
 static int g_TraceCount = 0;
 static IUnknown* g_pTraceIUnknown = NULL;
 
-VOID IntializeInteropLogging()
+VOID InitializeInteropLogging()
 {
     WRAPPER_NO_CONTRACT;
 
     g_TraceCount = g_pConfig->GetTraceWrapper();
 }
 
-VOID LogInterop(__in_z LPCSTR szMsg)
+VOID LogInterop(_In_z_ LPCSTR szMsg)
 {
     LIMITED_METHOD_CONTRACT;
     LOG( (LF_INTEROP, LL_INFO10, "%s\n",szMsg) );
-}
-
-VOID LogInterop(__in_z LPCWSTR wszMsg)
-{
-    LIMITED_METHOD_CONTRACT;
-    LOG( (LF_INTEROP, LL_INFO10, "%S\n", wszMsg) );
 }
 
 //-------------------------------------------------------------------
@@ -4070,7 +3949,7 @@ VOID LogInteropLeak(IUnknown* pItf)
 //-------------------------------------------------------------------
 // VOID LogInteropQI(IUnknown* pItf, REFIID iid, HRESULT hr, LPCSTR szMsg)
 //-------------------------------------------------------------------
-VOID LogInteropQI(IUnknown* pItf, REFIID iid, HRESULT hrArg, __in_z LPCSTR szMsg)
+VOID LogInteropQI(IUnknown* pItf, REFIID iid, HRESULT hrArg, _In_z_ LPCSTR szMsg)
 {
     if (!LoggingOn(LF_INTEROP, LL_ALWAYS))
         return;
@@ -4119,7 +3998,7 @@ VOID LogInteropQI(IUnknown* pItf, REFIID iid, HRESULT hrArg, __in_z LPCSTR szMsg
 //-------------------------------------------------------------------
 //  VOID LogInteropAddRef(IUnknown* pItf, ULONG cbRef, LPCSTR szMsg)
 //-------------------------------------------------------------------
-VOID LogInteropAddRef(IUnknown* pItf, ULONG cbRef, __in_z LPCSTR szMsg)
+VOID LogInteropAddRef(IUnknown* pItf, ULONG cbRef, _In_z_ LPCSTR szMsg)
 {
     if (!LoggingOn(LF_INTEROP, LL_ALWAYS))
         return;
@@ -4152,7 +4031,7 @@ VOID LogInteropAddRef(IUnknown* pItf, ULONG cbRef, __in_z LPCSTR szMsg)
 //-------------------------------------------------------------------
 //  VOID LogInteropRelease(IUnknown* pItf, ULONG cbRef, LPCSTR szMsg)
 //-------------------------------------------------------------------
-VOID LogInteropRelease(IUnknown* pItf, ULONG cbRef, __in_z LPCSTR szMsg)
+VOID LogInteropRelease(IUnknown* pItf, ULONG cbRef, _In_z_ LPCSTR szMsg)
 {
     if (!LoggingOn(LF_INTEROP, LL_ALWAYS))
         return;
@@ -4250,6 +4129,5 @@ void UnmarshalObjectFromInterface(OBJECTREF *ppObjectDest, IUnknown **ppUnkSrc, 
     }
 }
 
-#endif //#ifndef CROSSGEN_COMPILE
 
 #endif // FEATURE_COMINTEROP

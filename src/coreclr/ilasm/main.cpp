@@ -12,11 +12,11 @@
 #include "shimload.h"
 
 #include "strsafe.h"
-#define ASSERTE_ALL_BUILDS(expr) _ASSERTE_ALL_BUILDS(__FILE__, (expr))
+#define ASSERTE_ALL_BUILDS(expr) _ASSERTE_ALL_BUILDS((expr))
 
 #include <_version.h>
 
-WCHAR* EqualOrColon(__in __nullterminated WCHAR* szArg)
+WCHAR* EqualOrColon(_In_ __nullterminated WCHAR* szArg)
 {
     WCHAR* pchE = wcschr(szArg,L'=');
     WCHAR* pchC = wcschr(szArg,L':');
@@ -31,11 +31,8 @@ static DWORD    g_dwSubsystem=(DWORD)-1,g_dwComImageFlags=(DWORD)-1,g_dwFileAlig
 static ULONGLONG   g_stBaseAddress=0;
 static size_t   g_stSizeOfStackReserve=0;
 extern unsigned int g_uConsoleCP;
-#ifdef TARGET_UNIX
-char * g_pszExeFile;
-#endif
 
-void MakeTestFile(__in __nullterminated char* szFileName)
+void MakeTestFile(_In_ __nullterminated char* szFileName)
 {
     if(g_dwTestRepeat)
     {
@@ -57,10 +54,10 @@ void MakeTestFile(__in __nullterminated char* szFileName)
     }
 }
 
-void MakeProperSourceFileName(__in __nullterminated WCHAR* wzOrigName,
+void MakeProperSourceFileName(_In_ __nullterminated WCHAR* wzOrigName,
                               unsigned uCodePage,
-                              __out_ecount(MAX_FILENAME_LENGTH) WCHAR* wzProperName,
-                              __out_ecount(MAX_FILENAME_LENGTH*3) char* szProperName)
+                              _Out_writes_(MAX_FILENAME_LENGTH) WCHAR* wzProperName,
+                              _Out_writes_(MAX_FILENAME_LENGTH*3) char* szProperName)
 {
     wcscpy_s(wzProperName,MAX_FILENAME_LENGTH, wzOrigName);
     size_t j = wcslen(wzProperName);
@@ -78,7 +75,7 @@ void MakeProperSourceFileName(__in __nullterminated WCHAR* wzOrigName,
     WszWideCharToMultiByte(uCodePage,0,wzProperName,-1,szProperName,MAX_FILENAME_LENGTH*3-1,NULL,NULL);
 }
 
-char* FullFileName(__in __nullterminated WCHAR* wzFileName, unsigned uCodePage)
+char* FullFileName(_In_ __nullterminated WCHAR* wzFileName, unsigned uCodePage)
 {
     static WCHAR wzFullPath[MAX_FILENAME_LENGTH];
     WCHAR* pwz;
@@ -93,7 +90,7 @@ char* FullFileName(__in __nullterminated WCHAR* wzFileName, unsigned uCodePage)
 void PrintMod()
 {
     printf("\n# 3F's edition ( github/3F ) specially for .NET DllExport: https://github.com/3F");
-    printf("\n  v" VER_3FMOD_PRODUCT_STR);
+    printf("\n " VER_3FMOD_PRODUCT_STR);
 }
 
 WCHAR       *pwzInputFiles[1024];
@@ -110,7 +107,7 @@ WCHAR       wzPdbFilename[MAX_FILENAME_LENGTH];
 #pragma warning(disable:21000) // Suppress PREFast warning about overly large function
 #endif
 
-extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
+extern "C" int _cdecl wmain(int argc, _In_ WCHAR **argv)
 {
     int         i, NumFiles = 0, NumDeltaFiles = 0;
     bool        IsDLL = false;
@@ -159,7 +156,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 #pragma warning(pop)
 #endif
     {
-        printf("\nMicrosoft (R) .NET IL Assembler version " CLR_PRODUCT_VERSION);
+        printf("\n.NET IL Assembler version " CLR_PRODUCT_VERSION);
         printf("\n%S\n\n", VER_LEGALCOPYRIGHT_LOGO_STR_L);
         goto PrintUsageAndExit;
 
@@ -661,7 +658,7 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                 //======================================================================
                 if(bLogo)
                 {
-                    printf("\nMicrosoft (R) .NET IL Assembler.  Version " CLR_PRODUCT_VERSION);
+                    printf("\n.NET IL Assembler.  Version " CLR_PRODUCT_VERSION);
                     printf("\n%S", VER_LEGALCOPYRIGHT_LOGO_STR_L);
                     PrintMod();
                     printf("\n\n");
@@ -779,8 +776,9 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
                                     for(iFile = 0; iFile < NumDeltaFiles; iFile++)
                                     {
                                         wcscpy_s(wzNewOutputFilename,MAX_FILENAME_LENGTH+16,wzOutputFilename);
-                                        exitval = _snwprintf_s(&wzNewOutputFilename[wcslen(wzNewOutputFilename)], 32, _TRUNCATE,
-                                                 W(".%d"),iFile+1);
+                                        size_t len = wcslen(wzNewOutputFilename);
+                                        wzNewOutputFilename[len] = W('.');
+                                        FormatInteger(&wzNewOutputFilename[len + 1], MaxSigned32BitDecString + 1, "%d", iFile+1);
                                         MakeProperSourceFileName(pwzDeltaFiles[iFile], uCodePage, wzInputFilename, szInputFilename);
                                         if(pAsm->m_fReportProgress)
                                         {
@@ -884,7 +882,6 @@ extern "C" int _cdecl wmain(int argc, __in WCHAR **argv)
 #ifdef TARGET_UNIX
 int main(int argc, char* str[])
 {
-    g_pszExeFile = str[0];
     if (0 != PAL_Initialize(argc, str))
     {
         fprintf(stderr,"Error: Fail to PAL_Initialize\n");

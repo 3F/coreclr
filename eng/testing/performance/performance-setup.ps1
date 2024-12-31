@@ -14,7 +14,7 @@ Param(
     [string] $Kind="micro",
     [switch] $LLVM,
     [switch] $MonoInterpreter,
-    [switch] $MonoAOT,
+    [switch] $MonoAOT, 
     [switch] $Internal,
     [switch] $Compare,
     [string] $MonoDotnet="",
@@ -25,7 +25,9 @@ Param(
     [switch] $NoPGO,
     [switch] $DynamicPGO,
     [switch] $FullPGO,
-    [switch] $iOSLlvmBuild
+    [switch] $iOSLlvmBuild,
+    [string] $MauiVersion,
+    [switch] $UseLocalCommitTime
 )
 
 $RunFromPerformanceRepo = ($Repository -eq "dotnet/performance") -or ($Repository -eq "dotnet-performance")
@@ -44,12 +46,13 @@ $Queue = ""
 
 if ($Internal) {
     switch ($LogicalMachine) {
-        "perftiger" { $Queue = "Windows.11.Amd64.Tiger.Perf" }
-        "perftiger_crossgen" { $Queue = "Windows.11.Amd64.Tiger.Perf" }
-        "perfowl" { $Queue = "Windows.11.Amd64.Owl.Perf" }
-        "perfsurf" { $Queue = "Windows.11.Arm64.Surf.Perf" }
+        "perftiger" { $Queue = "Windows.10.Amd64.19H1.Tiger.Perf" }
+        "perftiger_crossgen" { $Queue = "Windows.10.Amd64.19H1.Tiger.Perf" }
+        "perfowl" { $Queue = "Windows.10.Amd64.20H2.Owl.Perf" }
+        "perfsurf" { $Queue = "Windows.10.Arm64.Perf.Surf" }
         "perfpixel4a" { $Queue = "Windows.11.Amd64.Pixel.Perf" }
-        Default { $Queue = "Windows.11.Amd64.Tiger.Perf" }
+        "perfampere" { $Queue = "Windows.Server.Arm64.Perf" }
+        Default { $Queue = "Windows.10.Amd64.19H1.Tiger.Perf" }
     }
     $PerfLabArguments = "--upload-to-perflab-container"
     $ExtraBenchmarkDotNetArguments = ""
@@ -98,7 +101,7 @@ if ($iOSMono) {
 }
 
 # FIX ME: This is a workaround until we get this from the actual pipeline
-$CleanedBranchName = "release/6.0"
+$CleanedBranchName = "main"
 if($Branch.Contains("refs/heads/release"))
 {
     $CleanedBranchName = $Branch.replace('refs/heads/', '')
@@ -119,13 +122,19 @@ elseif($FullPGO)
     $SetupArguments = "$SetupArguments --full-pgo"
 }
 
+if($UseLocalCommitTime)
+{
+    $LocalCommitTime = (git show -s --format=%ci $CommitSha)
+    $SetupArguments = "$SetupArguments --commit-time `"$LocalCommitTime`""
+}
+
 if ($RunFromPerformanceRepo) {
     $SetupArguments = "--perf-hash $CommitSha $CommonSetupArguments"
-
+    
     robocopy $SourceDirectory $PerformanceDirectory /E /XD $PayloadDirectory $SourceDirectory\artifacts $SourceDirectory\.git
 }
 else {
-    git clone --branch release/6.0 --depth 1 --quiet https://github.com/dotnet/performance $PerformanceDirectory
+    git clone --branch release/7.0 --depth 1 --quiet https://github.com/dotnet/performance $PerformanceDirectory
 }
 
 if($MonoDotnet -ne "")
@@ -144,26 +153,17 @@ if ($UseBaselineCoreRun) {
     Move-Item -Path $BaselineCoreRootDirectory -Destination $NewBaselineCoreRoot
 }
 
+if($MauiVersion -ne "")
+{
+    $SetupArguments = "$SetupArguments --maui-version $MauiVersion"
+}
+
 if ($AndroidMono) {
     if(!(Test-Path $WorkItemDirectory))
     {
         mkdir $WorkItemDirectory
     }
-    Copy-Item -path "$SourceDirectory\artifacts\bin\AndroidSampleApp\arm64\Release\android-arm64\publish\apk\bin\HelloAndroid.apk" $PayloadDirectory
-    $SetupArguments = $SetupArguments -replace $Architecture, 'arm64'
-}
-
-if ($iOSMono) {
-    if(!(Test-Path $WorkItemDirectory))
-    {
-        mkdir $WorkItemDirectory
-    }
-    if($iOSLlvmBuild) {
-        Copy-Item -path "$SourceDirectory\iosHelloWorld\llvm" $PayloadDirectory\iosHelloWorld\llvm -Recurse
-    } else {
-        Copy-Item -path "$SourceDirectory\iosHelloWorld\nollvm" $PayloadDirectory\iosHelloWorld\nollvm -Recurse
-    }
-
+    Copy-Item -path "$SourceDirectory\androidHelloWorld\HelloAndroid.apk" $PayloadDirectory -Verbose
     $SetupArguments = $SetupArguments -replace $Architecture, 'arm64'
 }
 

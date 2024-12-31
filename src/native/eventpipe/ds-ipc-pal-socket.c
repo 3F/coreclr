@@ -289,7 +289,7 @@ inline
 ds_ipc_mode_t
 ipc_socket_set_default_umask (void)
 {
-#if defined(DS_IPC_PAL_AF_UNIX) && defined(__APPLE__)
+#if defined(DS_IPC_PAL_AF_UNIX) && (defined(__APPLE__) || defined(__FreeBSD__))
 	// This will set the default permission bit to 600
 	return umask (~(S_IRUSR | S_IWUSR));
 #else
@@ -302,7 +302,7 @@ inline
 void
 ipc_socket_reset_umask (ds_ipc_mode_t mode)
 {
-#if defined(DS_IPC_PAL_AF_UNIX) && defined(__APPLE__)
+#if defined(DS_IPC_PAL_AF_UNIX) && (defined(__APPLE__) || defined(__FreeBSD__))
 	umask (mode);
 #endif
 }
@@ -412,7 +412,7 @@ inline
 int
 ipc_socket_set_permission (ds_ipc_socket_t s)
 {
-#if defined(DS_IPC_PAL_AF_UNIX) && !defined(__APPLE__)
+#if defined(DS_IPC_PAL_AF_UNIX) && !(defined(__APPLE__) || defined(__FreeBSD__))
 	int result_fchmod;
 	DS_ENTER_BLOCKING_PAL_SECTION;
 	do {
@@ -460,8 +460,8 @@ ipc_poll_fds (
 	result_poll = WSAPoll (fds, (ULONG)nfds, (INT)timeout);
 #else
 #ifndef EP_NO_RT_DEPENDENCY
-	int64_t start;
-	int64_t stop;
+	int64_t start = 0;
+	int64_t stop = 0;
 	bool retry_poll = false;
 	do {
 		if (timeout != EP_INFINITE_WAIT)
@@ -530,20 +530,20 @@ ipc_socket_accept (
 	ds_ipc_socket_t client_socket;
 	DS_ENTER_BLOCKING_PAL_SECTION;
 	do {
-#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
+#if HAVE_ACCEPT4 && defined(SOCK_CLOEXEC)
     	client_socket = accept4 (s, address, address_len, SOCK_CLOEXEC);
 #else
     	client_socket = accept (s, address, address_len);
 #endif
 	} while (ipc_retry_syscall (client_socket));
 
-#if !defined(HAVE_ACCEPT4) || !defined(SOCK_CLOEXEC)
+#if !HAVE_ACCEPT4 || !defined(SOCK_CLOEXEC)
 #if defined(FD_CLOEXEC)
-    if (client_socket != -1)
-    {
-        // ignore any failures; this is best effort
-        fcntl (client_socket, F_SETFD, FD_CLOEXEC);
-    }
+		if (client_socket != -1)
+		{
+			// ignore any failures; this is best effort
+			fcntl (client_socket, F_SETFD, FD_CLOEXEC);
+		}
 #endif
 #endif
 	DS_EXIT_BLOCKING_PAL_SECTION;
@@ -884,7 +884,7 @@ ipc_alloc_tcp_address (
 		if (!ipc->server_address && info->ai_family == AF_INET) {
 			server_address = ep_rt_object_alloc (struct sockaddr_in);
 			if (server_address) {
-				server_address->sin_family = info->ai_family;
+				server_address->sin_family = (uint8_t) info->ai_family;
 				server_address->sin_port = htons (port);
 				server_address->sin_addr = ((struct sockaddr_in*)info->ai_addr)->sin_addr;
 				ipc->server_address = (ds_ipc_socket_address_t *)server_address;
@@ -898,7 +898,7 @@ ipc_alloc_tcp_address (
 		if (!ipc->server_address && info->ai_family == AF_INET6) {
 			server_address6 = ep_rt_object_alloc (struct sockaddr_in6);
 			if (server_address6) {
-				server_address6->sin6_family = info->ai_family;
+				server_address6->sin6_family = (uint8_t) info->ai_family;
 				server_address6->sin6_port = htons (port);
 				server_address6->sin6_addr = ((struct sockaddr_in6*)info->ai_addr)->sin6_addr;
 				ipc->server_address = (ds_ipc_socket_address_t *)server_address6;
@@ -1061,11 +1061,6 @@ ds_ipc_free (DiagnosticsIpc *ipc)
 	ep_rt_object_free (ipc);
 }
 
-void
-ds_ipc_reset (DiagnosticsIpc *ipc)
-{
-}
-
 int32_t
 ds_ipc_poll (
 	DiagnosticsIpcPollHandle *poll_handles_data,
@@ -1132,7 +1127,7 @@ ds_ipc_poll (
 			} else {
 				poll_handles_data [i].events = (uint8_t)DS_IPC_POLL_EVENTS_UNKNOWN;
 				if (callback)
-					callback ("unkown poll response", (uint32_t)poll_fds [i].revents);
+					callback ("unknown poll response", (uint32_t)poll_fds [i].revents);
 			}
 		}
 	}

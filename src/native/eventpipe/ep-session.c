@@ -184,6 +184,7 @@ ep_session_alloc (
 	case EP_SESSION_TYPE_FILESTREAM :
 		if (output_path) {
 			file_stream_writer = ep_file_stream_writer_alloc (output_path);
+			ep_raise_error_if_nok (file_stream_writer != NULL);
 			instance->file = ep_file_alloc (ep_file_stream_writer_get_stream_writer_ref (file_stream_writer), format);
 			ep_raise_error_if_nok (instance->file != NULL);
 			file_stream_writer = NULL;
@@ -205,6 +206,7 @@ ep_session_alloc (
 	instance->session_start_time = ep_system_timestamp_get ();
 	instance->session_start_timestamp = ep_perf_timestamp_get ();
 	instance->paused = false;
+	instance->enable_stackwalk = ep_rt_config_value_get_enable_stackwalk ();
 
 ep_on_exit:
 	ep_requires_lock_held ();
@@ -322,7 +324,7 @@ ep_session_enable_rundown (EventPipeSession *session)
 	const EventPipeEventLevel verbose_logging_level = EP_EVENT_LEVEL_VERBOSE;
 
 	EventPipeProviderConfiguration rundown_providers [2];
-	uint32_t rundown_providers_len = (uint32_t)EP_ARRAY_SIZE (rundown_providers);
+	uint32_t rundown_providers_len = (uint32_t)ARRAY_SIZE (rundown_providers);
 
 	ep_provider_config_init (&rundown_providers [0], ep_config_get_public_provider_name_utf8 (), keywords, verbose_logging_level, NULL); // Public provider.
 	ep_provider_config_init (&rundown_providers [1], ep_config_get_rundown_provider_name_utf8 (), keywords, verbose_logging_level, NULL); // Rundown provider.
@@ -624,7 +626,7 @@ ep_session_resume (EventPipeSession *session)
 #endif /* !defined(EP_INCLUDE_SOURCE_FILES) || defined(EP_FORCE_INCLUDE_SOURCE_FILES) */
 #endif /* ENABLE_PERFTRACING */
 
-#ifndef EP_INCLUDE_SOURCE_FILES
+#if !defined(ENABLE_PERFTRACING) || (defined(EP_INCLUDE_SOURCE_FILES) && !defined(EP_FORCE_INCLUDE_SOURCE_FILES))
 extern const char quiet_linker_empty_file_warning_eventpipe_session;
 const char quiet_linker_empty_file_warning_eventpipe_session = 0;
 #endif

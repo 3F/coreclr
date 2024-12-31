@@ -84,16 +84,6 @@
 //*****************************************************************************
 STDAPI CreateCordbObject(int iDebuggerVersion, IUnknown ** ppCordb)
 {
-#if !defined(FEATURE_DBGIPC_TRANSPORT_DI) && !defined(FEATURE_CORESYSTEM)
-    // This API should not be called for Windows CoreCLR unless we are doing interop-debugging
-    // (which is only supported internally).  Use code:CoreCLRCreateCordbObject instead.
-    if (CLRConfig::GetConfigValue(CLRConfig::INTERNAL_DbgEnableMixedModeDebugging) == 0)
-    {
-        _ASSERTE(!"Deprecated entry point CreateCordbObject() is called on Windows CoreCLR\n");
-        return E_NOTIMPL;
-    }
-#endif // !defined(FEATURE_DBGIPC_TRANSPORT_DI) && !defined(FEATURE_CORESYSTEM)
-
     if (ppCordb == NULL)
     {
         return E_INVALIDARG;
@@ -109,7 +99,7 @@ STDAPI CreateCordbObject(int iDebuggerVersion, IUnknown ** ppCordb)
 //
 // Public API.
 // Creation path with Mac sandbox support and explicit DAC module path for single-file apps
-// This supercedes code:CoreCLRCreateCordbObjectEx
+// This supersedes code:CoreCLRCreateCordbObjectEx
 //
 // Arguments:
 //    iDebuggerVersion - version of ICorDebug interfaces that the debugger is requesting
@@ -163,7 +153,7 @@ STDAPI DLLEXPORT CoreCLRCreateCordbObject3(int iDebuggerVersion, DWORD pid, LPCW
 //
 // Public API.
 // Creation path with Mac sandbox support - only way to debug a sandboxed application on Mac.
-// This supercedes code:CoreCLRCreateCordbObject
+// This supersedes code:CoreCLRCreateCordbObject
 //
 // Arguments:
 //    iDebuggerVersion - version of ICorDebug interfaces that the debugger is requesting
@@ -185,7 +175,7 @@ STDAPI DLLEXPORT CoreCLRCreateCordbObjectEx(int iDebuggerVersion, DWORD pid, LPC
 //
 // Public API.
 // Creation path - only way to debug multi-instance.
-// This supercedes code:CreateCordbObject
+// This supersedes code:CreateCordbObject
 //
 // Arguments:
 //    iDebuggerVersion - version of ICorDebug interfaces that the debugger is requesting

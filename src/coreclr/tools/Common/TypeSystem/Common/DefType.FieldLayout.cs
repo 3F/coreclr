@@ -63,6 +63,16 @@ namespace Internal.TypeSystem
             /// True if type transitively has UnsafeValueTypeAttribute
             /// </summary>
             public const int IsUnsafeValueType = 0x200;
+
+            /// <summary>
+            /// True if the type transitively has any types with LayoutKind.Auto in its layout.
+            /// </summary>
+            public const int IsAutoLayoutOrHasAutoLayoutFields = 0x400;
+
+            /// <summary>
+            /// True if the type transitively has an Int128 in it or is an Int128
+            /// </summary>
+            public const int IsInt128OrHasInt128Fields = 0x800;
         }
 
         private class StaticBlockInfo
@@ -115,6 +125,35 @@ namespace Internal.TypeSystem
             }
         }
 
+        /// <summary>
+        /// Does a type have auto-layout or transitively have any fields of a type with auto-layout.
+        /// </summary>
+        public virtual bool IsAutoLayoutOrHasAutoLayoutFields
+        {
+            get
+            {
+                if (!_fieldLayoutFlags.HasFlags(FieldLayoutFlags.ComputedInstanceTypeLayout))
+                {
+                    ComputeInstanceLayout(InstanceLayoutKind.TypeAndFields);
+                }
+                return _fieldLayoutFlags.HasFlags(FieldLayoutFlags.IsAutoLayoutOrHasAutoLayoutFields);
+            }
+        }
+
+        /// <summary>
+        /// Is a type Int128 or transitively have any fields of a type Int128.
+        /// </summary>
+        public virtual bool IsInt128OrHasInt128Fields
+        {
+            get
+            {
+                if (!_fieldLayoutFlags.HasFlags(FieldLayoutFlags.ComputedInstanceTypeLayout))
+                {
+                    ComputeInstanceLayout(InstanceLayoutKind.TypeAndFields);
+                }
+                return _fieldLayoutFlags.HasFlags(FieldLayoutFlags.IsInt128OrHasInt128Fields);
+            }
+        }
 
         /// <summary>
         /// The number of bytes required to hold a field of this type
@@ -405,6 +444,14 @@ namespace Internal.TypeSystem
             if (!computedLayout.LayoutAbiStable)
             {
                 _fieldLayoutFlags.AddFlags(FieldLayoutFlags.ComputedInstanceLayoutAbiUnstable);
+            }
+            if (computedLayout.IsAutoLayoutOrHasAutoLayoutFields)
+            {
+                _fieldLayoutFlags.AddFlags(FieldLayoutFlags.IsAutoLayoutOrHasAutoLayoutFields);
+            }
+            if (computedLayout.IsInt128OrHasInt128Fields)
+            {
+                _fieldLayoutFlags.AddFlags(FieldLayoutFlags.IsInt128OrHasInt128Fields);
             }
 
             if (computedLayout.Offsets != null)
