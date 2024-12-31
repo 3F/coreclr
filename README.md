@@ -3,7 +3,8 @@
 
 Contains the complete runtime implementation for .NET Core. It includes RyuJIT, the .NET GC, native interop and many other components.
 
-**Modified** and has been prepared specialy for [https://github.com/3F/DllExport](https://github.com/3F/DllExport) by [GitHub/3F](https://github.com/3F) developer.
+**Modified** versions aka 3F's IL assembler on coreclr ([github/3F](https://github.com/3F))
+Specialy for [https://github.com/3F/DllExport](https://github.com/3F/DllExport)
 
 ✓ License
 -------
