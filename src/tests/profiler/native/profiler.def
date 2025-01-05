@@ -1,0 +1,9 @@
+LIBRARY     Profiler.dll
+
+EXPORTS
+            DllGetClassObject       PRIVATE
+            DllCanUnloadNow         PRIVATE
+            PassCallbackToProfiler  PRIVATE
+            DoPInvoke               PRIVATE
+            DoPInvokeWithCallbackOnOtherThread PRIVATE
+

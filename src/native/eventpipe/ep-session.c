@@ -133,7 +133,8 @@ ep_session_alloc (
 	IpcStream *stream,
 	EventPipeSessionType session_type,
 	EventPipeSerializationFormat format,
-	bool rundown_requested,
+	uint64_t rundown_keyword,
+	bool stackwalk_requested,
 	uint32_t circular_buffer_size_in_mb,
 	const EventPipeProviderConfiguration *providers,
 	uint32_t providers_len,
@@ -163,7 +164,7 @@ ep_session_alloc (
 	instance->rundown_enabled = 0;
 	instance->session_type = session_type;
 	instance->format = format;
-	instance->rundown_requested = rundown_requested;
+	instance->rundown_keyword = rundown_keyword;
 	instance->synchronous_callback = sync_callback;
 	instance->callback_additional_data = callback_additional_data;
 
@@ -208,7 +209,7 @@ ep_session_alloc (
 	instance->session_start_time = ep_system_timestamp_get ();
 	instance->session_start_timestamp = ep_perf_timestamp_get ();
 	instance->paused = false;
-	instance->enable_stackwalk = ep_rt_config_value_get_enable_stackwalk ();
+	instance->enable_stackwalk = ep_rt_config_value_get_enable_stackwalk () && stackwalk_requested;
 	instance->started = 0;
 
 ep_on_exit:
@@ -316,17 +317,7 @@ ep_session_enable_rundown (EventPipeSession *session)
 	ep_requires_lock_held ();
 
 	bool result = false;
-
-	//! This is CoreCLR specific keywords for native ETW events (ending up in event pipe).
-	//! The keywords below seems to correspond to:
-	//!  GCKeyword                          (0x00000001)
-	//!  LoaderKeyword                      (0x00000008)
-	//!  JitKeyword                         (0x00000010)
-	//!  NgenKeyword                        (0x00000020)
-	//!  unused_keyword                     (0x00000100)
-	//!  JittedMethodILToNativeMapKeyword   (0x00020000)
-	//!  ThreadTransferKeyword              (0x80000000)
-	const uint64_t keywords = 0x80020139;
+	const uint64_t keywords = ep_session_get_rundown_keyword (session);
 	const EventPipeEventLevel verbose_logging_level = EP_EVENT_LEVEL_VERBOSE;
 
 	EventPipeProviderConfiguration rundown_provider;

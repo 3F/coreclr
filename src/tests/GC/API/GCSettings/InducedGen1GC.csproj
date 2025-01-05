@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="InducedGen1GC.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="ILatencyTest.csproj" />
+  </ItemGroup>
+</Project>

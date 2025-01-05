@@ -19,6 +19,8 @@ typedef DPTR(struct ICorDebugInfo::NativeVarInfo) PTR_NativeVarInfo;
 
 typedef void (*FAVORCALLBACK)(void *);
 
+class DebuggerSteppingInfo;
+
 //
 // The purpose of this object is to serve as an entry point to the
 // debugger, which used to reside in a separate DLL.
@@ -174,7 +176,7 @@ public:
     //
     // EnC functions
     //
-#ifdef EnC_SUPPORTED
+#ifdef FEATURE_METADATA_UPDATER
     // Notify that an existing method has been edited in a loaded type
     virtual HRESULT UpdateFunction(MethodDesc* md, SIZE_T enCVersion) = 0;
 
@@ -196,10 +198,10 @@ public:
                                              SIZE_T *nativeOffset) = 0;
 
 
-    // Used by FixContextAndResume
-    virtual void SendSetThreadContextNeeded(CONTEXT *context) = 0;
+    // Used by EditAndContinueModule::FixContextAndResume
+    virtual void SendSetThreadContextNeeded(CONTEXT *context, DebuggerSteppingInfo *pDebuggerSteppingInfo = nullptr) = 0;
     virtual BOOL IsOutOfProcessSetContextEnabled() = 0;
-#endif // EnC_SUPPORTED
+#endif // FEATURE_METADATA_UPDATER
 
     // Get debugger variable information for a specific version of a method
     virtual     void GetVarInfo(MethodDesc *       fd,         // [IN] method of interest

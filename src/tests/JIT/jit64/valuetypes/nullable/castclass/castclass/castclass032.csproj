@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <DebugType>PdbOnly</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="castclass032.cs" />
+    <Compile Include="..\structdef.cs" />
+  </ItemGroup>
+</Project>

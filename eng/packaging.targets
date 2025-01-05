@@ -4,12 +4,12 @@
     <!-- Package Validation isn't helpful when authoring shared framework packages. -->
     <EnablePackageValidation Condition="'$(EnablePackageValidation)' == '' and
                                         '$(UsingMicrosoftDotNetSharedFrameworkSdk)' != 'true' and
-                                        '$(DotNetBuildFromSource)' != 'true'">true</EnablePackageValidation>
+                                        '$(DotNetBuildSourceOnly)' != 'true'">true</EnablePackageValidation>
     <!-- Don't perform baseline validation if we don't have a stable prebuilt version.
          Don't attempt to restore prebuilts during source-build. -->
     <DisablePackageBaselineValidation Condition="'$(IsShipping)' == 'false' or
                                                  '$(SuppressFinalPackageVersion)' == 'true' or
-                                                 '$(DotNetBuildFromSource)' == 'true'">true</DisablePackageBaselineValidation>
+                                                 '$(DotNetBuildSourceOnly)' == 'true'">true</DisablePackageBaselineValidation>
     <PackageValidationBaselineVersion Condition="'$(PackageValidationBaselineVersion)' == ''">$(ApiCompatNetCoreAppBaselineVersion)</PackageValidationBaselineVersion>
 
     <BeforePack>$(BeforePack);IncludeAnalyzersInPackage;AddNETStandardCompatErrorFileForPackaging</BeforePack>
@@ -20,9 +20,13 @@
     <!-- Don't treat the TPM as an input to APICompat PackageValidation's reference assembly calculation. -->
     <ApiCompatIgnoreTargetPlatformMoniker Condition="'$(SuppressDependenciesWhenPacking)' == 'true'">true</ApiCompatIgnoreTargetPlatformMoniker>
     <PackageDesignerMarkerFile>$(MSBuildThisFileDirectory)useSharedDesignerContext.txt</PackageDesignerMarkerFile>
-    <PackageReadmeFile Condition="'$(PackageReadmeFile)' == '' and Exists('PACKAGE.md')">PACKAGE.md</PackageReadmeFile>
-    <!-- Non-shipping packages shouldn't incrementally serviced. -->
-    <PackageUseIncrementalServicingVersion Condition="'$(IsShipping)' != 'true'">false</PackageUseIncrementalServicingVersion>
+
+    <!-- PackageReadmeFile specifies the package readme file name in the package. PackageReadmeFilePath points to the package readme file on disk. -->
+    <EnableDefaultPackageReadmeFile Condition="'$(EnableDefaultPackageReadmeFile)' == '' and '$(IsShipping)' == 'true'">true</EnableDefaultPackageReadmeFile>
+    <PackageReadmeFile Condition="'$(PackageReadmeFile)' == '' and '$(EnableDefaultPackageReadmeFile)' == 'true'">PACKAGE.md</PackageReadmeFile>
+    <PackageReadmeFilePath Condition="'$(PackageReadmeFilePath)' == '' and '$(EnableDefaultPackageReadmeFile)' == 'true'">PACKAGE.md</PackageReadmeFilePath>
+    <BeforePack>$(BeforePack);ValidatePackageReadmeExists</BeforePack>
+
     <!-- Generate packages for rid specific projects or for allconfigurations during build. -->
     <!-- A package isn't generated if in servicing or in runtimelab. Intended to be overridden at project level. -->
     <IsRIDSpecificProject Condition="$(MSBuildProjectName.StartsWith('runtime.')) and
@@ -31,15 +35,7 @@
                                         '$(BuildAllConfigurations)' == 'true' or
                                         '$(IsRIDSpecificProject)' == 'true'
                                        ) and
-                                       (
-                                        '$(PreReleaseVersionLabel)' != 'servicing' or
-                                        '$(PackageUseIncrementalServicingVersion)' != 'true'
-                                       ) and
                                        '$(GitHubRepositoryName)' != 'runtimelab'">true</GeneratePackageOnBuild>
-    <!-- When in source-build we need to generate all packages when building for all configurations even in servicing. -->
-    <GeneratePackageOnBuild Condition="'$(GeneratePackageOnBuild)' != 'true' and
-                                       '$(BuildAllConfigurations)' == 'true' and
-                                       '$(DotNetBuildFromSource)' == 'true'">true</GeneratePackageOnBuild>
 
     <!-- During NoBuild pack invocations, skip project reference build. Necessary for the IncludeProjectReferencesWithPackAttributeInPackage target. -->
     <BuildProjectReferences Condition="'$(NoBuild)' == 'true'">false</BuildProjectReferences>
@@ -52,22 +48,11 @@
     <NoWarn>$(NoWarn);CP0003</NoWarn>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(PreReleaseVersionLabel)' == 'servicing' and
-                            '$(PackageUseIncrementalServicingVersion)' == 'true'">
-    <!-- If no servicing version is set we need to default to 0 in order for dependency versions to
-    be calculated properly, if we don't set it to 0, we would get the dependency version using the
-    product Patch Version -->
-    <ServicingVersion Condition="'$(ServicingVersion)' == ''">0</ServicingVersion>
-
-    <!-- Always update the package version in servicing. -->
-    <Version>$(MajorVersion).$(MinorVersion).$(ServicingVersion)</Version>
-    <Version Condition="'$(VersionSuffix)' != ''">$(Version)-$(VersionSuffix)</Version>
-    <_IsWindowsDesktopApp Condition="$(WindowsDesktopCoreAppLibrary.Contains('$(AssemblyName);'))">true</_IsWindowsDesktopApp>
-    <_IsAspNetCoreApp Condition="$(AspNetCoreAppLibrary.Contains('$(AssemblyName);'))">true</_IsAspNetCoreApp>
-    <_AssemblyInTargetingPack Condition="('$(IsNETCoreAppSrc)' == 'true' or '$(IsNetCoreAppRef)' == 'true' or '$(_IsAspNetCoreApp)' == 'true' or '$(_IsWindowsDesktopApp)' == 'true') and '$(TargetFrameworkIdentifier)' != '.NETFramework'">true</_AssemblyInTargetingPack>
-    <!-- The assembly version gets updated when the assembly isn't part of a targeting pack. -->
-    <AssemblyVersion Condition="'$(_AssemblyInTargetingPack)' != 'true'">$(MajorVersion).$(MinorVersion).0.$(ServicingVersion)</AssemblyVersion>
-  </PropertyGroup>
+  <!-- Main packages intentionally don't include assets for net6.0 and net7.0 anymore. -->
+  <ItemGroup>
+    <PackageValidationBaselineFrameworkToIgnore Include="net6.0" />
+    <PackageValidationBaselineFrameworkToIgnore Include="net7.0" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- Add a marker to help the designer optimize & share .NET Core packages -->
@@ -82,9 +67,9 @@
                                   TargetFramework="$(NetFrameworkMinimum)" />
   </ItemGroup>
 
-  <!-- Add a package README file from. -->
-  <ItemGroup Condition="'$(PackageReadmeFile)' != ''">
-    <None Include="$(PackageReadmeFile)" Pack="true" PackagePath="\" />
+  <!-- Add a package README file -->
+  <ItemGroup Condition="'$(PackageReadmeFilePath)' != ''">
+    <None Include="$(PackageReadmeFilePath)" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <Choose>
@@ -318,47 +303,10 @@
     </ItemGroup>
   </Target>
 
-  <ItemDefinitionGroup>
-    <TargetPathWithTargetPlatformMoniker>
-      <!-- When ServiceTransitiveDependencies is set, flow the packaging state -->
-      <GeneratePackageOnBuild Condition="'$(ServiceTransitiveDependencies)' == 'true'">$(GeneratePackageOnBuild)</GeneratePackageOnBuild>
-    </TargetPathWithTargetPlatformMoniker>
-  </ItemDefinitionGroup>
-
-  <!-- Flows the list of ProjectReferences that are enabled for packaging when building a multi-targeting project -->
-  <Target Name="_AddTransitiveServicedPackagesToOutput"
-          AfterTargets="GetTargetPathWithTargetPlatformMoniker"
-          Condition="'$(IsInnerBuild)' == 'true'">
-    <PropertyGroup>
-      <_TransitiveServicedPackages
-          Condition="'%(ReferencePath.ReferenceSourceTarget)' == 'ProjectReference' and
-                     '%(ReferencePath.GeneratePackageOnBuild)' == 'true'"
-                     >@(ReferencePath->'%(OriginalProjectReferenceItemSpec)')</_TransitiveServicedPackages>
-    </PropertyGroup>
-    <ItemGroup>
-      <TargetPathWithTargetPlatformMoniker TransitiveServicedPackages="$(_TransitiveServicedPackages)" />
-    </ItemGroup>
-  </Target>
-
-  <!-- Validate that ServicingVersion is set and packing is enabled.  Runs once in the outer build (or only build if no outer build exists). -->
-  <Target Name="ValidateServicingProperties"
-          Condition="'$(PreReleaseVersionLabel)' == 'servicing' and
-                     '$(PackageUseIncrementalServicingVersion)' == 'true' and
-                     '$(DotNetBuildFromSource)' != 'true' and
-                     '$(IsInnerBuild)' != 'true'"
-          AfterTargets="Build">
-    <ItemGroup>
-      <TransitiveServicedPackages Include="%(InnerOutput.TransitiveServicedPackages)" Condition="'$(IsCrossTargetingBuild)' == 'true'" />
-      <TransitiveServicedPackages Include="'%(ReferencePath.OriginalProjectReferenceItemSpec)"
-                                  Condition="'%(ReferencePath.ReferenceSourceTarget)' == 'ProjectReference' and
-                                             '%(ReferencePath.GeneratePackageOnBuild)' == 'true'" />
-    </ItemGroup>
-    <Error Condition="'$(ServicingVersion)' == '0' and '$(GeneratePackageOnBuild)' == 'true'"
-           Text="ServicingVersion is set to 0 and it should be an increment of the patch version from the last released package." />
-
-    <Error Condition="'$(GeneratePackageOnBuild)' != 'true' and
-                  '@(TransitiveServicedPackages)' != ''"
-        Text="This project did not set GeneratePackageOnBuild, but dependencies '@(TransitiveServicedPackages)' did.  Please ship this project by setting GeneratePackageOnBuild to true and incrementing ServicingVersion." />
+  <Target Name="ValidatePackageReadmeExists"
+          Condition="'$(PackageReadmeFilePath)' != '' and
+                     !Exists('$(PackageReadmeFilePath)')">
+    <Error Text="$(PackageId) is a shipping package and is missing a required package README file. Add a 'PACKAGE.md' file into to the source project folder." />
   </Target>
 
 </Project>

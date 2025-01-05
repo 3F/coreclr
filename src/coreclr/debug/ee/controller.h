@@ -183,7 +183,7 @@ public:
     //      caller wants information about a specific frame.
     // CONTEXT* pContext:  A pointer to a CONTEXT structure.  Can be null,
     //      we use our temp context.
-    // bool suppressUMChainFromComPlusMethodFrameGeneric - A ridiculous flag that is trying to narrowly
+    // bool suppressUMChainFromCLRToCOMMethodFrameGeneric - A ridiculous flag that is trying to narrowly
     //      target a fix for issue 650903.
     // StackTraceTicket - ticket ensuring that we have permission to call this.
     void GetStackInfo(
@@ -191,7 +191,7 @@ public:
         Thread *thread,
         FramePointer targetFP,
         CONTEXT *pContext,
-        bool suppressUMChainFromComPlusMethodFrameGeneric = false
+        bool suppressUMChainFromCLRToCOMMethodFrameGeneric = false
         );
 
     //bool ControllerStackInfo::HasReturnFrame()  Returns
@@ -217,7 +217,7 @@ private:
     // A ridiculous flag that is targeting a very narrow fix at issue 650903
     // (4.5.1/Blue).  This is set for the duration of a stackwalk designed to
     // help us "Step Out" to a managed frame (i.e., managed-only debugging).
-    bool                    m_suppressUMChainFromComPlusMethodFrameGeneric;
+    bool                    m_suppressUMChainFromCLRToCOMMethodFrameGeneric;
 
     // Track if this stackwalk actually happened.
     // This is used by the StackTraceTicket(ControllerStackInfo * info) ticket.
@@ -827,7 +827,7 @@ public:
     DebuggerControllerPatch * GetPatch(PTR_CORDB_ADDRESS_TYPE address)
     {
         SUPPORTS_DAC;
-        ARM_ONLY(_ASSERTE(dac_cast<DWORD>(address) & THUMB_CODE));
+        ARM_ONLY(_ASSERTE(dac_cast<TADDR>(address) & THUMB_CODE));
 
         DebuggerControllerPatch * pPatch =
             dac_cast<PTR_DebuggerControllerPatch>(Find(HashAddress(address), (SIZE_T)(dac_cast<TADDR>(address))));
@@ -1072,7 +1072,12 @@ class DebuggerController
     static bool DispatchNativeException(EXCEPTION_RECORD *exception,
                                         CONTEXT *context,
                                         DWORD code,
-                                        Thread *thread);
+                                        Thread *thread
+#ifdef OUT_OF_PROCESS_SETTHREADCONTEXT
+                                        ,
+                                        DebuggerSteppingInfo *pDebuggerSteppingInfo = NULL
+#endif
+                                        );
 
     static bool DispatchUnwind(Thread *thread,
                                MethodDesc *fd, DebuggerJitInfo * pDJI, SIZE_T offset,
@@ -1099,9 +1104,9 @@ class DebuggerController
     // Check whether there are any pathces in the patch table for the specified module.
     static bool ModuleHasPatches( Module* pModule );
 
-#if EnC_SUPPORTED
+#if FEATURE_METADATA_UPDATER
     static DebuggerControllerPatch *GetEnCPatch(const BYTE *address);
-#endif //EnC_SUPPORTED
+#endif //FEATURE_METADATA_UPDATER
 
     static DPOSS_ACTION ScanForTriggers(CORDB_ADDRESS_TYPE *address,
                                 Thread *thread,
@@ -1113,13 +1118,23 @@ class DebuggerController
 
     static DebuggerPatchSkip *ActivatePatchSkip(Thread *thread,
                                                 const BYTE *eip,
-                                                BOOL fForEnC);
+                                                BOOL fForEnC
+#ifdef OUT_OF_PROCESS_SETTHREADCONTEXT
+                                                ,
+                                                DebuggerSteppingInfo *pDebuggerSteppingInfo = NULL
+#endif
+                                                );
 
 
     static DPOSS_ACTION DispatchPatchOrSingleStep(Thread *thread,
                                           CONTEXT *context,
                                           CORDB_ADDRESS_TYPE *ip,
-                                          SCAN_TRIGGER which);
+                                          SCAN_TRIGGER which
+#ifdef OUT_OF_PROCESS_SETTHREADCONTEXT
+                                          ,
+                                          DebuggerSteppingInfo *pDebuggerSteppingInfo = NULL
+#endif
+                                          );
 
 
     static int GetNumberOfPatches()
@@ -1444,6 +1459,23 @@ private:
 
 #if !defined(DACCESS_COMPILE)
 
+// this structure stores useful information about single-stepping over a call instruction
+// it is used to communicate the patch skip opcode and current state between the controller on left side and HandleSetThreadContextNeeded on the right side
+class DebuggerSteppingInfo
+{
+    bool fIsInPlaceSingleStep = false;
+    PRD_TYPE opcode = 0;
+
+public:
+    bool IsInPlaceSingleStep() { return fIsInPlaceSingleStep; }
+    PRD_TYPE GetOpcode() { return opcode; }
+    void EnableInPlaceSingleStepOverCall(PRD_TYPE opcode)
+    {
+        this->fIsInPlaceSingleStep = true;
+        this->opcode = opcode;
+    }
+};
+
 /* ------------------------------------------------------------------------- *
  * DebuggerPatchSkip routines
  * ------------------------------------------------------------------------- */
@@ -1453,8 +1485,7 @@ class DebuggerPatchSkip : public DebuggerController
     friend class DebuggerController;
 
     DebuggerPatchSkip(Thread *thread,
-                      DebuggerControllerPatch *patch,
-                      AppDomain *pAppDomain);
+                      DebuggerControllerPatch *patch);
 
     ~DebuggerPatchSkip();
 
@@ -1480,6 +1511,9 @@ class DebuggerPatchSkip : public DebuggerController
     CORDB_ADDRESS_TYPE      *m_address;
     int                      m_iOrigDisp;        // the original displacement of a relative call or jump
     InstructionAttribute     m_instrAttrib;      // info about the instruction being skipped over
+#ifdef OUT_OF_PROCESS_SETTHREADCONTEXT
+    bool                     m_fInPlaceSS;       // is this an in-place single-step instruction?
+#endif // OUT_OF_PROCESS_SETTHREADCONTEXT
 #ifndef FEATURE_EMULATE_SINGLESTEP
     // this is shared among all the skippers and the controller. see the comments
     // right before the definition of SharedPatchBypassBuffer for lifetime info.
@@ -1492,7 +1526,23 @@ public:
         BYTE* patchBypass = m_pSharedPatchBypassBuffer->PatchBypass;
         return (CORDB_ADDRESS_TYPE *)patchBypass;
     }
+
 #endif // !FEATURE_EMULATE_SINGLESTEP
+
+    BOOL IsInPlaceSingleStep() 
+    { 
+#ifdef OUT_OF_PROCESS_SETTHREADCONTEXT
+#ifndef FEATURE_EMULATE_SINGLESTEP
+        // only in-place single steps over call intructions are supported at this time
+        _ASSERTE(m_instrAttrib.m_fIsCall);
+        return m_fInPlaceSS;
+#else
+#error only non-emulated single-steps with OUT_OF_PROCESS_SETTHREADCONTEXT enabled are supported
+#endif
+#else
+        return false;
+#endif
+    }
 };
 
 /* ------------------------------------------------------------------------- *
@@ -1915,7 +1965,7 @@ private:
 };
 
 
-#ifdef EnC_SUPPORTED
+#ifdef FEATURE_METADATA_UPDATER
 //---------------------------------------------------------------------------------------
 //
 // DebuggerEnCBreakpoint - used by edit and continue to support remapping
@@ -1963,7 +2013,7 @@ private:
     DebuggerJitInfo *m_jitInfo;
     TriggerType m_fTriggerType;
 };
-#endif //EnC_SUPPORTED
+#endif //FEATURE_METADATA_UPDATER
 
 /* ========================================================================= */
 

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <HeapVerifyIncompatible Condition="'$(TargetArchitecture)' == 'arm'">true</HeapVerifyIncompatible>
+  </PropertyGroup>
+  <PropertyGroup>
+    <DebugType>PdbOnly</DebugType>
+    <GCStressIncompatible>true</GCStressIncompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="GetTotalAllocatedBytes.cs" />
+  </ItemGroup>
+</Project>

@@ -24,6 +24,11 @@ check_function_exists(
     HAVE_OPENSSL_SHA3
 )
 
+check_function_exists(
+    EVP_DigestSqueeze
+    HAVE_OPENSSL_SHA3_SQUEEZE
+)
+
 check_source_compiles(C "
 #include <openssl/engine.h>
 int main(void) { ENGINE_init(NULL); return 1; }"

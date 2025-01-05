@@ -51,7 +51,8 @@ pal::hresult_t get_load_in_memory_assembly_delegate(pal::dll_t handle, load_in_m
                 *load_context = ISOLATED_CONTEXT; // Isolated load context
             }
         },
-        reinterpret_cast<void**>(&get_function_pointer)
+        reinterpret_cast<void**>(&get_function_pointer),
+        true // ignore missing config file if there's an active context
     );
     if (status != StatusCode::Success)
         return status;

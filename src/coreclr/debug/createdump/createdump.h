@@ -33,8 +33,6 @@ extern void trace_verbose_printf(const char* format, ...);
 #endif
 
 #include <windows.h>
-#include <winternl.h>
-#include <winver.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -74,7 +72,6 @@ typedef int T_CONTEXT;
 #include <dirent.h>
 #include <fcntl.h>
 #include <dlfcn.h>
-#include <cxxabi.h>
 #ifdef __APPLE__
 #include <ELF.h>
 #else
@@ -84,6 +81,7 @@ typedef int T_CONTEXT;
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 #else
+#include <winternl.h>
 #include <dbghelp.h>
 #endif
 #include <map>
