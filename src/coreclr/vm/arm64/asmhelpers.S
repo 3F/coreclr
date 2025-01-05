@@ -329,7 +329,9 @@ WRITE_BARRIER_ENTRY JIT_CheckedWriteBarrier
     // branch below is not taken.
     ccmp x14, x12, #0x2, hs
 
-    blo  C_FUNC(JIT_WriteBarrier)
+    bhs  LOCAL_LABEL(NotInHeap)
+
+    b C_FUNC(JIT_WriteBarrier)
 
 LOCAL_LABEL(NotInHeap):
     str  x15, [x14], 8
@@ -420,7 +422,7 @@ LOCAL_LABEL(CheckCardTable):
     // branch to exit is taken.
     ccmp x15, x12, #0x2, hs
 
-    bhi  LOCAL_LABEL(Exit)
+    bhs  LOCAL_LABEL(Exit)
 
 LOCAL_LABEL(SkipEphemeralCheck):
     // Check if we need to update the card table
@@ -697,6 +699,30 @@ NESTED_END CallEHFilterFunclet, _TEXT
 
 .endm
 
+// ------------------------------------------------------------------
+//
+// Helpers for ThreadAbort exceptions
+//
+
+        NESTED_ENTRY RedirectForThreadAbort2, _TEXT, NoHandler
+        PROLOG_SAVE_REG_PAIR_INDEXED fp,lr, -16
+
+        // stack must be 16 byte aligned
+        CHECK_STACK_ALIGNMENT
+
+        // On entry:
+        //
+        // x0 = address of FaultingExceptionFrame
+        //
+        // Invoke the helper to setup the FaultingExceptionFrame and raise the exception
+        bl              C_FUNC(ThrowControlForThread)
+
+        // ThrowControlForThread doesn't return.
+        EMIT_BREAKPOINT
+
+        NESTED_END RedirectForThreadAbort2, _TEXT
+
+GenerateRedirectedStubWithFrame RedirectForThreadAbort, RedirectForThreadAbort2
 
 // ------------------------------------------------------------------
 // ResolveWorkerChainLookupAsmStub
@@ -974,3 +1000,53 @@ LEAF_END JIT_ValidateIndirectCall, _TEXT
 LEAF_ENTRY JIT_DispatchIndirectCall, _TEXT
     br x9
 LEAF_END JIT_DispatchIndirectCall, _TEXT
+
+#ifdef TARGET_OSX
+// ------------------------------------------------------------------
+// void* GetThreadVarsAddress()
+
+// Helper to calculate the address of relevant __thread_vars section that holds the address of symbol tlv_get_address for thread
+// local `t_ThreadStatics`. The address is updated by the linker, which we retrieve here. In JIT code, this address is called
+// to retrieve the address of the thread local.
+
+LEAF_ENTRY GetThreadVarsAddress, _TEXT
+        adrp    x0,     _t_ThreadStatics@TLVPPAGE
+        ldr     x0,     [x0, _t_ThreadStatics@TLVPPAGEOFF]
+        ret
+LEAF_END GetThreadVarsAddress, _TEXT
+// ------------------------------------------------------------------
+#endif // TARGET_OSX
+
+#ifndef TARGET_OSX
+// ------------------------------------------------------------------
+// size_t GetThreadStaticsVariableOffset()
+
+// Helper to calculate the offset of native thread local variable `t_ThreadStatics` in TCB. The offset has to be found at runtime
+// once linker does its relocation and fixup of thread locals. The offset, after calculation is returned in `x0` register.
+
+LEAF_ENTRY GetThreadStaticsVariableOffset, _TEXT
+        PROLOG_SAVE_REG_PAIR_INDEXED   fp, lr, -32
+        adrp    x0,     :tlsdesc:t_ThreadStatics
+        ldr     x1,     [x0, #:tlsdesc_lo12:t_ThreadStatics]
+        add     x0,     x0, :tlsdesc_lo12:t_ThreadStatics
+        .tlsdesccall    t_ThreadStatics
+        blr     x1
+        EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 32
+        EPILOG_RETURN
+LEAF_END GetThreadStaticsVariableOffset, _TEXT
+// ------------------------------------------------------------------
+
+// ------------------------------------------------------------------
+// size_t GetTLSResolverAddress()
+
+// Helper to get the TLS resolver address. This will be then used to determine if we have a static or dynamic resolver.
+LEAF_ENTRY GetTLSResolverAddress, _TEXT
+        PROLOG_SAVE_REG_PAIR_INDEXED   fp, lr, -32
+        adrp    x0,     :tlsdesc:t_ThreadStatics
+        ldr     x1,     [x0, #:tlsdesc_lo12:t_ThreadStatics]
+        mov     x0, x1
+        EPILOG_RESTORE_REG_PAIR_INDEXED fp, lr, 32
+        EPILOG_RETURN
+LEAF_END GetTLSResolverAddress, _TEXT
+// ------------------------------------------------------------------
+#endif // !TARGET_OSX

@@ -816,7 +816,7 @@ void ILWSTRBufferMarshaler::EmitConvertSpaceNativeToCLR(ILCodeStream* pslILEmit)
     if (IsIn(m_dwMarshalFlags) || IsCLRToNative(m_dwMarshalFlags))
     {
         EmitLoadNativeValue(pslILEmit);
-        // static int System.String.wcslen(char *ptr)
+        // static int System.String.u16_strlen(char *ptr)
         pslILEmit->EmitCALL(METHOD__STRING__WCSLEN, 1, 1);
     }
     else
@@ -845,7 +845,7 @@ void ILWSTRBufferMarshaler::EmitConvertContentsNativeToCLR(ILCodeStream* pslILEm
     EmitLoadNativeValue(pslILEmit);
 
     pslILEmit->EmitDUP();
-    // static int System.String.wcslen(char *ptr)
+    // static int System.String.u16_strlen(char *ptr)
     pslILEmit->EmitCALL(METHOD__STRING__WCSLEN, 1, 1);
 
     // void System.Text.StringBuilder.ReplaceBuffer(char* newBuffer, int newLength);
@@ -1343,7 +1343,7 @@ void ILInterfaceMarshaler::EmitConvertContentsCLRToNative(ILCodeStream* pslILEmi
     if (itfInfo.thNativeItf.GetMethodTable())
     {
         pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(itfInfo.thNativeItf.GetMethodTable()));
-        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
     }
     else
     {
@@ -1353,7 +1353,7 @@ void ILInterfaceMarshaler::EmitConvertContentsCLRToNative(ILCodeStream* pslILEmi
     if (itfInfo.thClass.GetMethodTable())
     {
         pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(itfInfo.thClass.GetMethodTable()));
-        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
     }
     else
     {
@@ -1380,7 +1380,7 @@ void ILInterfaceMarshaler::EmitConvertContentsNativeToCLR(ILCodeStream* pslILEmi
     if (itfInfo.thItf.GetMethodTable())
     {
         pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(itfInfo.thItf.GetMethodTable()));
-        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
     }
     else
     {
@@ -1390,7 +1390,7 @@ void ILInterfaceMarshaler::EmitConvertContentsNativeToCLR(ILCodeStream* pslILEmi
     if (itfInfo.thClass.GetMethodTable())
     {
         pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(itfInfo.thClass.GetMethodTable()));
-        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+        pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
     }
     else
     {
@@ -2233,7 +2233,7 @@ void ILLayoutClassPtrMarshalerBase::EmitConvertSpaceNativeToCLR(ILCodeStream* ps
     pslILEmit->EmitBRFALSE(pNullRefLabel);
 
     pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(m_pargs->m_pMT));
-    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
     // static object AllocateInternal(IntPtr typeHandle);
     pslILEmit->EmitCALL(METHOD__STUBHELPERS__ALLOCATE_INTERNAL, 1, 1);
     EmitStoreManagedValue(pslILEmit);
@@ -3459,6 +3459,38 @@ MarshalerOverrideStatus ILBlittableValueClassWithCopyCtorMarshaler::ArgumentOver
 #ifdef TARGET_X86
         pslIL->SetStubTargetArgType(&locDesc);              // native type is the value type
         pslILDispatch->EmitLDLOC(dwNewValueTypeLocal);      // we load the local directly
+
+#if defined(TARGET_WINDOWS)
+        // Record this argument's stack slot in the copy constructor chain so we can correctly invoke the copy constructor.
+        DWORD ctorCookie = pslIL->NewLocal(CoreLibBinder::GetClass(CLASS__COPY_CONSTRUCTOR_COOKIE));
+        pslIL->EmitLDLOCA(ctorCookie);
+        pslIL->EmitINITOBJ(pslIL->GetToken(CoreLibBinder::GetClass(CLASS__COPY_CONSTRUCTOR_COOKIE)));
+        pslIL->EmitLDLOCA(ctorCookie);
+        pslIL->EmitLDLOCA(dwNewValueTypeLocal);
+        pslIL->EmitSTFLD(pslIL->GetToken(CoreLibBinder::GetField(FIELD__COPY_CONSTRUCTOR_COOKIE__SOURCE)));
+        pslIL->EmitLDLOCA(ctorCookie);
+        pslIL->EmitLDC(nativeStackOffset);
+        pslIL->EmitSTFLD(pslIL->GetToken(CoreLibBinder::GetField(FIELD__COPY_CONSTRUCTOR_COOKIE__DESTINATION_OFFSET)));
+
+        if (pargs->mm.m_pCopyCtor)
+        {
+            pslIL->EmitLDLOCA(ctorCookie);
+            pslIL->EmitLDFTN(pslIL->GetToken(pargs->mm.m_pCopyCtor));
+            pslIL->EmitSTFLD(pslIL->GetToken(CoreLibBinder::GetField(FIELD__COPY_CONSTRUCTOR_COOKIE__COPY_CONSTRUCTOR)));
+        }
+
+        if (pargs->mm.m_pDtor)
+        {
+            pslIL->EmitLDLOCA(ctorCookie);
+            pslIL->EmitLDFTN(pslIL->GetToken(pargs->mm.m_pDtor));
+            pslIL->EmitSTFLD(pslIL->GetToken(CoreLibBinder::GetField(FIELD__COPY_CONSTRUCTOR_COOKIE__DESTRUCTOR)));
+        }
+
+        pslIL->EmitLDLOCA(psl->GetCopyCtorChainLocalNum());
+        pslIL->EmitLDLOCA(ctorCookie);
+        pslIL->EmitCALL(METHOD__COPY_CONSTRUCTOR_CHAIN__ADD, 2, 0);
+#endif // defined(TARGET_WINDOWS)
+
 #else
         pslIL->SetStubTargetArgType(ELEMENT_TYPE_I);        // native type is a pointer
         EmitLoadNativeLocalAddrForByRefDispatch(pslILDispatch, dwNewValueTypeLocal);
@@ -3477,9 +3509,13 @@ MarshalerOverrideStatus ILBlittableValueClassWithCopyCtorMarshaler::ArgumentOver
 
         DWORD       dwNewValueTypeLocal;
         dwNewValueTypeLocal = pslIL->NewLocal(locDesc);
+#ifdef TARGET_WINDOWS
+        pslILDispatch->EmitLDARGA(argidx);
+#else // !TARGET_WINDOWS
         pslILDispatch->EmitLDARG(argidx);
         pslILDispatch->EmitSTLOC(dwNewValueTypeLocal);
         pslILDispatch->EmitLDLOCA(dwNewValueTypeLocal);
+#endif // TARGET_WINDOWS
 #else
         LocalDesc   locDesc(pargs->mm.m_pMT);
         locDesc.MakeCopyConstructedPointer();
@@ -3895,7 +3931,7 @@ void ILNativeArrayMarshaler::EmitCreateMngdMarshaler(ILCodeStream* pslILEmit)
     pslILEmit->EmitLDLOC(m_dwMngdMarshalerLocalNum);
 
     pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(mops.methodTable));
-    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
 
     DWORD dwFlags = mops.elementType;
     dwFlags |= (((DWORD)mops.bestfitmapping)        << 16);
@@ -4517,7 +4553,7 @@ void ILFixedArrayMarshaler::EmitCreateMngdMarshaler(ILCodeStream* pslILEmit)
     pslILEmit->EmitLDLOC(m_dwMngdMarshalerLocalNum);
 
     pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(mops.methodTable));
-    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
 
     DWORD dwFlags = mops.elementType;
     dwFlags |= (((DWORD)mops.bestfitmapping) << 16);
@@ -4759,7 +4795,7 @@ void ILSafeArrayMarshaler::EmitCreateMngdMarshaler(ILCodeStream* pslILEmit)
 
     pslILEmit->EmitLDLOC(m_dwMngdMarshalerLocalNum);
     pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(mops.methodTable));
-    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
     pslILEmit->EmitLDC(m_pargs->m_pMarshalInfo->GetArrayRank());
     pslILEmit->EmitLDC(dwFlags);
 
@@ -5039,12 +5075,12 @@ void ILReferenceCustomMarshaler::EmitCreateMngdMarshaler(ILCodeStream* pslILEmit
     //
 
     pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(m_pargs->rcm.m_pMD));
-    pslILEmit->EmitCALL(METHOD__METHOD_HANDLE__GETVALUEINTERNAL, 1, 1);
+    pslILEmit->EmitCALL(METHOD__METHOD_HANDLE__TO_INTPTR, 1, 1);
 
     pslILEmit->EmitLDC(m_pargs->rcm.m_paramToken);
 
     pslILEmit->EmitLDTOKEN(pslILEmit->GetToken(TypeHandle::FromPtr(m_pargs->rcm.m_hndManagedType)));
-    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__GETVALUEINTERNAL, 1, 1);
+    pslILEmit->EmitCALL(METHOD__RT_TYPE_HANDLE__TO_INTPTR, 1, 1);
 
     pslILEmit->EmitCALL(METHOD__STUBHELPERS__CREATE_CUSTOM_MARSHALER_HELPER, 3, 1);  // arg to CreateMarshaler
 

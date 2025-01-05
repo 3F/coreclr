@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 
+# Also reset/set below
 set -x
 
 source_directory=$BUILD_SOURCESDIRECTORY
 core_root_directory=
 baseline_core_root_directory=
 architecture=x64
-framework=net5.0
+framework=
 compilation_mode=tiered
 repository=$BUILD_REPOSITORY_NAME
 branch=$BUILD_SOURCEBRANCH
@@ -22,7 +23,7 @@ monoaot=false
 monoaot_path=
 run_categories="Libraries Runtime"
 csproj="src\benchmarks\micro\MicroBenchmarks.csproj"
-configurations="CompliationMode=$compilation_mode RunKind=$kind"
+configurations="CompilationMode=$compilation_mode RunKind=$kind"
 perf_fork=""
 perf_fork_branch="main"
 run_from_perf_repo=false
@@ -35,10 +36,14 @@ use_latest_dotnet=false
 logical_machine=
 javascript_engine="v8"
 iosmono=false
+iosnativeaot=false
+runtimetype=""
 iosllvmbuild=""
+iosstripsymbols=""
 maui_version=""
 use_local_commit_time=false
 only_sanity=false
+dotnet_versions=""
 
 while (($# > 0)); do
   lowerI="$(echo $1 | tr "[:upper:]" "[:lower:]")"
@@ -137,6 +142,14 @@ while (($# > 0)); do
       wasmaot=true
       shift 1
       ;;
+    --nodynamicpgo)
+      nodynamicpgo=true
+      shift 1
+      ;;
+    --physicalpromotion)
+      physicalpromotion=true
+      shift 1
+      ;;
     --compare)
       compare=true
       shift 1
@@ -149,12 +162,24 @@ while (($# > 0)); do
       use_latest_dotnet=true
       shift 1
       ;;
+    --dotnetversions)
+      dotnet_versions="$2"
+      shift 2
+      ;;
     --iosmono)
       iosmono=true
       shift 1
       ;;
+    --iosnativeaot)
+      iosnativeaot=true
+      shift 1
+      ;;
     --iosllvmbuild)
       iosllvmbuild=$2
+      shift 2
+      ;;
+    --iosstripsymbols)
+      iosstripsymbols=$2
       shift 2
       ;;
     --mauiversion)
@@ -187,7 +212,7 @@ while (($# > 0)); do
       echo ""
       echo "Advanced settings:"
       echo "  --framework <value>            The framework to run, if not running in master"
-      echo "  --compliationmode <value>      The compilation mode if not passing --configurations"
+      echo "  --compilationmode <value>      The compilation mode if not passing --configurations"
       echo "  --sourcedirectory <value>      The directory of the sources. Defaults to env:BUILD_SOURCESDIRECTORY"
       echo "  --repository <value>           The name of the repository in the <owner>/<repository name> format. Defaults to env:BUILD_REPOSITORY_NAME"
       echo "  --branch <value>               The name of the branch. Defaults to env:BUILD_SOURCEBRANCH"
@@ -201,13 +226,18 @@ while (($# > 0)); do
       echo "  --wasmbundle                   Path to the wasm bundle containing the dotnet, and data needed for helix payload"
       echo "  --wasmaot                      Indicate wasm aot"
       echo "  --latestdotnet                 --dotnet-versions will not be specified. --dotnet-versions defaults to LKG version in global.json "
+      echo "  --dotnetversions               Passed as '--dotnet-versions <value>' to the setup script"
       echo "  --alpine                       Set for runs on Alpine"
       echo "  --iosmono                      Set for ios Mono/Maui runs"
+      echo "  --iosnativeaot                 Set for ios Native AOT runs"
       echo "  --iosllvmbuild                 Set LLVM for iOS Mono/Maui runs"
+      echo "  --iosstripsymbols              Set STRIP_DEBUG_SYMBOLS for iOS Mono/Maui runs"
       echo "  --mauiversion                  Set the maui version for Mono/Maui runs"
       echo "  --uselocalcommittime           Pass local runtime commit time to the setup script"
+      echo "  --nodynamicpgo                 Set for No dynamic PGO runs"
+      echo "  --physicalpromotion            Set for runs with physical promotion"
       echo ""
-      exit 0
+      exit 1
       ;;
   esac
 done
@@ -234,7 +264,7 @@ benchmark_directory=$payload_directory/BenchmarkDotNet
 workitem_directory=$source_directory/workitem
 extra_benchmark_dotnet_arguments="--iterationCount 1 --warmupCount 0 --invocationCount 1 --unrollFactor 1 --strategy ColdStart --stopOnFirstError true"
 perflab_arguments=
-queue=Ubuntu.1804.Amd64.Open
+queue=Ubuntu.2204.Amd64.Open
 creator=$BUILD_DEFINITIONNAME
 helix_source_prefix="pr"
 
@@ -247,12 +277,16 @@ if [[ "$internal" == true ]]; then
     if [[ "$logical_machine" == "perfiphone12mini" ]]; then
         queue=OSX.13.Amd64.Iphone.Perf
     elif [[ "$logical_machine" == "perfampere" ]]; then
-        queue=Ubuntu.2004.Arm64.Perf
+        queue=Ubuntu.2204.Arm64.Perf
+    elif [[ "$logical_machine" == "perfviper" ]]; then
+        queue=Ubuntu.2204.Amd64.Viper.Perf
+    elif [[ "$logical_machine" == "cloudvm" ]]; then
+        queue=Ubuntu.2204.Amd64
     elif [[ "$architecture" == "arm64" ]]; then
         queue=Ubuntu.1804.Arm64.Perf
     else
         if [[ "$logical_machine" == "perfowl" ]]; then
-            queue=Ubuntu.1804.Amd64.Owl.Perf
+            queue=Ubuntu.2204.Amd64.Owl.Perf
         elif [[ "$logical_machine" == "perftiger_crossgen" ]]; then
             queue=Ubuntu.1804.Amd64.Tiger.Perf
         else
@@ -267,7 +301,7 @@ else
     if [[ "$architecture" == "arm64" ]]; then
         queue=ubuntu.1804.armarch.open
     else
-        queue=Ubuntu.1804.Amd64.Open
+        queue=Ubuntu.2204.Amd64.Open
     fi
 
     if [[ "$alpine" == "true" ]]; then
@@ -307,11 +341,26 @@ if [[ "$monoaot" == "true" ]]; then
 fi
 
 if [[ "$iosmono" == "true" ]]; then
-    configurations="$configurations iOSLlvmBuild=$iosllvmbuild"
+    runtimetype="Mono"
+    configurations="$configurations iOSLlvmBuild=$iosllvmbuild iOSStripSymbols=$iosstripsymbols RuntimeType=$runtimetype"
     extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments"
 fi
 
-cleaned_branch_name="main"
+if [[ "$iosnativeaot" == "true" ]]; then
+    runtimetype="NativeAOT"
+    configurations="$configurations iOSStripSymbols=$iosstripsymbols RuntimeType=$runtimetype"
+    extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments"
+fi
+
+if [[ "$nodynamicpgo" == "true" ]]; then
+    configurations="$configurations PGOType=nodynamicpgo"
+fi
+
+if [[ "$physicalpromotion" == "true" ]]; then
+    configurations="$configurations PhysicalPromotionType=physicalpromotion"
+fi
+
+cleaned_branch_name="release/8.0"
 if [[ $branch == *"refs/heads/release"* ]]; then
     cleaned_branch_name=${branch/refs\/heads\//}
 fi
@@ -336,10 +385,12 @@ else
     if [[ -n "$perf_fork" ]]; then
         git clone --branch $perf_fork_branch --depth 1 --quiet $perf_fork $performance_directory
     else
-        git clone --branch release/7.0 --depth 1 --quiet https://github.com/dotnet/performance.git $performance_directory
+        git clone --branch main --depth 1 --quiet https://github.com/dotnet/performance.git $performance_directory
     fi
     # uncomment to use BenchmarkDotNet sources instead of nuget packages
     # git clone https://github.com/dotnet/BenchmarkDotNet.git $benchmark_directory
+
+    (cd $performance_directory; git show -s HEAD)
 
     docs_directory=$performance_directory/docs
     mv $docs_directory $workitem_directory
@@ -353,8 +404,14 @@ if [[ -n "$wasm_bundle_directory" ]]; then
     using_wasm=true
     wasm_bundle_directory_path=$payload_directory
     mv $wasm_bundle_directory/* $wasm_bundle_directory_path
-    find $wasm_bundle_directory_path -type d
-    extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments --wasmEngine /home/helixbot/.jsvu/$javascript_engine --cli \$HELIX_CORRELATION_PAYLOAD/dotnet/dotnet --wasmDataDir \$HELIX_CORRELATION_PAYLOAD/wasm-data"
+    wasm_args="--expose_wasm"
+    if [ "$javascript_engine" == "v8" ]; then
+        # for es6 module support
+        wasm_args="$wasm_args --module"
+    fi
+
+    # Workaround: escaping the quotes around `--wasmArgs=..` so they get retained for the actual command line
+    extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments --wasmEngine /home/helixbot/.jsvu/bin/$javascript_engine \\\"--wasmArgs=$wasm_args\\\" --cli \$HELIX_CORRELATION_PAYLOAD/dotnet/dotnet --wasmDataDir \$HELIX_CORRELATION_PAYLOAD/wasm-data"
     if [[ "$wasmaot" == "true" ]]; then
         extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments --aotcompilermode wasm --buildTimeout 3600"
     fi
@@ -367,10 +424,22 @@ if [[ -n "$mono_dotnet" && "$monoaot" == "false" ]]; then
     mv $mono_dotnet $mono_dotnet_path
 fi
 
+if [[ -n "$dotnet_versions" ]]; then
+    setup_arguments="$setup_arguments --dotnet-versions $dotnet_versions"
+fi
+
+if [[ "$nodynamicpgo" == "true" ]]; then
+    setup_arguments="$setup_arguments --no-dynamic-pgo"
+fi
+
+if [[ "$physicalpromotion" == "true" ]]; then
+    setup_arguments="$setup_arguments --physical-promotion"
+fi
+
 if [[ "$monoaot" == "true" ]]; then
     monoaot_dotnet_path=$payload_directory/monoaot
     mv $monoaot_path $monoaot_dotnet_path
-    extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments --runtimes monoaotllvm --aotcompilerpath \$HELIX_CORRELATION_PAYLOAD/monoaot/sgen/mini/mono-sgen --customruntimepack \$HELIX_CORRELATION_PAYLOAD/monoaot/pack --aotcompilermode llvm"
+    extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments --runtimes monoaotllvm --aotcompilerpath \$HELIX_CORRELATION_PAYLOAD/monoaot/mono-aot-cross --customruntimepack \$HELIX_CORRELATION_PAYLOAD/monoaot/pack --aotcompilermode llvm"
 fi
 
 extra_benchmark_dotnet_arguments="$extra_benchmark_dotnet_arguments --logBuildOutput --generateBinLog"
@@ -385,22 +454,20 @@ if [[ "$use_baseline_core_run" == true ]]; then
   mv $baseline_core_root_directory $new_baseline_core_root
 fi
 
-if [[ "$iosmono" == "true" ]]; then
-    if [[ "$iosllvmbuild" == "True" ]]; then
-        # LLVM Mono .app
-        mkdir -p $payload_directory/iosHelloWorld && cp -rv $source_directory/iosHelloWorld/llvm $payload_directory/iosHelloWorld
-        mkdir -p $payload_directory/iosHelloWorldZip/llvmzip && cp -rv $source_directory/iosHelloWorldZip/llvmzip $payload_directory/iosHelloWorldZip
-    else
-        # NoLLVM Mono .app
-        mkdir -p $payload_directory/iosHelloWorld && cp -rv $source_directory/iosHelloWorld/nollvm $payload_directory/iosHelloWorld
-        mkdir -p $payload_directory/iosHelloWorldZip/nollvmzip && cp -rv $source_directory/iosHelloWorldZip/nollvmzip $payload_directory/iosHelloWorldZip
-    fi
+if [[ "$iosmono" == "true" || "$iosnativeaot" == "true" ]]; then
+  mkdir -p $payload_directory/iosHelloWorld && cp -rv $source_directory/iosHelloWorld $payload_directory/iosHelloWorld
+  mkdir -p $payload_directory/iosHelloWorldZip && cp -rv $source_directory/iosHelloWorldZip $payload_directory/iosHelloWorldZip
+
+  find "$payload_directory/iosHelloWorldZip/" -type f -name "*.zip" -execdir mv {} "$payload_directory/iosHelloWorldZip/iOSSampleApp.zip" \;
 fi
 
 ci=true
 
 _script_dir=$(pwd)/eng/common
 . "$_script_dir/pipeline-logging-functions.sh"
+
+# Prevent vso[task.setvariable to be erroneously processed
+set +x
 
 # Make sure all of our variables are available for future steps
 Write-PipelineSetVariable -name "UseCoreRun" -value "$use_core_run" -is_multi_job_variable false
@@ -425,4 +492,9 @@ Write-PipelineSetVariable -name "Compare" -value "$compare" -is_multi_job_variab
 Write-PipelineSetVariable -name "MonoDotnet" -value "$using_mono" -is_multi_job_variable false
 Write-PipelineSetVariable -name "WasmDotnet" -value "$using_wasm" -is_multi_job_variable false
 Write-PipelineSetVariable -Name 'iOSLlvmBuild' -Value "$iosllvmbuild" -is_multi_job_variable false
+Write-PipelineSetVariable -Name 'iOSStripSymbols' -Value "$iosstripsymbols" -is_multi_job_variable false
+Write-PipelineSetVariable -Name 'RuntimeType' -Value "$runtimetype" -is_multi_job_variable false
 Write-PipelineSetVariable -name "OnlySanityCheck" -value "$only_sanity" -is_multi_job_variable false
+
+# Put it back to what was set on top of this script
+set -x

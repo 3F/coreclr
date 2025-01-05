@@ -44,6 +44,7 @@ extern BOOL                    g_fShowBytes;
 extern BOOL                    g_fShowSource;
 extern BOOL                    g_fInsertSourceLines;
 extern BOOL                    g_fTryInCode;
+extern BOOL                    g_fLogo;
 extern BOOL                    g_fQuoteAllNames;
 extern BOOL                    g_fTDC;
 extern BOOL                    g_fShowCA;
@@ -95,29 +96,26 @@ FILE* OpenOutput(_In_ __nullterminated const char* szFileName);
 
 void PrintLogo()
 {
-    printf(".NET IL Disassembler.  Version " CLR_PRODUCT_VERSION);
-    printf("\n%S\n\n", VER_LEGALCOPYRIGHT_LOGO_STR_L);
-}
-
-void PrintMod()
-{
-    printf("\n# 3F's edition ( github/3F ) specially for .NET DllExport: https://github.com/3F");
-    printf("\n " VER_3FMOD_PRODUCT_STR "\n\n");
+    printf("\n.NET IL Disassembler " VER_3FMOD_PRODUCT_STR " | github.com/3F/coreclr\n");
+    printf("\n%s", VER_LEGALCOPYRIGHT_LOGO_STR);
+    printf("\nCopyright (c) .NET Foundation and Contributors");
+    printf("\nCopyright (c) 2016-2025  Denis Kuzmin <x-3F@outlook.com> github/3F");
+    printf("\n\n");
 }
 
 void SyntaxCon()
 {
     DWORD l;
 
-    for(l=IDS_USAGE_01; l<= IDS_USAGE_23; l++) printf(RstrANSI(l));
+    for(l=IDS_USAGE_01; l<= IDS_USAGE_23; l++) printf("%s", RstrANSI(l));
     if(g_fTDC)
     {
-        for(l=IDS_USAGE_24; l<= IDS_USAGE_32; l++) printf(RstrANSI(l));
-        for(l=IDS_USAGE_34; l<= IDS_USAGE_36; l++) printf(RstrANSI(l));
-        for(l=IDS_USAGE_37; l<= IDS_USAGE_39; l++) printf(RstrANSI(l));
+        for(l=IDS_USAGE_24; l<= IDS_USAGE_32; l++) printf("%s", RstrANSI(l));
+        for(l=IDS_USAGE_34; l<= IDS_USAGE_36; l++) printf("%s", RstrANSI(l));
+        for(l=IDS_USAGE_37; l<= IDS_USAGE_39; l++) printf("%s", RstrANSI(l));
     }
-    else printf(RstrANSI(IDS_USAGE_40));
-    for(l=IDS_USAGE_41; l<= IDS_USAGE_42; l++) printf(RstrANSI(l));
+    else printf("%s", RstrANSI(IDS_USAGE_40));
+    for(l=IDS_USAGE_41; l<= IDS_USAGE_42; l++) printf("%s", RstrANSI(l));
 
 }
 
@@ -212,6 +210,10 @@ int ProcessOneArg(_In_ __nullterminated char* szArg, _Out_ char** ppszObjFileNam
         else if (_stricmp(szOpt, "raw") == 0)
         {
             g_fTryInCode = FALSE;
+        }
+        else if (_stricmp(szOpt, "nol") == 0) // ILAsm's /NOLOGO
+        {
+            g_fLogo = FALSE;
         }
         else if (_stricmp(szOpt, "byt") == 0)
         {
@@ -416,7 +418,7 @@ int ProcessOneArg(_In_ __nullterminated char* szArg, _Out_ char** ppszObjFileNam
         else
         {
             PrintLogo();
-            printf(RstrANSI(IDS_E_INVALIDOPTION),szArg); //"INVALID COMMAND LINE OPTION: %s\n\n",szArg);
+            printf("INVALID COMMAND LINE OPTION: %s\n\n",szArg);
             return -1;
         }
     }
@@ -425,7 +427,7 @@ int ProcessOneArg(_In_ __nullterminated char* szArg, _Out_ char** ppszObjFileNam
         if(g_szInputFile[0])
         {
             PrintLogo();
-            printf(RstrANSI(IDS_E_MULTIPLEINPUT)); //"MULTIPLE INPUT FILES SPECIFIED\n\n");
+            printf("MULTIPLE INPUT FILES SPECIFIED\n\n");
             return -1; // check if it was already specified
         }
         szArg = CheckForDQuotes(szArg);
@@ -476,11 +478,6 @@ int main(int argc, char* argv[])
         printError(g_pFile, "Error: Fail to PAL_Initialize\n");
         exit(1);
     }
-#endif
-
-#ifdef HOST_WINDOWS
-    // SWI has requested that the exact form of the function call below be used. For details see http://swi/SWI%20Docs/Detecting%20Heap%20Corruption.doc
-    (void)HeapSetInformation(NULL, HeapEnableTerminationOnCorruption, NULL, 0);
 #endif
 
 #ifdef _DEBUG
@@ -536,15 +533,14 @@ int main(int argc, char* argv[])
     {
         g_uConsoleCP = GetConsoleOutputCP();
 
+        if(g_fLogo) PrintLogo();
+
         if(iCommandLineParsed)
         {
-            if(iCommandLineParsed > 0) PrintLogo();
-            PrintMod();
             SyntaxCon();
             exit((iCommandLineParsed == 1) ? 0 : 1);
         }
 
-        PrintMod();
         {
             DWORD   exitCode = 1;
             if(g_szInputFile[0] == 0)

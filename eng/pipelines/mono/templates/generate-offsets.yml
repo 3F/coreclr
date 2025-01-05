@@ -9,11 +9,13 @@ parameters:
   pool: ''
   condition: true
   isOfficialBuild: false
+  templatePath: 'templates'
 
 ### Product build
 jobs:
 - template: xplat-pipeline-job.yml
   parameters:
+    templatePath: ${{ parameters.templatePath }}
     buildConfig: ${{ parameters.buildConfig }}
     osGroup: ${{ parameters.osGroup }}
     osSubGroup: ${{ parameters.osSubGroup }}
@@ -43,9 +45,9 @@ jobs:
       value: ''
     - ${{ if eq(parameters.isOfficialBuild, true) }}:
       - name: officialBuildIdArg
-        value: '/p:officialBuildId=$(Build.BuildNumber)'
+        value: '/p:OfficialBuildId=$(Build.BuildNumber)'
     - name: osOverride
-      value: -os Linux
+      value: -os linux
     - name: archType
       value: x64
     - ${{ parameters.variables }}
@@ -56,8 +58,8 @@ jobs:
     # Linux builds use docker images with dependencies preinstalled,
     # and FreeBSD builds use a build agent with dependencies
     # preinstalled, so we only need this step for OSX and Windows.
-    - ${{ if in(parameters.osGroup, 'OSX', 'MacCatalyst', 'iOS', 'iOSSimulator', 'tvOS', 'tvOSSimulator') }}:
-      - script: $(Build.SourcesDirectory)/eng/install-native-dependencies.sh $(osGroup) ${{ parameters.archType }} azDO
+    - ${{ if in(parameters.osGroup, 'osx', 'maccatalyst', 'ios', 'iossimulator', 'tvos', 'tvossimulator') }}:
+      - script: $(Build.SourcesDirectory)/eng/install-native-dependencies.sh $(osGroup)
         displayName: Install native dependencies
 
     # Build
@@ -76,17 +78,21 @@ jobs:
         contents: '**/offsets-*.h'
         targetFolder: '$(Build.SourcesDirectory)/artifacts/obj/mono/offsetfiles/'
 
-    - task: PublishPipelineArtifact@1
-      displayName: Upload offset files
-      inputs:
-        targetPath: '$(Build.SourcesDirectory)/artifacts/obj/mono/offsetfiles'
-        artifactName: 'Mono_Offsets_$(osGroup)$(osSubGroup)'
+    - template: /eng/pipelines/common/templates/publish-pipeline-artifacts.yml
+      parameters:
+        displayName: Upload offset files
+        isOfficialBuild: ${{ parameters.isOfficialBuild }}
+        inputs:
+          targetPath: '$(Build.SourcesDirectory)/artifacts/obj/mono/offsetfiles'
+          artifactName: 'Mono_Offsets_$(osGroup)$(osSubGroup)'
 
     # Publish Logs
-    - task: PublishPipelineArtifact@1
-      displayName: Publish Logs
-      inputs:
-        targetPath: $(Build.SourcesDirectory)/artifacts/log
-        artifactName: 'BuildLogs_Mono_Offsets_$(osGroup)$(osSubGroup)'
-      continueOnError: true
-      condition: always()
+    - template: /eng/pipelines/common/templates/publish-pipeline-artifacts.yml
+      parameters:
+        displayName: Publish Logs
+        isOfficialBuild: ${{ parameters.isOfficialBuild }}
+        inputs:
+          targetPath: $(Build.SourcesDirectory)/artifacts/log
+          artifactName: 'BuildLogs_Attempt$(System.JobAttempt)_Mono_Offsets_$(osGroup)$(osSubGroup)'
+          continueOnError: true
+          condition: always()

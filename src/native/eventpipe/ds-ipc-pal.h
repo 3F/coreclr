@@ -21,7 +21,7 @@ bool
 ds_ipc_pal_init (void);
 
 bool
-ds_ipc_pal_shutdown (ds_ipc_error_callback_func callback);
+ds_ipc_pal_shutdown (void);
 
 int32_t
 ds_ipc_get_handle_int32_t (DiagnosticsIpc *ipc);
@@ -34,6 +34,9 @@ ds_ipc_alloc (
 
 void
 ds_ipc_free (DiagnosticsIpc *ipc);
+
+void
+ds_ipc_reset (DiagnosticsIpc *ipc);
 
 // Poll
 // Parameters:

@@ -68,9 +68,11 @@ GPTR_IMPL(MethodTable,      g_pValueTypeClass);
 GPTR_IMPL(MethodTable,      g_pEnumClass);
 GPTR_IMPL(MethodTable,      g_pThreadClass);
 GPTR_IMPL(MethodTable,      g_pFreeObjectMethodTable);
-GPTR_IMPL(MethodTable,      g_pOverlappedDataClass);
 
 GPTR_IMPL(MethodTable,      g_TypedReferenceMT);
+
+GPTR_IMPL(MethodTable,      g_pWeakReferenceClass);
+GPTR_IMPL(MethodTable,      g_pWeakReferenceOfTClass);
 
 #ifdef FEATURE_COMINTEROP
 GPTR_IMPL(MethodTable,      g_pBaseCOMObject);
@@ -191,7 +193,6 @@ GVAL_IMPL(SIZE_T, g_runtimeVirtualSize);
 
 Volatile<LONG> g_fForbidEnterEE = false;
 bool g_fManagedAttach = false;
-bool g_fNoExceptions = false;
 
 DWORD g_FinalizerWaiterStatus = 0;
 

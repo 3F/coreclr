@@ -194,6 +194,7 @@ enum ILStubTypes
     ILSTUB_WRAPPERDELEGATE_INVOKE        = 0x80000007,
     ILSTUB_TAILCALL_STOREARGS            = 0x80000008,
     ILSTUB_TAILCALL_CALLTARGET           = 0x80000009,
+    ILSTUB_STATIC_VIRTUAL_DISPATCH_STUB  = 0x8000000A,
 };
 
 #ifdef FEATURE_COMINTEROP
@@ -213,6 +214,8 @@ inline bool SF_IsCALLIStub             (DWORD dwStubFlags) { LIMITED_METHOD_CONT
 inline bool SF_IsForNumParamBytes      (DWORD dwStubFlags) { LIMITED_METHOD_CONTRACT; return (dwStubFlags < NDIRECTSTUB_FL_INVALID && 0 != (dwStubFlags & NDIRECTSTUB_FL_FOR_NUMPARAMBYTES)); }
 inline bool SF_IsStructMarshalStub     (DWORD dwStubFlags) { LIMITED_METHOD_CONTRACT; return (dwStubFlags < NDIRECTSTUB_FL_INVALID && 0 != (dwStubFlags & NDIRECTSTUB_FL_STRUCT_MARSHAL)); }
 inline bool SF_IsCheckPendingException (DWORD dwStubFlags) { LIMITED_METHOD_CONTRACT; return (dwStubFlags < NDIRECTSTUB_FL_INVALID && 0 != (dwStubFlags & NDIRECTSTUB_FL_CHECK_PENDING_EXCEPTION)); }
+
+inline bool SF_IsVirtualStaticMethodDispatchStub(DWORD dwStubFlags) { LIMITED_METHOD_CONTRACT; return dwStubFlags == ILSTUB_STATIC_VIRTUAL_DISPATCH_STUB; }
 
 #ifdef FEATURE_ARRAYSTUB_AS_IL
 inline bool SF_IsArrayOpStub           (DWORD dwStubFlags) { LIMITED_METHOD_CONTRACT; return ((dwStubFlags == ILSTUB_ARRAYOP_GET) ||
@@ -481,6 +484,9 @@ public:
     DWORD   GetCleanupWorkListLocalNum();
     DWORD   GetThreadLocalNum();
     DWORD   GetReturnValueLocalNum();
+#if defined(TARGET_X86) && defined(TARGET_WINDOWS)
+    DWORD   GetCopyCtorChainLocalNum();
+#endif // defined(TARGET_X86) && defined(TARGET_WINDOWS)
     void    SetCleanupNeeded();
     void    SetExceptionCleanupNeeded();
     BOOL    IsCleanupWorkListSetup();
@@ -549,6 +555,10 @@ protected:
     DWORD               m_dwTargetInterfacePointerLocalNum;
     DWORD               m_dwTargetEntryPointLocalNum;
 #endif // FEATURE_COMINTEROP
+
+#if defined(TARGET_X86) && defined(TARGET_WINDOWS)
+    DWORD               m_dwCopyCtorChainLocalNum;
+#endif // defined(TARGET_X86) && defined(TARGET_WINDOWS)
 
     BOOL                m_fHasCleanupCode;
     BOOL                m_fHasExceptionCleanupCode;

@@ -133,7 +133,7 @@ namespace System.Runtime.InteropServices
         [RequiresDynamicCode("Marshalling code for the object might not be available")]
         public static void WriteInt16(object ptr, int ofs, short val)
         {
-            WriteValueSlow(ptr, ofs, val, Marshal.WriteInt16);
+            WriteValueSlow(ptr, ofs, val, WriteInt16);
         }
 
         [EditorBrowsable(EditorBrowsableState.Never)]
@@ -141,7 +141,7 @@ namespace System.Runtime.InteropServices
         [RequiresDynamicCode("Marshalling code for the object might not be available")]
         public static void WriteInt32(object ptr, int ofs, int val)
         {
-            WriteValueSlow(ptr, ofs, val, Marshal.WriteInt32);
+            WriteValueSlow(ptr, ofs, val, WriteInt32);
         }
 
         [EditorBrowsable(EditorBrowsableState.Never)]
@@ -149,7 +149,7 @@ namespace System.Runtime.InteropServices
         [RequiresDynamicCode("Marshalling code for the object might not be available")]
         public static void WriteInt64(object ptr, int ofs, long val)
         {
-            WriteValueSlow(ptr, ofs, val, Marshal.WriteInt64);
+            WriteValueSlow(ptr, ofs, val, WriteInt64);
         }
 
         /// <summary>
@@ -311,6 +311,7 @@ namespace System.Runtime.InteropServices
             return strTypeLibName;
         }
 
+#pragma warning disable IDE0060
         // This method is identical to Type.GetTypeFromCLSID. Since it's interop specific, we expose it
         // on Marshal for more consistent API surface.
         internal static Type? GetTypeFromCLSID(Guid clsid, string? server, bool throwOnError)
@@ -327,6 +328,7 @@ namespace System.Runtime.InteropServices
             GetTypeFromCLSID(clsid, server, ObjectHandleOnStack.Create(ref type));
             return type;
         }
+#pragma warning restore IDE0060
 
         [LibraryImport(RuntimeHelpers.QCall, EntryPoint = "MarshalNative_GetTypeFromCLSID", StringMarshalling = StringMarshalling.Utf16)]
         private static partial void GetTypeFromCLSID(in Guid clsid, string? server, ObjectHandleOnStack retType);
@@ -789,19 +791,12 @@ namespace System.Runtime.InteropServices
                 Release(bindctx);
             }
         }
-        // Revist after https://github.com/mono/linker/issues/1989 is fixed
-        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2050:UnrecognizedReflectionPattern",
-            Justification = "The calling method is annotated with RequiresUnreferencedCode")]
         [LibraryImport(Interop.Libraries.Ole32)]
         private static partial int CreateBindCtx(uint reserved, out IntPtr ppbc);
 
-        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2050:UnrecognizedReflectionPattern",
-            Justification = "The calling method is annotated with RequiresUnreferencedCode")]
         [LibraryImport(Interop.Libraries.Ole32)]
         private static partial int MkParseDisplayName(IntPtr pbc, [MarshalAs(UnmanagedType.LPWStr)] string szUserName, out uint pchEaten, out IntPtr ppmk);
 
-        [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2050:UnrecognizedReflectionPattern",
-            Justification = "The calling method is annotated with RequiresUnreferencedCode")]
         [LibraryImport(Interop.Libraries.Ole32)]
         private static partial int BindMoniker(IntPtr pmk, uint grfOpt, ref Guid iidResult, out IntPtr ppvResult);
 

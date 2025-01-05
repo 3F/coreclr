@@ -99,9 +99,9 @@ HRESULT GetHex(                         // Return status.
 //*****************************************************************************
 // Convert a pointer to a string into a GUID.
 //*****************************************************************************
-HRESULT LPCSTRToGuid(                   // Return status.
-    LPCSTR      szGuid,                 // String to convert.
-    GUID        *psGuid)                // Buffer for converted GUID.
+BOOL LPCSTRToGuid(
+    LPCSTR szGuid,  // [IN] String to convert.
+    GUID* pGuid)    // [OUT] Buffer for converted GUID.
 {
     CONTRACTL
     {
@@ -115,33 +115,33 @@ HRESULT LPCSTRToGuid(                   // Return status.
     if (strlen(szGuid) != 38 || szGuid[0] != '{' || szGuid[9] != '-' ||
         szGuid[14] != '-' || szGuid[19] != '-' || szGuid[24] != '-' || szGuid[37] != '}')
     {
-        return (E_FAIL);
+        return FALSE;
     }
 
     // Parse the first 3 fields.
-    if (FAILED(GetHex(szGuid + 1, 4, &psGuid->Data1)))
-        return E_FAIL;
-    if (FAILED(GetHex(szGuid + 10, 2, &psGuid->Data2)))
-        return E_FAIL;
-    if (FAILED(GetHex(szGuid + 15, 2, &psGuid->Data3)))
-        return E_FAIL;
+    if (FAILED(GetHex(szGuid + 1, 4, &pGuid->Data1)))
+        return FALSE;
+    if (FAILED(GetHex(szGuid + 10, 2, &pGuid->Data2)))
+        return FALSE;
+    if (FAILED(GetHex(szGuid + 15, 2, &pGuid->Data3)))
+        return FALSE;
 
     // Get the last two fields (which are byte arrays).
     for (i = 0; i < 2; ++i)
     {
-        if (FAILED(GetHex(szGuid + 20 + (i * 2), 1, &psGuid->Data4[i])))
+        if (FAILED(GetHex(szGuid + 20 + (i * 2), 1, &pGuid->Data4[i])))
         {
-            return E_FAIL;
+        return FALSE;
         }
     }
     for (i=0; i < 6; ++i)
     {
-        if (FAILED(GetHex(szGuid + 25 + (i * 2), 1, &psGuid->Data4[i+2])))
+        if (FAILED(GetHex(szGuid + 25 + (i * 2), 1, &pGuid->Data4[i+2])))
         {
-            return E_FAIL;
+        return FALSE;
         }
     }
-    return S_OK;
+    return TRUE;
 }
 
 //
@@ -182,7 +182,7 @@ namespace
         if (phmodDll != nullptr)
             *phmodDll = nullptr;
 
-        bool fIsDllPathPrefix = (wszDllPath != nullptr) && (wcslen(wszDllPath) > 0) && (wszDllPath[wcslen(wszDllPath) - 1] == W('\\'));
+        bool fIsDllPathPrefix = (wszDllPath != nullptr) && (u16_strlen(wszDllPath) > 0) && (wszDllPath[u16_strlen(wszDllPath) - 1] == W('\\'));
 
         // - An empty string will be treated as NULL.
         // - A string ending will a backslash will be treated as a prefix for where to look for the DLL
@@ -369,7 +369,12 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
     {
         NOTHROW;
         PRECONDITION(dwSize != 0);
-        PRECONDITION(flAllocationType == MEM_RESERVE);  // ORed with MEM_RESERVE_EXECUTABLE on Unix
+
+#ifdef HOST_UNIX
+        PRECONDITION(flAllocationType == (MEM_RESERVE | MEM_RESERVE_EXECUTABLE));
+#else
+        PRECONDITION(flAllocationType == MEM_RESERVE);
+#endif
     }
     CONTRACTL_END;
 
@@ -513,94 +518,7 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
     return pResult;
 }
 
-//******************************************************************************
-// NumaNodeInfo
-//******************************************************************************
-#if !defined(FEATURE_NATIVEAOT)
-
-/*static*/ LPVOID NumaNodeInfo::VirtualAllocExNuma(HANDLE hProc, LPVOID lpAddr, SIZE_T dwSize,
-                         DWORD allocType, DWORD prot, DWORD node)
-{
-    return ::VirtualAllocExNuma(hProc, lpAddr, dwSize, allocType, prot, node);
-}
-
 #ifdef HOST_WINDOWS
-/*static*/ BOOL NumaNodeInfo::GetNumaProcessorNodeEx(PPROCESSOR_NUMBER proc_no, PUSHORT node_no)
-{
-    return ::GetNumaProcessorNodeEx(proc_no, node_no);
-}
-/*static*/ bool NumaNodeInfo::GetNumaInfo(PUSHORT total_nodes, DWORD* max_procs_per_node)
-{
-    if (m_enableGCNumaAware)
-    {
-        DWORD currentProcsOnNode = 0;
-        for (uint16_t i = 0; i < m_nNodes; i++)
-        {
-            GROUP_AFFINITY processorMask;
-            if (GetNumaNodeProcessorMaskEx(i, &processorMask))
-            {
-                DWORD procsOnNode = 0;
-                uintptr_t mask = (uintptr_t)processorMask.Mask;
-                while (mask)
-                {
-                    procsOnNode++;
-                    mask &= mask - 1;
-                }
-
-                currentProcsOnNode = max(currentProcsOnNode, procsOnNode);
-            }
-        }
-
-        *max_procs_per_node = currentProcsOnNode;
-        *total_nodes = m_nNodes;
-        return true;
-    }
-
-    return false;
-}
-#else // HOST_WINDOWS
-/*static*/ BOOL NumaNodeInfo::GetNumaProcessorNodeEx(USHORT proc_no, PUSHORT node_no)
-{
-    return PAL_GetNumaProcessorNode(proc_no, node_no);
-}
-#endif // HOST_WINDOWS
-#endif
-
-/*static*/ BOOL NumaNodeInfo::m_enableGCNumaAware = FALSE;
-/*static*/ uint16_t NumaNodeInfo::m_nNodes = 0;
-/*static*/ BOOL NumaNodeInfo::InitNumaNodeInfoAPI()
-{
-#if !defined(FEATURE_NATIVEAOT)
-    //check for numa support if multiple heaps are used
-    ULONG highest = 0;
-
-    if (CLRConfig::GetConfigValue(CLRConfig::UNSUPPORTED_GCNumaAware) == 0)
-        return FALSE;
-
-    // fail to get the highest numa node number
-    if (!::GetNumaHighestNodeNumber(&highest) || (highest == 0))
-        return FALSE;
-
-    m_nNodes = (USHORT)(highest + 1);
-
-    return TRUE;
-#else
-    return FALSE;
-#endif
-}
-
-/*static*/ BOOL NumaNodeInfo::CanEnableGCNumaAware()
-{
-    return m_enableGCNumaAware;
-}
-
-/*static*/ void NumaNodeInfo::InitNumaNodeInfo()
-{
-    m_enableGCNumaAware = InitNumaNodeInfoAPI();
-}
-
-#ifdef HOST_WINDOWS
-
 //******************************************************************************
 // CPUGroupInfo
 //******************************************************************************
@@ -648,7 +566,7 @@ BYTE * ClrVirtualAllocWithinRange(const BYTE *pMinAddr,
 /*static*/ CPU_Group_Info *CPUGroupInfo::m_CPUGroupInfoArray = NULL;
 /*static*/ LONG CPUGroupInfo::m_initialization = 0;
 
-#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
 // Calculate greatest common divisor
 DWORD GCD(DWORD u, DWORD v)
 {
@@ -678,7 +596,7 @@ DWORD LCM(DWORD u, DWORD v)
     }
     CONTRACTL_END;
 
-#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
     BYTE *bBuffer = NULL;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *pSLPIEx = NULL;
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *pRecord = NULL;
@@ -759,7 +677,7 @@ DWORD LCM(DWORD u, DWORD v)
     }
     CONTRACTL_END;
 
-#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
     USHORT groupCount = 0;
 
     // On Windows 11+ and Windows Server 2022+, a process is no longer restricted to a single processor group by default.
@@ -845,7 +763,7 @@ DWORD LCM(DWORD u, DWORD v)
 {
     LIMITED_METHOD_CONTRACT;
 
-#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
     WORD bTemp = 0;
     WORD bDiff = processor_number - bTemp;
 
@@ -876,7 +794,7 @@ DWORD LCM(DWORD u, DWORD v)
     }
     CONTRACTL_END;
 
-#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if !defined(FEATURE_NATIVEAOT) && (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
     _ASSERTE(m_enableGCCPUGroups && m_threadUseAllCpuGroups);
 
     PROCESSOR_NUMBER proc_no;
@@ -925,7 +843,7 @@ DWORD LCM(DWORD u, DWORD v)
     }
     CONTRACTL_END;
 
-#if (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
     WORD i, minGroup = 0;
     DWORD minWeight = 0;
 
@@ -967,7 +885,7 @@ found:
 /*static*/ void CPUGroupInfo::ClearCPUGroupAffinity(GROUP_AFFINITY *gf)
 {
     LIMITED_METHOD_CONTRACT;
-#if (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64))
+#if (defined(TARGET_AMD64) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64))
     _ASSERTE(m_enableGCCPUGroups && m_threadUseAllCpuGroups && m_threadAssignCpuGroups);
 
     WORD group = gf->Group;
@@ -1272,8 +1190,8 @@ void ConfigString::init(const CLRConfig::ConfigStringInfo & info)
 //=============================================================================
 // The string should be of the form
 // MyAssembly
-// MyAssembly;mscorlib;System
-// MyAssembly;mscorlib System
+// MyAssembly;System.Private.CoreLib;System
+// MyAssembly;System.Private.CoreLib System
 
 AssemblyNamesList::AssemblyNamesList(_In_ LPWSTR list)
 {
@@ -2846,7 +2764,7 @@ namespace Reg
                 // terminating NULL is not a legitimate scenario for REG_SZ - this must
                 // be done using REG_MULTI_SZ - however this was tolerated in the
                 // past and so it would be a breaking change to stop doing so.
-                _ASSERTE(wcslen(wszValueBuf) <= (size / sizeof(WCHAR)) - 1);
+                _ASSERTE(u16_strlen(wszValueBuf) <= (size / sizeof(WCHAR)) - 1);
                 ssValue.CloseBuffer((COUNT_T)wcsnlen(wszValueBuf, (size_t)size));
             }
             else
@@ -2895,8 +2813,8 @@ namespace Com
         {
             STANDARD_VM_CONTRACT;
 
-            WCHAR wszClsid[39];
-            if (GuidToLPWSTR(rclsid, wszClsid, ARRAY_SIZE(wszClsid)) == 0)
+            WCHAR wszClsid[GUID_STR_BUFFER_LEN];
+            if (GuidToLPWSTR(rclsid, wszClsid) == 0)
                 return E_UNEXPECTED;
 
             StackSString ssKeyName;

@@ -33,6 +33,7 @@ SET_DEFAULT_DEBUG_CHANNEL(PROCESS); // some headers have code with asserts, so d
 #include "pal/stackstring.hpp"
 #include "pal/signal.hpp"
 
+#include <generatedumpflags.h>
 #include <clrconfignocache.h>
 
 #include <errno.h>
@@ -206,6 +207,9 @@ LPWSTR g_lpwstrAppDir = NULL;
 // Thread ID of thread that has started the ExitProcess process
 Volatile<LONG> terminator = 0;
 
+// Id of thread generating a core dump
+Volatile<LONG> g_crashingThreadId = 0;
+
 // Process and session ID of this process.
 DWORD gPID = (DWORD) -1;
 DWORD gSID = (DWORD) -1;
@@ -235,6 +239,9 @@ static_assert_no_msg(CLR_SEM_MAX_NAMELEN <= MAX_PATH);
 
 // Function to call during PAL/process shutdown/abort
 Volatile<PSHUTDOWN_CALLBACK> g_shutdownCallback = nullptr;
+
+// Function to call instead of exec'ing the createdump binary.  Used by single-file and native AOT hosts.
+Volatile<PCREATEDUMP_CALLBACK> g_createdumpCallback = nullptr;
 
 // Crash dump generating program arguments. Initialized in PROCAbortInitialize().
 std::vector<const char*> g_argvCreateDump;
@@ -1190,7 +1197,10 @@ ExitProcess(
            Update: [TODO] PROCSuspendOtherThreads has been removed. Can this
            code be changed? */
         WARN("termination already started from another thread; blocking.\n");
-        poll(NULL, 0, INFTIM);
+        while (true)
+        {
+            poll(NULL, 0, INFTIM);
+        }
     }
 
     /* ExitProcess may be called even if PAL is not initialized.
@@ -1370,6 +1380,25 @@ PAL_SetShutdownCallback(
 {
     _ASSERTE(g_shutdownCallback == nullptr);
     g_shutdownCallback = callback;
+}
+
+/*++
+Function:
+  PAL_SetCreateDumpCallback
+
+Abstract:
+  Sets a callback that is executed when create dump is launched to create a crash dump.
+
+  NOTE: Currently only one callback can be set at a time.
+--*/
+PALIMPORT
+VOID
+PALAPI
+PAL_SetCreateDumpCallback(
+    IN PCREATEDUMP_CALLBACK callback) 
+{
+    _ASSERTE(g_createdumpCallback == nullptr);
+    g_createdumpCallback = callback;
 }
 
 // Build the semaphore names using the PID and a value that can be used for distinguishing
@@ -1675,6 +1704,8 @@ GetProcessIdDisambiguationKey(DWORD processId, UINT64 *disambiguationKey)
     {
         TRACE("GetProcessIdDisambiguationKey: getline() FAILED");
         SetLastError(ERROR_INVALID_HANDLE);
+        free(line);
+        fclose(statFile);
         return FALSE;
     }
 
@@ -1691,14 +1722,14 @@ GetProcessIdDisambiguationKey(DWORD processId, UINT64 *disambiguationKey)
         "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu \n",
          &starttime);
 
+    free(line);
+    fclose(statFile);
+
     if (sscanfRet != 1)
     {
         _ASSERTE(!"Failed to parse stat file contents with sscanf_s.");
         return FALSE;
     }
-
-    free(line);
-    fclose(statFile);
 
     *disambiguationKey = starttime;
     return TRUE;
@@ -1817,249 +1848,6 @@ PAL_GetTransportPipeName(
         id,
         applicationGroupId,
         suffix);
-}
-
-/*++
-Function:
-  GetProcessTimes
-
-See MSDN doc.
---*/
-BOOL
-PALAPI
-GetProcessTimes(
-        IN HANDLE hProcess,
-        OUT LPFILETIME lpCreationTime,
-        OUT LPFILETIME lpExitTime,
-        OUT LPFILETIME lpKernelTime,
-        OUT LPFILETIME lpUserTime)
-{
-    BOOL retval = FALSE;
-    struct rusage resUsage;
-    UINT64 calcTime;
-    const UINT64 SECS_TO_100NS = 10000000ULL;  // 10^7
-    const UINT64 USECS_TO_100NS = 10ULL;       // 10
-    const UINT64 EPOCH_DIFF = 11644473600ULL;  // number of seconds from 1 Jan. 1601 00:00 to 1 Jan 1970 00:00 UTC
-
-    PERF_ENTRY(GetProcessTimes);
-    ENTRY("GetProcessTimes(hProcess=%p, lpExitTime=%p, lpKernelTime=%p,"
-          "lpUserTime=%p)\n",
-          hProcess, lpCreationTime, lpExitTime, lpKernelTime, lpUserTime );
-
-    /* Make sure hProcess is the current process, this is the only supported
-       case */
-    if(PROCGetProcessIDFromHandle(hProcess)!=GetCurrentProcessId())
-    {
-        ASSERT("GetProcessTimes() does not work on a process other than the "
-              "current process.\n");
-        SetLastError(ERROR_INVALID_HANDLE);
-        goto GetProcessTimesExit;
-    }
-
-    /* First, we need to actually retrieve the relevant statistics from the
-       OS */
-    if (getrusage (RUSAGE_SELF, &resUsage) == -1)
-    {
-        ASSERT("Unable to get resource usage information for the current "
-              "process\n");
-        SetLastError(ERROR_INTERNAL_ERROR);
-        goto GetProcessTimesExit;
-    }
-
-    TRACE ("getrusage User: %ld sec,%ld microsec. Kernel: %ld sec,%ld"
-           " microsec\n",
-           resUsage.ru_utime.tv_sec, resUsage.ru_utime.tv_usec,
-           resUsage.ru_stime.tv_sec, resUsage.ru_stime.tv_usec);
-
-    if (lpCreationTime)
-    {
-        // The IBC profile data uses this, instead of the actual
-        // process creation time we just return the current time
-
-        struct timeval tv;
-        if (gettimeofday(&tv, NULL) == -1)
-        {
-            ASSERT("gettimeofday() failed; errno is %d (%s)\n", errno, strerror(errno));
-
-            // Assign zero to lpCreationTime
-            lpCreationTime->dwLowDateTime = 0;
-            lpCreationTime->dwHighDateTime = 0;
-        }
-        else
-        {
-            calcTime = EPOCH_DIFF;
-            calcTime += (UINT64)tv.tv_sec;
-            calcTime *= SECS_TO_100NS;
-            calcTime += ((UINT64)tv.tv_usec * USECS_TO_100NS);
-
-            // Assign the time into lpCreationTime
-            lpCreationTime->dwLowDateTime = (DWORD)calcTime;
-            lpCreationTime->dwHighDateTime = (DWORD)(calcTime >> 32);
-        }
-    }
-
-    if (lpExitTime)
-    {
-        // Assign zero to lpExitTime
-        lpExitTime->dwLowDateTime = 0;
-        lpExitTime->dwHighDateTime = 0;
-    }
-
-    if (lpUserTime)
-    {
-        /* Get the time of user mode execution, in 100s of nanoseconds */
-        calcTime = (UINT64)resUsage.ru_utime.tv_sec * SECS_TO_100NS;
-        calcTime += (UINT64)resUsage.ru_utime.tv_usec * USECS_TO_100NS;
-
-        /* Assign the time into lpUserTime */
-        lpUserTime->dwLowDateTime = (DWORD)calcTime;
-        lpUserTime->dwHighDateTime = (DWORD)(calcTime >> 32);
-    }
-
-    if (lpKernelTime)
-    {
-        /* Get the time of kernel mode execution, in 100s of nanoseconds */
-        calcTime = (UINT64)resUsage.ru_stime.tv_sec * SECS_TO_100NS;
-        calcTime += (UINT64)resUsage.ru_stime.tv_usec * USECS_TO_100NS;
-
-        /* Assign the time into lpUserTime */
-        lpKernelTime->dwLowDateTime = (DWORD)calcTime;
-        lpKernelTime->dwHighDateTime = (DWORD)(calcTime >> 32);
-    }
-
-    retval = TRUE;
-
-
-GetProcessTimesExit:
-    LOGEXIT("GetProcessTimes returns BOOL %d\n", retval);
-    PERF_EXIT(GetProcessTimes);
-    return (retval);
-}
-
-#define FILETIME_TO_ULONGLONG(f) \
-    (((ULONGLONG)(f).dwHighDateTime << 32) | ((ULONGLONG)(f).dwLowDateTime))
-
-/*++
-Function:
-  PAL_GetCPUBusyTime
-
-The main purpose of this function is to compute the overall CPU utilization
-for the CLR thread pool to regulate the number of I/O completion port
-worker threads.
-Since there is no consistent API on Unix to get the CPU utilization
-from a user process, getrusage and gettimeofday are used to
-compute the current process's CPU utilization instead.
-This function emulates the ThreadpoolMgr::GetCPUBusyTime_NT function in
-win32threadpool.cpp of the CLR.
-
-See MSDN doc for GetSystemTimes.
---*/
-INT
-PALAPI
-PAL_GetCPUBusyTime(
-    IN OUT PAL_IOCP_CPU_INFORMATION *lpPrevCPUInfo)
-{
-    ULONGLONG nLastRecordedCurrentTime = 0;
-    ULONGLONG nLastRecordedUserTime = 0;
-    ULONGLONG nLastRecordedKernelTime = 0;
-    ULONGLONG nKernelTime = 0;
-    ULONGLONG nUserTime = 0;
-    ULONGLONG nCurrentTime = 0;
-    ULONGLONG nCpuBusyTime = 0;
-    ULONGLONG nCpuTotalTime = 0;
-    DWORD nReading = 0;
-    struct rusage resUsage;
-    struct timeval tv;
-    static DWORD dwNumberOfProcessors = 0;
-
-    if (dwNumberOfProcessors <= 0)
-    {
-        SYSTEM_INFO SystemInfo;
-        GetSystemInfo(&SystemInfo);
-        dwNumberOfProcessors = SystemInfo.dwNumberOfProcessors;
-        if (dwNumberOfProcessors <= 0)
-        {
-            return 0;
-        }
-
-        UINT cpuLimit;
-        if (PAL_GetCpuLimit(&cpuLimit) && cpuLimit < dwNumberOfProcessors)
-        {
-            dwNumberOfProcessors = cpuLimit;
-        }
-    }
-
-    if (getrusage(RUSAGE_SELF, &resUsage) == -1)
-    {
-        ASSERT("getrusage() failed; errno is %d (%s)\n", errno, strerror(errno));
-        return 0;
-    }
-    else
-    {
-        nKernelTime = (ULONGLONG)resUsage.ru_stime.tv_sec*tccSecondsTo100NanoSeconds +
-            resUsage.ru_stime.tv_usec*tccMicroSecondsTo100NanoSeconds;
-        nUserTime = (ULONGLONG)resUsage.ru_utime.tv_sec*tccSecondsTo100NanoSeconds +
-            resUsage.ru_utime.tv_usec*tccMicroSecondsTo100NanoSeconds;
-    }
-
-    if (gettimeofday(&tv, NULL) == -1)
-    {
-        ASSERT("gettimeofday() failed; errno is %d (%s)\n", errno, strerror(errno));
-        return 0;
-    }
-    else
-    {
-        nCurrentTime = (ULONGLONG)tv.tv_sec*tccSecondsTo100NanoSeconds +
-            tv.tv_usec*tccMicroSecondsTo100NanoSeconds;
-    }
-
-    nLastRecordedCurrentTime = FILETIME_TO_ULONGLONG(lpPrevCPUInfo->LastRecordedTime.ftLastRecordedCurrentTime);
-    nLastRecordedUserTime = FILETIME_TO_ULONGLONG(lpPrevCPUInfo->ftLastRecordedUserTime);
-    nLastRecordedKernelTime = FILETIME_TO_ULONGLONG(lpPrevCPUInfo->ftLastRecordedKernelTime);
-
-    if (nCurrentTime > nLastRecordedCurrentTime)
-    {
-        nCpuTotalTime = (nCurrentTime - nLastRecordedCurrentTime);
-#if HAVE_THREAD_SELF || HAVE__LWP_SELF || HAVE_VM_READ
-        // For systems that run multiple threads of a process on multiple processors,
-        // the accumulated userTime and kernelTime of this process may exceed
-        // the elapsed time. In this case, the cpuTotalTime needs to be adjusted
-        // according to number of processors so that the cpu utilization
-        // will not be greater than 100.
-        nCpuTotalTime *= dwNumberOfProcessors;
-#endif // HAVE_THREAD_SELF || HAVE__LWP_SELF || HAVE_VM_READ
-    }
-
-    if (nUserTime >= nLastRecordedUserTime &&
-        nKernelTime >= nLastRecordedKernelTime)
-    {
-        nCpuBusyTime =
-            (nUserTime - nLastRecordedUserTime)+
-            (nKernelTime - nLastRecordedKernelTime);
-    }
-
-    if (nCpuTotalTime > 0 && nCpuBusyTime > 0)
-    {
-        nReading = (DWORD)((nCpuBusyTime*100)/nCpuTotalTime);
-        TRACE("PAL_GetCPUBusyTime: nCurrentTime=%lld, nKernelTime=%lld, nUserTime=%lld, nReading=%d\n",
-            nCurrentTime, nKernelTime, nUserTime, nReading);
-    }
-
-    if (nReading > 100)
-    {
-        ERROR("cpu utilization(%d) > 100\n", nReading);
-    }
-
-    lpPrevCPUInfo->LastRecordedTime.ftLastRecordedCurrentTime.dwLowDateTime = (DWORD)nCurrentTime;
-    lpPrevCPUInfo->LastRecordedTime.ftLastRecordedCurrentTime.dwHighDateTime = (DWORD)(nCurrentTime >> 32);
-
-    lpPrevCPUInfo->ftLastRecordedUserTime.dwLowDateTime = (DWORD)nUserTime;
-    lpPrevCPUInfo->ftLastRecordedUserTime.dwHighDateTime = (DWORD)(nUserTime >> 32);
-
-    lpPrevCPUInfo->ftLastRecordedKernelTime.dwLowDateTime = (DWORD)nKernelTime;
-    lpPrevCPUInfo->ftLastRecordedKernelTime.dwHighDateTime = (DWORD)(nKernelTime >> 32);
-
-    return (DWORD)nReading;
 }
 
 /*++
@@ -2272,8 +2060,6 @@ PROCFormatInt64(ULONG64 value)
     return buffer;
 }
 
-static const INT UndefinedDumpType = 0;
-
 /*++
 Function
   PROCBuildCreateDumpCommandLine
@@ -2338,15 +2124,18 @@ PROCBuildCreateDumpCommandLine(
 
     switch (dumpType)
     {
-        case 1: argv.push_back("--normal");
+        case DumpTypeNormal:
+            argv.push_back("--normal");
             break;
-        case 2: argv.push_back("--withheap");
+        case DumpTypeWithHeap:
+            argv.push_back("--withheap");
             break;
-        case 3: argv.push_back("--triage");
+        case DumpTypeTriage:
+            argv.push_back("--triage");
             break;
-        case 4: argv.push_back("--full");
+        case DumpTypeFull:
+            argv.push_back("--full");
             break;
-        case UndefinedDumpType:
         default:
             break;
     }
@@ -2392,19 +2181,39 @@ PROCBuildCreateDumpCommandLine(
 Function:
   PROCCreateCrashDump
 
-  Creates crash dump of the process. Can be called from the
-  unhandled native exception handler.
+  Creates crash dump of the process. Can be called from the unhandled
+  native exception handler. Allows only one thread to generate the core
+  dump if serialize is true.
 
-(no return value)
+Return:
+  TRUE - succeeds, FALSE - fails
 --*/
 BOOL
 PROCCreateCrashDump(
     std::vector<const char*>& argv,
     LPSTR errorMessageBuffer,
-    INT cbErrorMessageBuffer)
+    INT cbErrorMessageBuffer,
+    bool serialize)
 {
     _ASSERTE(argv.size() > 0);
     _ASSERTE(errorMessageBuffer == nullptr || cbErrorMessageBuffer > 0);
+
+    if (serialize)
+    {
+        size_t currentThreadId = THREADSilentGetCurrentThreadId();
+        size_t previousThreadId = InterlockedCompareExchange(&g_crashingThreadId, currentThreadId, 0);
+        if (previousThreadId != 0)
+        {
+            // Should never reenter or recurse
+            _ASSERTE(previousThreadId != currentThreadId);
+
+            // The first thread generates the crash info and any other threads are blocked
+            while (true)
+            {
+                poll(NULL, 0, INFTIM);
+            }
+        }
+    }
 
     int pipe_descs[2];
     if (pipe(pipe_descs) == -1)
@@ -2443,11 +2252,22 @@ PROCCreateCrashDump(
         {
             dup2(child_pipe, STDERR_FILENO);
         }
-        // Execute the createdump program
-        if (execve(argv[0], (char**)argv.data(), palEnvironment) == -1)
+        if (g_createdumpCallback != nullptr)
         {
-            fprintf(stderr, "Problem launching createdump (may not have execute permissions): execve(%s) FAILED %s (%d)\n", argv[0], strerror(errno), errno);
-            exit(-1);
+            // Remove the signal handlers inherited from the runtime process
+            SEHCleanupSignals();
+
+            // Call the statically linked createdump code
+            g_createdumpCallback(argv.size(), argv.data());
+        }
+        else
+        {
+            // Execute the createdump program
+            if (execve(argv[0], (char**)argv.data(), palEnvironment) == -1)
+            {
+                fprintf(stderr, "Problem launching createdump (may not have execute permissions): execve(%s) FAILED %s (%d)\n", argv[0], strerror(errno), errno);
+                exit(-1);
+            }
         }
     }
     else
@@ -2493,7 +2313,7 @@ PROCCreateCrashDump(
         else
         {
 #ifdef _DEBUG
-            fprintf(stderr, "[createdump] waitpid() returned successfully (wstatus %08x)\n", wstatus);
+            fprintf(stderr, "waitpid() returned successfully (wstatus %08x) WEXITSTATUS %x WTERMSIG %x\n", wstatus, WEXITSTATUS(wstatus), WTERMSIG(wstatus));
 #endif
             return !WIFEXITED(wstatus) || WEXITSTATUS(wstatus) == 0;
         }
@@ -2529,13 +2349,13 @@ PROCAbortInitialize()
         const char* logFilePath = dmpLogToFileCfg.IsSet() ? dmpLogToFileCfg.AsString() : nullptr;
 
         CLRConfigNoCache dmpTypeCfg = CLRConfigNoCache::Get("DbgMiniDumpType", /*noprefix*/ false, &getenv);
-        DWORD dumpType = UndefinedDumpType;
+        DWORD dumpType = DumpTypeUnknown;
         if (dmpTypeCfg.IsSet())
         {
             (void)dmpTypeCfg.TryAsInteger(10, dumpType);
-            if (dumpType < 1 || dumpType > 4)
+            if (dumpType <= DumpTypeUnknown || dumpType > DumpTypeMax)
             {
-                dumpType = UndefinedDumpType;
+                dumpType = DumpTypeUnknown;
             }
         }
 
@@ -2606,7 +2426,7 @@ PAL_GenerateCoreDump(
 {
     std::vector<const char*> argvCreateDump;
 
-    if (dumpType < 1 || dumpType > 4)
+    if (dumpType <= DumpTypeUnknown || dumpType > DumpTypeMax)
     {
         return FALSE;
     }
@@ -2619,7 +2439,7 @@ PAL_GenerateCoreDump(
     BOOL result = PROCBuildCreateDumpCommandLine(argvCreateDump, &program, &pidarg, dumpName, nullptr, dumpType, flags);
     if (result)
     {
-        result = PROCCreateCrashDump(argvCreateDump, errorMessageBuffer, cbErrorMessageBuffer);
+        result = PROCCreateCrashDump(argvCreateDump, errorMessageBuffer, cbErrorMessageBuffer, false);
     }
     free(program);
     free(pidarg);
@@ -2635,11 +2455,13 @@ Function:
 
 Parameters:
   signal - POSIX signal number
+  siginfo - POSIX signal info or nullptr
+  serialize - allow only one thread to generate core dump
 
 (no return value)
 --*/
 VOID
-PROCCreateCrashDumpIfEnabled(int signal, siginfo_t* siginfo)
+PROCCreateCrashDumpIfEnabled(int signal, siginfo_t* siginfo, bool serialize)
 {
     // If enabled, launch the create minidump utility and wait until it completes
     if (!g_argvCreateDump.empty())
@@ -2697,7 +2519,7 @@ PROCCreateCrashDumpIfEnabled(int signal, siginfo_t* siginfo)
             argv.push_back(nullptr);
         }
 
-        PROCCreateCrashDump(argv, nullptr, 0);
+        PROCCreateCrashDump(argv, nullptr, 0, serialize);
 
         free(signalArg);
         free(crashThreadArg);
@@ -2726,7 +2548,7 @@ PROCAbort(int signal, siginfo_t* siginfo)
     // Do any shutdown cleanup before aborting or creating a core dump
     PROCNotifyProcessShutdown();
 
-    PROCCreateCrashDumpIfEnabled(signal, siginfo);
+    PROCCreateCrashDumpIfEnabled(signal, siginfo, true);
 
     // Restore all signals; the SIGABORT handler to prevent recursion and
     // the others to prevent multiple core dumps from being generated.
@@ -3428,7 +3250,10 @@ CorUnix::TerminateCurrentProcessNoExit(BOOL bTerminateUnconditionally)
            TerminateProcess won't call DllMain, so there's no danger to get
            caught in an infinite loop */
         WARN("termination already started from another thread; blocking.\n");
-        poll(NULL, 0, INFTIM);
+        while (true)
+        {
+            poll(NULL, 0, INFTIM);
+        }
     }
 
     /* Try to lock the initialization count to prevent multiple threads from
@@ -3710,8 +3535,7 @@ getFileName(
                                             NULL, 0, NULL, NULL);
 
         /* if only a file name is specified, prefix it with "./" */
-        if ((*lpApplicationName != '.') && (*lpApplicationName != '/') &&
-            (*lpApplicationName != '\\'))
+        if ((*lpApplicationName != '.') && (*lpApplicationName != '/'))
         {
             length += 2;
             lpTemp = lpPathFileName.OpenStringBuffer(length);
@@ -3740,9 +3564,6 @@ getFileName(
         }
 
         lpPathFileName.CloseBuffer(length -1);
-
-        /* Replace '\' by '/' */
-        FILEDosToUnixPathA(lpTemp);
 
         return TRUE;
     }
@@ -3814,8 +3635,6 @@ getFileName(
         /* restore last character */
         *lpEnd = wcEnd;
 
-        /* Replace '\' by '/' */
-        FILEDosToUnixPathA(lpFileName);
         if (!getPath(lpFileNamePS, lpPathFileName))
         {
             /* file is not in the path */
@@ -3950,6 +3769,7 @@ buildArgv(
         (strcat_s(lpAsciiCmdLine, iLength, " ") != SAFECRT_SUCCESS))
     {
         ERROR("strcpy_s/strcat_s failed!\n");
+        free(lpAsciiCmdLine);
         return NULL;
     }
 

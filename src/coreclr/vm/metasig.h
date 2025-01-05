@@ -172,7 +172,7 @@
 
 // static methods:
 DEFINE_METASIG_T(SM(Int_IntPtr_Obj_RetException, i I j, C(EXCEPTION)))
-DEFINE_METASIG_T(SM(Type_ArrType_IntPtr_int_RetType, C(TYPE) a(C(TYPE)) I i, C(TYPE) ))
+DEFINE_METASIG_T(SM(Type_CharPtr_RuntimeAssembly_Bool_Bool_RetRuntimeType, P(u) C(ASSEMBLY) F F, C(CLASS)))
 DEFINE_METASIG_T(SM(Type_RetIntPtr, C(TYPE), I))
 DEFINE_METASIG(SM(RefIntPtr_IntPtr_IntPtr_Int_RetObj, r(I) I I i, j))
 DEFINE_METASIG(SM(Obj_IntPtr_RetIntPtr, j I, I))
@@ -338,6 +338,7 @@ DEFINE_METASIG(SM(IntPtr_Bool_RetVoid, I F, v))
 DEFINE_METASIG(SM(IntPtr_UInt_IntPtr_RetVoid, I K I, v))
 DEFINE_METASIG(SM(IntPtr_RetUInt, I, K))
 DEFINE_METASIG(SM(PtrChar_RetInt, P(u), i))
+DEFINE_METASIG(SM(PtrChar_RetVoid, P(u), v))
 DEFINE_METASIG(SM(IntPtr_IntPtr_RetIntPtr, I I, I))
 DEFINE_METASIG(SM(IntPtr_IntPtr_Int_RetIntPtr, I I i, I))
 DEFINE_METASIG(SM(PtrVoid_PtrVoid_RetVoid, P(v) P(v), v))
@@ -373,8 +374,6 @@ DEFINE_METASIG_T(SM(Type_RetInt, C(TYPE), i))
 DEFINE_METASIG(SM(ArrByte_RetObj, a(b), j))
 DEFINE_METASIG(SM(ArrByte_Bool_RetObj, a(b) F, j))
 DEFINE_METASIG(SM(ArrByte_ArrByte_RefObj_RetObj, a(b) a(b) r(j), j))
-
-DEFINE_METASIG_T(SM(UInt_UInt_PtrNativeOverlapped_RetVoid, K K P(g(NATIVEOVERLAPPED)), v))
 
 DEFINE_METASIG(IM(Long_RetVoid, l, v))
 DEFINE_METASIG(IM(IntPtr_Int_RetVoid, I i, v))
@@ -557,9 +556,6 @@ DEFINE_METASIG_T(SM(IntPtr_AssemblyName_RetAssemblyBase, I C(ASSEMBLY_NAME), C(A
 DEFINE_METASIG_T(SM(Str_AssemblyBase_IntPtr_RetIntPtr, s C(ASSEMBLYBASE) I, I))
 DEFINE_METASIG_T(SM(Str_AssemblyBase_Bool_UInt_RetIntPtr, s C(ASSEMBLYBASE) F K, I))
 
-// ThreadPool
-DEFINE_METASIG_T(SM(_ThreadPoolWaitOrTimerCallback_Bool_RetVoid, C(TPWAITORTIMER_HELPER) F, v))
-
 // For FailFast
 DEFINE_METASIG(SM(Str_RetVoid, s, v))
 DEFINE_METASIG_T(SM(Str_Exception_RetVoid, s C(EXCEPTION), v))
@@ -581,6 +577,13 @@ DEFINE_METASIG(SM(RefObject_Object_Object_RetObject, r(j) j j, j))
 DEFINE_METASIG_T(SM(RefCleanupWorkListElement_RetVoid, r(C(CLEANUP_WORK_LIST_ELEMENT)), v))
 DEFINE_METASIG_T(SM(RefCleanupWorkListElement_SafeHandle_RetIntPtr, r(C(CLEANUP_WORK_LIST_ELEMENT)) C(SAFE_HANDLE), I))
 DEFINE_METASIG_T(SM(RefCleanupWorkListElement_Obj_RetVoid, r(C(CLEANUP_WORK_LIST_ELEMENT)) j, v))
+
+DEFINE_METASIG(SM(PtrVoid_RetPtrVoid, P(v), P(v)))
+DEFINE_METASIG(IM(PtrVoid_RetVoid, P(v), v))
+#if defined(TARGET_X86) && defined(TARGET_WINDOWS)
+DEFINE_METASIG_T(IM(PtrCopyConstructorCookie_RetVoid, P(g(COPY_CONSTRUCTOR_COOKIE)), v))
+#endif // defined(TARGET_X86) && defined(TARGET_WINDOWS)
+
 
 #ifdef FEATURE_ICASTABLE
 DEFINE_METASIG_T(SM(ICastable_RtType_RefException_RetBool, C(ICASTABLE) C(CLASS) r(C(EXCEPTION)), F))

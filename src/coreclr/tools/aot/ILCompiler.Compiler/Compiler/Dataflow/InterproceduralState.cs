@@ -19,8 +19,8 @@ using MultiValue = ILLink.Shared.DataFlow.ValueSet<ILLink.Shared.DataFlow.Single
 
 namespace ILCompiler.Dataflow
 {
-    // Wrapper that implements IEquatable for MethodBody.
-    readonly record struct MethodBodyValue(MethodIL MethodBody) : IEquatable<MethodBodyValue>
+    // Wrapper that implements IEquatable for MethodIL.
+    internal readonly record struct MethodBodyValue(MethodIL MethodBody) : IEquatable<MethodBodyValue>
     {
         bool IEquatable<MethodBodyValue>.Equals(ILCompiler.Dataflow.MethodBodyValue other)
             => other.MethodBody.OwningMethod == MethodBody.OwningMethod;
@@ -30,12 +30,14 @@ namespace ILCompiler.Dataflow
 
     // Tracks the set of methods which get analyzer together during interprocedural analysis,
     // and the possible states of hoisted locals in state machine methods and lambdas/local functions.
-    struct InterproceduralState : IEquatable<InterproceduralState>
+#pragma warning disable CA1067 // Override Object.Equals(object) when implementing IEquatable<T>
+    internal struct InterproceduralState : IEquatable<InterproceduralState>
+#pragma warning restore CA1067 // Override Object.Equals(object) when implementing IEquatable<T>
     {
-        readonly ILProvider _ilProvider;
+        private readonly ILProvider _ilProvider;
         public ValueSet<MethodBodyValue> MethodBodies;
         public HoistedLocalState HoistedLocals;
-        readonly InterproceduralStateLattice lattice;
+        private readonly InterproceduralStateLattice lattice;
 
         public InterproceduralState(ILProvider ilProvider, ValueSet<MethodBodyValue> methodBodies, HoistedLocalState hoistedLocals, InterproceduralStateLattice lattice)
             => (_ilProvider, MethodBodies, HoistedLocals, this.lattice) = (ilProvider, methodBodies, hoistedLocals, lattice);
@@ -43,8 +45,13 @@ namespace ILCompiler.Dataflow
         public bool Equals(InterproceduralState other)
             => MethodBodies.Equals(other.MethodBodies) && HoistedLocals.Equals(other.HoistedLocals);
 
+        public override bool Equals(object? obj)
+            => obj is InterproceduralState state && Equals(state);
+
+        public override int GetHashCode() => base.GetHashCode();
+
         public InterproceduralState Clone()
-            => new(_ilProvider, MethodBodies.Clone(), HoistedLocals.Clone(), lattice);
+            => new(_ilProvider, MethodBodies.DeepCopy(), HoistedLocals.Clone(), lattice);
 
         public void TrackMethod(MethodDesc method)
         {
@@ -60,7 +67,8 @@ namespace ILCompiler.Dataflow
             methodBody = GetInstantiatedMethodIL(methodBody);
 
             // Work around the fact that ValueSet is readonly
-            var methodsList = new List<MethodBodyValue>(MethodBodies);
+            Debug.Assert (!MethodBodies.IsUnknown ());
+            var methodsList = new List<MethodBodyValue>(MethodBodies.GetKnownValues ());
             methodsList.Add(new MethodBodyValue(methodBody));
 
             // For state machine methods, also scan the state machine members.
@@ -119,7 +127,7 @@ namespace ILCompiler.Dataflow
         public MultiValue GetHoistedLocal(HoistedLocalKey key)
             => HoistedLocals.Get(key);
 
-        bool TryGetMethodBody(MethodDesc method, [NotNullWhen(true)] out MethodIL? methodBody)
+        private bool TryGetMethodBody(MethodDesc method, [NotNullWhen(true)] out MethodIL? methodBody)
         {
             methodBody = null;
 
@@ -135,7 +143,7 @@ namespace ILCompiler.Dataflow
         }
     }
 
-    struct InterproceduralStateLattice : ILattice<InterproceduralState>
+    internal struct InterproceduralStateLattice : ILattice<InterproceduralState>
     {
         private readonly ILProvider _ilProvider;
         public readonly ValueSetLattice<MethodBodyValue> MethodBodyLattice;

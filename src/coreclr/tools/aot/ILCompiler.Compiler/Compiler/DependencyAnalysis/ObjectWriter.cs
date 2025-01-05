@@ -49,6 +49,8 @@ namespace ILCompiler.DependencyAnalysis
         private HashSet<int> _offsetToCfiStart = new HashSet<int>();
         // Code offsets that ends a frame
         private HashSet<int> _offsetToCfiEnd = new HashSet<int>();
+        // Code offsets to compact unwind encoding
+        private Dictionary<int, uint> _offsetToCfiCompactEncoding = new Dictionary<int, uint>();
         // Used to assert whether frames are not overlapped.
         private bool _frameOpened;
 
@@ -76,7 +78,7 @@ namespace ILCompiler.DependencyAnalysis
         private UserDefinedTypeDescriptor _userDefinedTypeDescriptor;
 
 #if DEBUG
-        static Dictionary<string, ISymbolNode> _previouslyWrittenNodeNames = new Dictionary<string, ISymbolNode>();
+        private static Dictionary<string, ISymbolNode> _previouslyWrittenNodeNames = new Dictionary<string, ISymbolNode>();
 #endif
 
         [DllImport(NativeObjectWriterFileName)]
@@ -131,12 +133,13 @@ namespace ILCompiler.DependencyAnalysis
             ReadOnly = 0x0000,
             Writeable = 0x0001,
             Executable = 0x0002,
+            Uninitialized = 0x0004,
         };
 
         /// <summary>
         /// Builds a set of CustomSectionAttributes flags from an ObjectNodeSection.
         /// </summary>
-        private CustomSectionAttributes GetCustomSectionAttributes(ObjectNodeSection section)
+        private static CustomSectionAttributes GetCustomSectionAttributes(ObjectNodeSection section)
         {
             CustomSectionAttributes attributes = 0;
 
@@ -150,6 +153,9 @@ namespace ILCompiler.DependencyAnalysis
                     break;
                 case SectionType.Writeable:
                     attributes |= CustomSectionAttributes.Writeable;
+                    break;
+                case SectionType.Uninitialized:
+                    attributes |= CustomSectionAttributes.Uninitialized | CustomSectionAttributes.Writeable;
                     break;
             }
 
@@ -203,7 +209,7 @@ namespace ILCompiler.DependencyAnalysis
         }
 
         [DllImport(NativeObjectWriterFileName)]
-        private static extern void EmitWinFrameInfo(IntPtr objWriter, byte[] methodName, int startOffset, int endOffset, 
+        private static extern void EmitWinFrameInfo(IntPtr objWriter, byte[] methodName, int startOffset, int endOffset,
                                                     byte[] blobSymbolName);
         public void EmitWinFrameInfo(int startOffset, int endOffset, int blobSize, byte[] blobSymbolName)
         {
@@ -242,6 +248,14 @@ namespace ILCompiler.DependencyAnalysis
         {
             Debug.Assert(_frameOpened);
             EmitCFICode(_nativeObjectWriter, nativeOffset, blob);
+        }
+
+        [DllImport(NativeObjectWriterFileName)]
+        private static extern void EmitCFICompactUnwindEncoding(IntPtr objWriter, uint encoding);
+        public void EmitCFICompactUnwindEncoding(uint encoding)
+        {
+            Debug.Assert(_frameOpened);
+            EmitCFICompactUnwindEncoding(_nativeObjectWriter, encoding);
         }
 
         [DllImport(NativeObjectWriterFileName)]
@@ -342,7 +356,7 @@ namespace ILCompiler.DependencyAnalysis
         }
 
         [DllImport(NativeObjectWriterFileName)]
-        private static extern void EmitDebugVar(IntPtr objWriter, string name, UInt32 typeIndex, bool isParam, Int32 rangeCount, ref NativeVarInfo range);
+        private static extern void EmitDebugVar(IntPtr objWriter, string name, uint typeIndex, bool isParam, int rangeCount, ref NativeVarInfo range);
 
         public void EmitDebugVar(INodeWithDebugInfo owningNode, in DebugVarInfoMetadata debugVar)
         {
@@ -398,7 +412,7 @@ namespace ILCompiler.DependencyAnalysis
         }
 
         [DllImport(NativeObjectWriterFileName)]
-        private static extern void EmitDebugEHClause(IntPtr objWriter, UInt32 TryOffset, UInt32 TryLength, UInt32 HandlerOffset, UInt32 HandlerLength);
+        private static extern void EmitDebugEHClause(IntPtr objWriter, uint TryOffset, uint TryLength, uint HandlerOffset, uint HandlerLength);
 
         public void EmitDebugEHClause(DebugEHClauseInfo ehClause)
         {
@@ -422,18 +436,14 @@ namespace ILCompiler.DependencyAnalysis
         }
 
         [DllImport(NativeObjectWriterFileName)]
-        private static extern void EmitDebugFunctionInfo(IntPtr objWriter, byte[] methodName, int methodSize, UInt32 methodTypeIndex);
+        private static extern void EmitDebugFunctionInfo(IntPtr objWriter, byte[] methodName, int methodSize, uint methodTypeIndex);
         public void EmitDebugFunctionInfo(ObjectNode node, int methodSize)
         {
-            uint methodTypeIndex = 0;
-
-            var methodNode = node as IMethodNode;
-            if (methodNode != null)
+            if (node is IMethodNode methodNode)
             {
-                methodTypeIndex = _userDefinedTypeDescriptor.GetMethodFunctionIdTypeIndex(methodNode.Method);
+                uint methodTypeIndex = _userDefinedTypeDescriptor.GetMethodFunctionIdTypeIndex(methodNode.Method);
+                EmitDebugFunctionInfo(_nativeObjectWriter, _currentNodeZeroTerminatedName.UnderlyingArray, methodSize, methodTypeIndex);
             }
-
-            EmitDebugFunctionInfo(_nativeObjectWriter, _currentNodeZeroTerminatedName.UnderlyingArray, methodSize, methodTypeIndex);
         }
 
         [DllImport(NativeObjectWriterFileName)]
@@ -526,14 +536,12 @@ namespace ILCompiler.DependencyAnalysis
                 int end = frameInfo.EndOffset;
                 int len = frameInfo.BlobData.Length;
                 byte[] blob = frameInfo.BlobData;
-                
+
                 _sb.Clear().Append(_nodeFactory.NameMangler.CompilationUnitPrefix).Append("_unwind").Append(i.ToStringInvariant());
 
                 byte[] blobSymbolName = _sb.Append(_currentNodeZeroTerminatedName).ToUtf8String().UnderlyingArray;
 
-                ObjectNodeSection section = ObjectNodeSection.XDataSection;
-                if (ShouldShareSymbol(node))
-                    section = GetSharedSection(section, _sb.ToString());
+                ObjectNodeSection section = GetSharedSection(ObjectNodeSection.XDataSection, _sb.ToString());
                 SwitchSection(_nativeObjectWriter, section.Name, GetCustomSectionAttributes(section), section.ComdatName);
 
                 EmitAlignment(4);
@@ -567,9 +575,45 @@ namespace ILCompiler.DependencyAnalysis
 
                 // For window, just emit the frame blob (UNWIND_INFO) as a whole.
                 EmitWinFrameInfo(start, end, len, blobSymbolName);
-                
+
                 EnsureCurrentSection();
             }
+        }
+
+        // This represents the following DWARF code:
+        //   DW_CFA_advance_loc: 4
+        //   DW_CFA_def_cfa_offset: +16
+        //   DW_CFA_offset: W29 -16
+        //   DW_CFA_offset: W30 -8
+        //   DW_CFA_advance_loc: 4
+        //   DW_CFA_def_cfa_register: W29
+        // which is generated for the following frame prolog/epilog:
+        //   stp fp, lr, [sp, #-10]!
+        //   mov fp, sp
+        //   ...
+        //   ldp fp, lr, [sp], #0x10
+        //   ret
+        private static ReadOnlySpan<byte> DwarfArm64EmptyFrame => new byte[]
+        {
+            0x04, 0x00, 0xFF, 0xFF, 0x10, 0x00, 0x00, 0x00,
+            0x04, 0x02, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x04, 0x02, 0x1E, 0x00, 0x08, 0x00, 0x00, 0x00,
+            0x08, 0x01, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x00
+        };
+
+        private bool TryGetCompactUnwindEncoding(byte[] blob, out uint encoding)
+        {
+            if (_targetPlatform.Architecture == TargetArchitecture.ARM64)
+            {
+                if (blob.AsSpan().SequenceEqual(DwarfArm64EmptyFrame))
+                {
+                    // Frame-based encoding, no saved registers
+                    encoding = 0x04000000;
+                    return true;
+                }
+            }
+            encoding = 0;
+            return false;
         }
 
         public void BuildCFIMap(NodeFactory factory, ObjectNode node)
@@ -578,6 +622,7 @@ namespace ILCompiler.DependencyAnalysis
             _offsetToCfiStart.Clear();
             _offsetToCfiEnd.Clear();
             _offsetToCfiLsdaBlobName.Clear();
+            _offsetToCfiCompactEncoding.Clear();
             _frameOpened = false;
 
             INodeWithCodeInfo nodeWithCodeInfo = node as INodeWithCodeInfo;
@@ -607,6 +652,7 @@ namespace ILCompiler.DependencyAnalysis
                 int end = frameInfo.EndOffset;
                 int len = frameInfo.BlobData.Length;
                 byte[] blob = frameInfo.BlobData;
+                bool emitDwarf = true;
 
                 ObjectNodeSection lsdaSection = LsdaSection;
                 if (ShouldShareSymbol(node))
@@ -618,6 +664,13 @@ namespace ILCompiler.DependencyAnalysis
                 _sb.Clear().Append("_lsda").Append(i.ToStringInvariant()).Append(_currentNodeZeroTerminatedName);
                 byte[] blobSymbolName = _sb.ToUtf8String().UnderlyingArray;
                 EmitSymbolDef(blobSymbolName);
+
+                if (_targetPlatform.IsOSXLike &&
+                    TryGetCompactUnwindEncoding(blob, out uint compactEncoding))
+                {
+                    _offsetToCfiCompactEncoding[start] = compactEncoding;
+                    emitDwarf = false;
+                }
 
                 FrameInfoFlags flags = frameInfo.Flags;
                 flags |= ehInfo != null ? FrameInfoFlags.HasEHInfo : 0;
@@ -660,21 +713,25 @@ namespace ILCompiler.DependencyAnalysis
                 _byteInterruptionOffsets[start] = true;
                 _byteInterruptionOffsets[end] = true;
                 _offsetToCfiLsdaBlobName.Add(start, blobSymbolName);
-                for (int j = 0; j < len; j += CfiCodeSize)
+
+                if (emitDwarf)
                 {
-                    // The first byte of CFI_CODE is offset from the range the frame covers.
-                    // Compute code offset from the root method.
-                    int codeOffset = blob[j] + start;
-                    List<byte[]> cfis;
-                    if (!_offsetToCfis.TryGetValue(codeOffset, out cfis))
+                    for (int j = 0; j < len; j += CfiCodeSize)
                     {
-                        cfis = new List<byte[]>();
-                        _offsetToCfis.Add(codeOffset, cfis);
-                        _byteInterruptionOffsets[codeOffset] = true;
+                        // The first byte of CFI_CODE is offset from the range the frame covers.
+                        // Compute code offset from the root method.
+                        int codeOffset = blob[j] + start;
+                        List<byte[]> cfis;
+                        if (!_offsetToCfis.TryGetValue(codeOffset, out cfis))
+                        {
+                            cfis = new List<byte[]>();
+                            _offsetToCfis.Add(codeOffset, cfis);
+                            _byteInterruptionOffsets[codeOffset] = true;
+                        }
+                        byte[] cfi = new byte[CfiCodeSize];
+                        Array.Copy(blob, j, cfi, 0, CfiCodeSize);
+                        cfis.Add(cfi);
                     }
-                    byte[] cfi = new byte[CfiCodeSize];
-                    Array.Copy(blob, j, cfi, 0, CfiCodeSize);
-                    cfis.Add(cfi);
                 }
             }
 
@@ -713,6 +770,23 @@ namespace ILCompiler.DependencyAnalysis
                     // Internal compiler error
                     Debug.Assert(false);
                 }
+
+                if (_targetPlatform.IsOSXLike)
+                {
+                    // Emit a symbol for beginning of the frame. This is workaround for ld64
+                    // linker bug which would produce DWARF with incorrect pcStart offsets for
+                    // exception handling blocks if there is no symbol present for them.
+                    //
+                    // To make things simple we just reuse blobSymbolName and change `_lsda`
+                    // prefix to `_fram`.
+                    "_fram"u8.CopyTo(blobSymbolName);
+                    EmitSymbolDef(blobSymbolName);
+
+                    if (_offsetToCfiCompactEncoding.TryGetValue(offset, out uint compactEncoding))
+                    {
+                        EmitCFICompactUnwindEncoding(compactEncoding);
+                    }
+                }
             }
 
             // Emit individual cfi blob for the given offset
@@ -750,12 +824,13 @@ namespace ILCompiler.DependencyAnalysis
             _offsetToDefName.Clear();
             foreach (ISymbolDefinitionNode n in definedSymbols)
             {
-                if (!_offsetToDefName.ContainsKey(n.Offset))
+                if (!_offsetToDefName.TryGetValue(n.Offset, out var nodes))
                 {
-                    _offsetToDefName[n.Offset] = new List<ISymbolDefinitionNode>();
+                    nodes = new List<ISymbolDefinitionNode>();
+                    _offsetToDefName[n.Offset] = nodes;
                 }
 
-                _offsetToDefName[n.Offset].Add(n);
+                nodes.Add(n);
                 _byteInterruptionOffsets[n.Offset] = true;
             }
 
@@ -775,9 +850,9 @@ namespace ILCompiler.DependencyAnalysis
 
         private void AppendExternCPrefix(Utf8StringBuilder sb)
         {
-            if (_targetPlatform.OperatingSystem == TargetOS.OSX)
+            if (_targetPlatform.IsOSXLike)
             {
-                // On OSX, we need to prefix an extra underscore to account for correct linkage of 
+                // On OSX-like systems, we need to prefix an extra underscore to account for correct linkage of
                 // extern "C" functions.
                 sb.Append('_');
             }
@@ -801,48 +876,6 @@ namespace ILCompiler.DependencyAnalysis
             }
 
             return EmitSymbolRef(_sb, relocType, checked(delta + target.Offset), flags);
-        }
-
-        public void EmitBlobWithRelocs(byte[] blob, Relocation[] relocs)
-        {
-            int nextRelocOffset = -1;
-            int nextRelocIndex = -1;
-            if (relocs.Length > 0)
-            {
-                nextRelocOffset = relocs[0].Offset;
-                nextRelocIndex = 0;
-            }
-
-            int i = 0;
-            while (i < blob.Length)
-            {
-                if (i == nextRelocOffset)
-                {
-                    Relocation reloc = relocs[nextRelocIndex];
-
-                    long delta;
-                    unsafe
-                    {
-                        fixed (void* location = &blob[i])
-                        {
-                            delta = Relocation.ReadValue(reloc.RelocType, location);
-                        }
-                    }
-                    int size = EmitSymbolReference(reloc.Target, (int)delta, reloc.RelocType);
-
-                    // Update nextRelocIndex/Offset
-                    if (++nextRelocIndex < relocs.Length)
-                    {
-                        nextRelocOffset = relocs[nextRelocIndex].Offset;
-                    }
-                    i += size;
-                }
-                else
-                {
-                    EmitIntValue(blob[i], 1);
-                    i++;
-                }
-            }
         }
 
         public void EmitSymbolDefinition(int currentOffset)
@@ -924,7 +957,7 @@ namespace ILCompiler.DependencyAnalysis
         private bool ShouldShareSymbol(ObjectNode node)
         {
             // Foldable sections are always COMDATs
-            ObjectNodeSection section = node.Section;
+            ObjectNodeSection section = node.GetSection(_nodeFactory);
             if (section == ObjectNodeSection.FoldableManagedCodeUnixContentSection ||
                 section == ObjectNodeSection.FoldableManagedCodeWindowsContentSection ||
                 section == ObjectNodeSection.FoldableReadOnlyDataSection)
@@ -933,7 +966,7 @@ namespace ILCompiler.DependencyAnalysis
             if (_isSingleFileCompilation)
                 return false;
 
-            if (_targetPlatform.OperatingSystem == TargetOS.OSX)
+            if (_targetPlatform.IsOSXLike)
                 return false;
 
             if (!(node is ISymbolNode))
@@ -946,7 +979,7 @@ namespace ILCompiler.DependencyAnalysis
             return true;
         }
 
-        private ObjectNodeSection GetSharedSection(ObjectNodeSection section, string key)
+        private static ObjectNodeSection GetSharedSection(ObjectNodeSection section, string key)
         {
             string standardSectionPrefix = "";
             if (section.IsStandardSection)
@@ -1017,8 +1050,7 @@ namespace ILCompiler.DependencyAnalysis
 
                     ObjectData nodeContents = node.GetData(factory);
 
-                    if (dumper != null)
-                        dumper.DumpObjectNode(factory.NameMangler, node, nodeContents);
+                    dumper?.DumpObjectNode(factory, node, nodeContents);
 
 #if DEBUG
                     foreach (ISymbolNode definedSymbol in nodeContents.DefinedSymbols)
@@ -1037,10 +1069,10 @@ namespace ILCompiler.DependencyAnalysis
 #endif
 
 
-                    ObjectNodeSection section = node.Section;
+                    ObjectNodeSection section = node.GetSection(factory);
                     if (objectWriter.ShouldShareSymbol(node))
                     {
-                        section = objectWriter.GetSharedSection(section, ((ISymbolNode)node).GetMangledName(factory.NameMangler));
+                        section = GetSharedSection(section, ((ISymbolNode)node).GetMangledName(factory.NameMangler));
                     }
 
                     // Ensure section and alignment for the node.
@@ -1107,6 +1139,13 @@ namespace ILCompiler.DependencyAnalysis
                                 case RelocType.IMAGE_REL_BASED_ARM64_PAGEBASE_REL21:
                                 case RelocType.IMAGE_REL_BASED_ARM64_PAGEOFFSET_12A:
                                 case RelocType.IMAGE_REL_BASED_ARM64_PAGEOFFSET_12L:
+
+                                case RelocType.IMAGE_REL_AARCH64_TLSLE_ADD_TPREL_HI12:
+                                case RelocType.IMAGE_REL_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+                                case RelocType.IMAGE_REL_AARCH64_TLSDESC_ADR_PAGE21:
+                                case RelocType.IMAGE_REL_AARCH64_TLSDESC_LD64_LO12:
+                                case RelocType.IMAGE_REL_AARCH64_TLSDESC_ADD_LO12:
+                                case RelocType.IMAGE_REL_AARCH64_TLSDESC_CALL:
                                     unsafe
                                     {
                                         fixed (void* location = &nodeContents.Data[i])
@@ -1124,9 +1163,9 @@ namespace ILCompiler.DependencyAnalysis
                             }
                             else
                             {
-                                // This is the last reloc. Set the next reloc offset to -1 in case the last reloc has a zero size, 
-                                // which means the reloc does not have vacant bytes corresponding to in the data buffer. E.g, 
-                                // IMAGE_REL_THUMB_BRANCH24 is a kind of 24-bit reloc whose bits scatte over the instruction that 
+                                // This is the last reloc. Set the next reloc offset to -1 in case the last reloc has a zero size,
+                                // which means the reloc does not have vacant bytes corresponding to in the data buffer. E.g,
+                                // IMAGE_REL_THUMB_BRANCH24 is a kind of 24-bit reloc whose bits scatte over the instruction that
                                 // references it. We do not vacate extra bytes in the data buffer for this kind of reloc.
                                 nextRelocOffset = -1;
                             }
@@ -1135,9 +1174,9 @@ namespace ILCompiler.DependencyAnalysis
                         else
                         {
                             int offsetIndex = Array.IndexOf(objectWriter._byteInterruptionOffsets, true, i + 1, nodeContents.Data.Length - i - 1);
-                            
+
                             int nextOffset = offsetIndex == -1 ? nodeContents.Data.Length : offsetIndex;
-                            
+
                             unsafe
                             {
                                 // Todo: Use Span<T> instead once it's available to us in this repo
@@ -1147,11 +1186,11 @@ namespace ILCompiler.DependencyAnalysis
                                     i += nextOffset - i;
                                 }
                             }
-                            
+
                         }
                     }
                     Debug.Assert(i == nodeContents.Data.Length);
-                    
+
                     // It is possible to have a symbol just after all of the data.
                     objectWriter.EmitSymbolDefinition(nodeContents.Data.Length);
 
@@ -1162,7 +1201,12 @@ namespace ILCompiler.DependencyAnalysis
                     // Emit the last CFI to close the frame.
                     objectWriter.EmitCFICodes(nodeContents.Data.Length);
 
-                    if (objectWriter.HasFunctionDebugInfo())
+                    // Generate debug info if we have sequence points, or on Windows, we can also
+                    // generate even if no sequence points.
+                    bool generateDebugInfo = objectWriter.HasFunctionDebugInfo();
+                    generateDebugInfo |= factory.Target.IsWindows && objectWriter.HasModuleDebugInfo();
+
+                    if (generateDebugInfo)
                     {
                         objectWriter.EmitDebugVarInfo(node);
                         objectWriter.EmitDebugEHClauseInfo(node);
@@ -1175,8 +1219,25 @@ namespace ILCompiler.DependencyAnalysis
                     }
                 }
 
+                // Native side of the object writer is going to do more native memory allocations.
+                // Free up as much memory as possible so that we don't get OOM killed.
+                // This is potentially a waste of time. We're about to end the process and let the
+                // OS "garbage collect" the entire address space.
+                var gcInfo = GC.GetGCMemoryInfo();
+
                 if (logger.IsVerbose)
-                    logger.LogMessage($"Finalizing output to '{objectFilePath}'...");
+                    logger.LogMessage($"Memory stats: {gcInfo.TotalCommittedBytes} bytes committed, {gcInfo.TotalAvailableMemoryBytes} bytes available");
+
+                if (gcInfo.TotalCommittedBytes > gcInfo.TotalAvailableMemoryBytes / 5)
+                {
+                    if (logger.IsVerbose)
+                        logger.LogMessage($"Freeing up memory");
+
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+                }
+
+                if (logger.IsVerbose)
+                    logger.LogMessage($"Emitting debug information");
 
                 objectWriter.EmitDebugModuleInfo();
 
@@ -1184,6 +1245,9 @@ namespace ILCompiler.DependencyAnalysis
             }
             finally
             {
+                if (logger.IsVerbose)
+                    logger.LogMessage($"Finalizing output to '{objectFilePath}'...");
+
                 objectWriter.Dispose();
 
                 if (!succeeded)
@@ -1199,6 +1263,9 @@ namespace ILCompiler.DependencyAnalysis
                     }
                 }
             }
+
+            if (logger.IsVerbose)
+                logger.LogMessage($"Done writing object file");
         }
 
         [DllImport(NativeObjectWriterFileName)]
@@ -1273,8 +1340,33 @@ namespace ILCompiler.DependencyAnalysis
                     break;
                 case TargetOS.OSX:
                     vendor = "apple";
-                    sys = "darwin";
+                    sys = "darwin16";
                     abi = "macho";
+                    break;
+                case TargetOS.MacCatalyst:
+                    vendor = "apple";
+                    sys = target.Architecture == TargetArchitecture.X64 ? "ios13.5" :"ios14.2";
+                    abi = "macabi";
+                    break;
+                case TargetOS.iOS:
+                    vendor = "apple";
+                    sys = "ios11.0";
+                    abi = "macho";
+                    break;
+                case TargetOS.iOSSimulator:
+                    vendor = "apple";
+                    sys = "ios11.0";
+                    abi = "simulator";
+                    break;
+                case TargetOS.tvOS:
+                    vendor = "apple";
+                    sys = "tvos11.0";
+                    abi = "macho";
+                    break;
+                case TargetOS.tvOSSimulator:
+                    vendor = "apple";
+                    sys = "tvos11.0";
+                    abi = "simulator";
                     break;
                 case TargetOS.WebAssembly:
                     vendor = "unknown";

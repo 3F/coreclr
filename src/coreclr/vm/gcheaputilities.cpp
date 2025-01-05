@@ -66,8 +66,8 @@ bool GCHeapUtilities::s_useThreadAllocationContexts;
 
 // GC entrypoints for the linked-in GC. These symbols are invoked
 // directly if we are not using a standalone GC.
-extern "C" void GC_VersionInfo(/* Out */ VersionInfo* info);
-extern "C" HRESULT GC_Initialize(
+extern "C" void LOCALGC_CALLCONV GC_VersionInfo(/* Out */ VersionInfo* info);
+extern "C" HRESULT LOCALGC_CALLCONV GC_Initialize(
     /* In  */ IGCToCLR* clrToGC,
     /* Out */ IGCHeap** gcHeap,
     /* Out */ IGCHandleManager** gcHandleManager,
@@ -168,8 +168,9 @@ HMODULE LoadStandaloneGc(LPCWSTR libFileName)
     PathString libPath = GetInternalSystemDirectory();
     libPath.Append(libFileName);
 
+    LOG((LF_GC, LL_INFO100, "Loading standalone GC from path %s\n", libPath.GetUTF8()));
+
     LPCWSTR libraryName = libPath.GetUnicode();
-    LOG((LF_GC, LL_INFO100, "Loading standalone GC from path %S\n", libraryName));
     return CLRLoadLibrary(libraryName);
 }
 #endif // FEATURE_STANDALONE_GC
@@ -192,7 +193,10 @@ HRESULT LoadAndInitializeGC(LPCWSTR standaloneGcLocation)
     if (!hMod)
     {
         HRESULT err = GetLastError();
-        LOG((LF_GC, LL_FATALERROR, "Load of %S failed\n", standaloneGcLocation));
+#ifdef LOGGING
+        MAKE_UTF8PTR_FROMWIDE(standaloneGcLocationUtf8, standaloneGcLocation);
+        LOG((LF_GC, LL_FATALERROR, "Load of %s failed\n", standaloneGcLocationUtf8));
+#endif // LOGGING
         return __HRESULT_FROM_WIN32(err);
     }
 
@@ -340,6 +344,8 @@ HRESULT GCHeapUtilities::LoadAndInitialize()
     g_gc_load_status = GC_LOAD_STATUS_START;
 
     LPCWSTR standaloneGcLocation = Configuration::GetKnobStringValue(W("System.GC.Name"), CLRConfig::EXTERNAL_GCName);
+    g_gc_dac_vars.major_version_number = GC_INTERFACE_MAJOR_VERSION;
+    g_gc_dac_vars.minor_version_number = GC_INTERFACE_MINOR_VERSION;
     if (!standaloneGcLocation)
     {
         return InitializeDefaultGC();

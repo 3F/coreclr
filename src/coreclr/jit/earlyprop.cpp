@@ -291,6 +291,9 @@ GenTree* Compiler::optEarlyPropRewriteTree(GenTree* tree, LocalNumberToNullCheck
         // actualValClone has small tree node size, it is safe to use CopyFrom here.
         tree->ReplaceWith(actualValClone, this);
 
+        // update SSA accounting
+        optRecordSsaUses(tree, compCurBB);
+
         // Propagating a constant may create an opportunity to use a division by constant optimization
         //
         if ((tree->gtNext != nullptr) && tree->gtNext->OperIsBinary())
@@ -310,7 +313,7 @@ GenTree* Compiler::optEarlyPropRewriteTree(GenTree* tree, LocalNumberToNullCheck
         return tree;
     }
 
-    return nullptr;
+    return folded ? tree : nullptr;
 }
 
 //-------------------------------------------------------------------------------------------
@@ -349,7 +352,6 @@ GenTree* Compiler::optPropGetValueRec(unsigned lclNum, unsigned ssaNum, optPropK
         return nullptr;
     }
 
-    SSAName  ssaName(lclNum, ssaNum);
     GenTree* value = nullptr;
 
     // Bound the recursion with a hard limit.
@@ -359,35 +361,31 @@ GenTree* Compiler::optPropGetValueRec(unsigned lclNum, unsigned ssaNum, optPropK
     }
 
     // Track along the use-def chain to get the array length
-    LclSsaVarDsc* ssaVarDsc = lvaTable[lclNum].GetPerSsaData(ssaNum);
-    GenTreeOp*    ssaDefAsg = ssaVarDsc->GetAssignment();
+    LclSsaVarDsc*        ssaVarDsc   = lvaTable[lclNum].GetPerSsaData(ssaNum);
+    GenTreeLclVarCommon* ssaDefStore = ssaVarDsc->GetDefNode();
 
-    if (ssaDefAsg == nullptr)
+    // Incoming parameters or live-in variables don't have actual definition tree node for
+    // their FIRST_SSA_NUM. Definitions induced by calls do not record the store node. See
+    // SsaBuilder::RenameDef.
+    if (ssaDefStore != nullptr)
     {
-        // Incoming parameters or live-in variables don't have actual definition tree node
-        // for their FIRST_SSA_NUM. See SsaBuilder::RenameVariables.
-        assert(ssaNum == SsaConfig::FIRST_SSA_NUM);
-    }
-    else
-    {
-        assert(ssaDefAsg->OperIs(GT_ASG));
+        assert(ssaDefStore->OperIsLocalStore());
 
-        GenTree* treeRhs = ssaDefAsg->gtGetOp2();
+        GenTree* data = ssaDefStore->Data();
 
-        if (treeRhs->OperIsScalarLocal() && lvaInSsa(treeRhs->AsLclVarCommon()->GetLclNum()) &&
-            treeRhs->AsLclVarCommon()->HasSsaName())
+        // Recursively track the Rhs for "entire" stores.
+        if (ssaDefStore->OperIs(GT_STORE_LCL_VAR) && (ssaDefStore->GetLclNum() == lclNum) && data->OperIs(GT_LCL_VAR))
         {
-            // Recursively track the Rhs
-            unsigned rhsLclNum = treeRhs->AsLclVarCommon()->GetLclNum();
-            unsigned rhsSsaNum = treeRhs->AsLclVarCommon()->GetSsaNum();
+            unsigned dataLclNum = data->AsLclVarCommon()->GetLclNum();
+            unsigned dataSsaNum = data->AsLclVarCommon()->GetSsaNum();
 
-            value = optPropGetValueRec(rhsLclNum, rhsSsaNum, valueKind, walkDepth + 1);
+            value = optPropGetValueRec(dataLclNum, dataSsaNum, valueKind, walkDepth + 1);
         }
         else
         {
             if (valueKind == optPropKind::OPK_ARRAYLEN)
             {
-                value = getArrayLengthFromAllocation(treeRhs DEBUGARG(ssaVarDsc->GetBlock()));
+                value = getArrayLengthFromAllocation(data DEBUGARG(ssaVarDsc->GetBlock()));
                 if (value != nullptr)
                 {
                     if (!value->IsCnsIntOrI())
@@ -469,6 +467,7 @@ bool Compiler::optFoldNullCheck(GenTree* tree, LocalNumberToNullCheckTreeMap* nu
         // Re-morph the statement.
         Statement* curStmt = compCurStmt;
         fgMorphBlockStmt(compCurBB, nullCheckStmt DEBUGARG("optFoldNullCheck"));
+        optRecordSsaUses(nullCheckStmt->GetRootNode(), compCurBB);
         compCurStmt = curStmt;
 
         folded = true;
@@ -566,15 +565,20 @@ GenTree* Compiler::optFindNullCheckToFold(GenTree* tree, LocalNumberToNullCheckT
             return nullptr;
         }
 
-        GenTree* defRHS = defLoc->GetAssignment()->gtGetOp2();
+        GenTreeLclVarCommon* defNode = defLoc->GetDefNode();
+        if ((defNode == nullptr) || !defNode->OperIs(GT_STORE_LCL_VAR) || (defNode->GetLclNum() != lclNum))
+        {
+            return nullptr;
+        }
 
-        if (defRHS->OperGet() != GT_COMMA)
+        GenTree* defValue = defNode->Data();
+        if (defValue->OperGet() != GT_COMMA)
         {
             return nullptr;
         }
 
         const bool commaOnly              = true;
-        GenTree*   commaOp1EffectiveValue = defRHS->gtGetOp1()->gtEffectiveVal(commaOnly);
+        GenTree*   commaOp1EffectiveValue = defValue->gtGetOp1()->gtEffectiveVal(commaOnly);
 
         if (commaOp1EffectiveValue->OperGet() != GT_NULLCHECK)
         {
@@ -583,14 +587,14 @@ GenTree* Compiler::optFindNullCheckToFold(GenTree* tree, LocalNumberToNullCheckT
 
         GenTree* nullCheckAddress = commaOp1EffectiveValue->gtGetOp1();
 
-        if ((nullCheckAddress->OperGet() != GT_LCL_VAR) || (defRHS->gtGetOp2()->OperGet() != GT_ADD))
+        if ((nullCheckAddress->OperGet() != GT_LCL_VAR) || (defValue->gtGetOp2()->OperGet() != GT_ADD))
         {
             return nullptr;
         }
 
         // We found a candidate for 'y' in the pattern above.
 
-        GenTree* additionNode = defRHS->gtGetOp2();
+        GenTree* additionNode = defValue->gtGetOp2();
         GenTree* additionOp1  = additionNode->gtGetOp1();
         GenTree* additionOp2  = additionNode->gtGetOp2();
         if ((additionOp1->OperGet() == GT_LCL_VAR) &&
@@ -639,7 +643,7 @@ bool Compiler::optIsNullCheckFoldingLegal(GenTree*    tree,
     // until we get to the indirection or process the statement root.
     GenTree* previousTree = nullCheckTree;
     GenTree* currentTree  = nullCheckTree->gtNext;
-    assert(fgStmtListThreaded);
+    assert(fgNodeThreading == NodeThreading::AllTrees);
     while (canRemoveNullCheck && (currentTree != tree) && (currentTree != nullptr))
     {
         if ((*nullCheckParent == nullptr) && currentTree->TryGetUse(nullCheckTree))
@@ -751,24 +755,28 @@ bool Compiler::optCanMoveNullCheckPastTree(GenTree* tree,
 
     if (result && ((tree->gtFlags & GTF_ASG) != 0))
     {
-        if (tree->OperGet() == GT_ASG)
+        if (tree->OperIsStore())
         {
-            GenTree* lhs = tree->gtGetOp1();
-            GenTree* rhs = tree->gtGetOp2();
-            if (checkSideEffectSummary && ((rhs->gtFlags & GTF_ASG) != 0))
+            if (checkSideEffectSummary && ((tree->Data()->gtFlags & GTF_ASG) != 0))
             {
                 result = false;
             }
             else if (isInsideTry)
             {
-                // Inside try we allow only assignments to locals not live in handlers.
+                // Inside try we allow only stores to locals not live in handlers.
                 // lvVolatileHint is set to true on variables that are line in handlers.
-                result = (lhs->OperGet() == GT_LCL_VAR) && !lvaTable[lhs->AsLclVarCommon()->GetLclNum()].lvVolatileHint;
+                result = tree->OperIs(GT_STORE_LCL_VAR) && !lvaTable[tree->AsLclVar()->GetLclNum()].lvVolatileHint;
             }
             else
             {
-                // We disallow only assignments to global memory.
-                result = ((lhs->gtFlags & GTF_GLOB_REF) == 0);
+                // We disallow stores to global memory.
+                result = tree->OperIsLocalStore() && !lvaGetDesc(tree->AsLclVarCommon())->IsAddressExposed();
+
+                // TODO-ASG-Cleanup: delete this zero-diff quirk. Some setup args for by-ref args do not have GLOB_REF.
+                if ((tree->gtFlags & GTF_GLOB_REF) == 0)
+                {
+                    result = true;
+                }
             }
         }
         else if (checkSideEffectSummary)

@@ -106,6 +106,8 @@ namespace ILCompiler
                 }
             }
 
+            _nodeFactory.DetectGenericCycles(caller, callee);
+
             return NodeFactory.CompilationModuleGroup.CanInline(caller, callee);
         }
 
@@ -126,6 +128,46 @@ namespace ILCompiler
 
         public MethodDesc ResolveVirtualMethod(MethodDesc declMethod, TypeDesc implType, out CORINFO_DEVIRTUALIZATION_DETAIL devirtualizationDetail)
         {
+            if (declMethod.OwningType.IsInterface)
+            {
+                // The virtual method resolution algorithm in the managed type system is not implemented to work correctly
+                // in the presence of calling type equivalent interfaces.
+                // Notably:
+                // If the decl is to a interface equivalent to, but not equal to any interface implemented on the
+                // owning type, then the logic for matching up methods by method index is not present.
+                // AND
+                // If the owningType implements multiple different type equivalent interfaces that are all mutually
+                // equivalent, the implementation for finding the correct implementation method requires walking the
+                // type hierarchy and searching for exact and equivalent matches at each level (much like variance)
+                // This logic is also currently unimplemented.
+                // NOTE: We do not currently have tests in the runtime suite which cover these cases
+                if (declMethod.OwningType.HasTypeEquivalence)
+                {
+                    // To protect against this, require that the implType implement exactly the right interface, and
+                    // no additional interfaces that are equivalent
+                    bool foundExactMatch = false;
+                    bool foundEquivalentMatch = false;
+                    foreach (var @interface in implType.RuntimeInterfaces)
+                    {
+                        if (@interface == declMethod.OwningType)
+                        {
+                            foundExactMatch = true;
+                            continue;
+                        }
+                        if (@interface.IsEquivalentTo(declMethod.OwningType))
+                        {
+                            foundEquivalentMatch = true;
+                        }
+                    }
+
+                    if (!foundExactMatch || foundEquivalentMatch)
+                    {
+                        devirtualizationDetail = CORINFO_DEVIRTUALIZATION_DETAIL.CORINFO_DEVIRTUALIZATION_FAILED_TYPE_EQUIVALENCE;
+                        return null;
+                    }
+                }
+            }
+
             return _devirtualizationManager.ResolveVirtualMethod(declMethod, implType, out devirtualizationDetail);
         }
 
@@ -228,12 +270,6 @@ namespace ILCompiler
     public sealed class ReadyToRunCodegenCompilation : Compilation
     {
         /// <summary>
-        /// We only need one CorInfoImpl per thread, and we don't want to unnecessarily construct them
-        /// because their construction takes a significant amount of time.
-        /// </summary>
-        private readonly ConditionalWeakTable<Thread, CorInfoImpl> _corInfoImpls;
-
-        /// <summary>
         /// Input MSIL file names.
         /// </summary>
         private readonly IEnumerable<string> _inputFiles;
@@ -243,6 +279,7 @@ namespace ILCompiler
         private readonly bool _resilient;
 
         private readonly int _parallelism;
+        private readonly CorInfoImpl[] _corInfoImpls;
 
         private readonly bool _generateMapFile;
         private readonly bool _generateMapCsvFile;
@@ -261,6 +298,8 @@ namespace ILCompiler
 
         public ProfileDataManager ProfileData => _profileData;
 
+        public bool DeterminismCheckFailed { get; set; }
+
         public ReadyToRunSymbolNodeFactory SymbolNodeFactory { get; }
         public ReadyToRunCompilationModuleGroupBase CompilationModuleGroup { get; }
         private readonly int _customPESectionAlignment;
@@ -269,6 +308,7 @@ namespace ILCompiler
         /// for the same type during compilation so preserve the computed value.
         /// </summary>
         private ConcurrentDictionary<TypeDesc, bool> _computedFixedLayoutTypes = new ConcurrentDictionary<TypeDesc, bool>();
+        private Func<TypeDesc, bool> _computedFixedLayoutTypesUncached;
 
         internal ReadyToRunCodegenCompilation(
             DependencyAnalyzerBase<NodeFactory> dependencyGraph,
@@ -306,8 +346,10 @@ namespace ILCompiler
                   logger,
                   instructionSetSupport)
         {
+            _computedFixedLayoutTypesUncached = IsLayoutFixedInCurrentVersionBubbleInternal;
             _resilient = resilient;
             _parallelism = parallelism;
+            _corInfoImpls = new CorInfoImpl[_parallelism];
             _generateMapFile = generateMapFile;
             _generateMapCsvFile = generateMapCsvFile;
             _generatePdbFile = generatePdbFile;
@@ -322,7 +364,6 @@ namespace ILCompiler
                 nodeFactory.InstrumentationDataTable.Initialize(SymbolNodeFactory);
             if (nodeFactory.CrossModuleInlningInfo != null)
                 nodeFactory.CrossModuleInlningInfo.Initialize(SymbolNodeFactory);
-            _corInfoImpls = new ConditionalWeakTable<Thread, CorInfoImpl>();
             _inputFiles = inputFiles;
             _compositeRootPath = compositeRootPath;
             _printReproInstructions = printReproInstructions;
@@ -344,6 +385,11 @@ namespace ILCompiler
         public override void Compile(string outputFile)
         {
             _dependencyGraph.ComputeMarkedNodes();
+
+            _doneAllCompiling = true;
+            Array.Clear(_corInfoImpls);
+            _compilationThreadSemaphore.Release(_parallelism);
+
             var nodes = _dependencyGraph.MarkedNodeList;
 
             nodes = _fileLayoutOptimizer.ApplyProfilerGuidedMethodSort(nodes);
@@ -405,6 +451,11 @@ namespace ILCompiler
             {
                 flags |= ReadyToRunFlags.READYTORUN_FLAG_PlatformNeutralSource;
             }
+            bool automaticTypeValidation = _nodeFactory.OptimizationFlags.TypeValidation == TypeValidationRule.Automatic || _nodeFactory.OptimizationFlags.TypeValidation == TypeValidationRule.AutomaticWithLogging;
+            if (_nodeFactory.OptimizationFlags.TypeValidation == TypeValidationRule.SkipTypeValidation)
+            {
+                flags |= ReadyToRunFlags.READYTORUN_FLAG_SkipTypeValidation;
+            }
 
             flags |= _nodeFactory.CompilationModuleGroup.GetReadyToRunFlags() & ReadyToRunFlags.READYTORUN_FLAG_MultiModuleVersionBubble;
 
@@ -422,13 +473,16 @@ namespace ILCompiler
                 win32Resources: new Win32Resources.ResourceData(inputModule),
                 flags,
                 _nodeFactory.OptimizationFlags,
-                _nodeFactory.ImageBase);
+                _nodeFactory.ImageBase,
+                automaticTypeValidation ? inputModule : null,
+                genericCycleDepthCutoff: -1, // We don't need generic cycle detection when rewriting component assemblies
+                genericCycleBreadthCutoff: -1); // as we're not actually compiling anything
 
             IComparer<DependencyNodeCore<NodeFactory>> comparer = new SortableDependencyNode.ObjectNodeComparer(CompilerComparer.Instance);
             DependencyAnalyzerBase<NodeFactory> componentGraph = new DependencyAnalyzer<NoLogStrategy<NodeFactory>, NodeFactory>(componentFactory, comparer);
 
             componentGraph.AddRoot(componentFactory.Header, "Component module R2R header");
-            OwnerCompositeExecutableNode ownerExecutableNode = new OwnerCompositeExecutableNode(_nodeFactory.Target, ownerExecutableName);
+            OwnerCompositeExecutableNode ownerExecutableNode = new OwnerCompositeExecutableNode(ownerExecutableName);
             componentGraph.AddRoot(ownerExecutableNode, "Owner composite executable name");
             componentGraph.AddRoot(copiedCorHeader, "Copied COR header");
             componentGraph.AddRoot(debugDirectory, "Debug directory");
@@ -473,10 +527,16 @@ namespace ILCompiler
                 return true;
             }
 
-            if (!(type is MetadataType defType))
+            if (type is not MetadataType defType)
             {
                 // Non metadata backed types have layout defined in all version bubbles
                 return true;
+            }
+
+            if (VectorOfTFieldLayoutAlgorithm.IsVectorOfTType(defType))
+            {
+                // Vector<T> always needs a layout check
+                return false;
             }
 
             if (!NodeFactory.CompilationModuleGroup.VersionsWithModule(defType.Module))
@@ -507,7 +567,7 @@ namespace ILCompiler
         }
 
         public bool IsLayoutFixedInCurrentVersionBubble(TypeDesc type) =>
-            _computedFixedLayoutTypes.GetOrAdd(type, (t) => IsLayoutFixedInCurrentVersionBubbleInternal(t));
+            _computedFixedLayoutTypes.GetOrAdd(type, _computedFixedLayoutTypesUncached);
 
         public bool IsInheritanceChainLayoutFixedInCurrentVersionBubble(TypeDesc type)
         {
@@ -556,13 +616,25 @@ namespace ILCompiler
             lock (_methodsToRecompile)
             {
                 _methodsToRecompile.Add(methodToBeRecompiled);
-                foreach (var method in methodsThatNeedILBodies)
-                    _methodsWhichNeedMutableILBodies.Add(method);
+                if (methodsThatNeedILBodies != null)
+                    foreach (var method in methodsThatNeedILBodies)
+                        _methodsWhichNeedMutableILBodies.Add(method);
             }
         }
 
+        [ThreadStatic]
+        private static int s_methodsCompiledPerThread = 0;
+
+        private SemaphoreSlim _compilationThreadSemaphore = new(0);
+        private volatile IEnumerator<DependencyNodeCore<NodeFactory>> _currentCompilationMethodList;
+        private volatile bool _doneAllCompiling;
+        private int _finishedThreadCount;
+        private ManualResetEventSlim _compilationSessionComplete = new ManualResetEventSlim();
+        private bool _hasCreatedCompilationThreads = false;
+
         protected override void ComputeDependencyNodeDependencies(List<DependencyNodeCore<NodeFactory>> obj)
         {
+            bool generatedColdCode = false;
 
             using (PerfEventSource.StartStopEvents.JitEvents())
             {
@@ -667,6 +739,11 @@ namespace ILCompiler
                 _finishedFirstCompilationRunInPhase2 = true;
             }
 
+            if (generatedColdCode)
+            {
+                _nodeFactory.GenerateHotColdMap(_dependencyGraph);
+            }
+
             void ProcessMutableMethodBodiesList()
             {
                 EcmaMethod[] mutableMethodBodyNeedList = new EcmaMethod[_methodsWhichNeedMutableILBodies.Count];
@@ -695,23 +772,69 @@ namespace ILCompiler
                 if (_parallelism == 1)
                 {
                     foreach (var dependency in methodList)
-                        CompileOneMethod(dependency);
+                        CompileOneMethod(dependency, 0);
                 }
                 else
                 {
-                    ParallelOptions options = new ParallelOptions
-                    {
-                        MaxDegreeOfParallelism = _parallelism
-                    };
+                    _currentCompilationMethodList = methodList.GetEnumerator();
+                    _finishedThreadCount = 0;
+                    _compilationSessionComplete.Reset();
 
-                    Parallel.ForEach(methodList, options, CompileOneMethod);
+                    if (!_hasCreatedCompilationThreads)
+                    {
+                        for (int compilationThreadId = 1; compilationThreadId < _parallelism; compilationThreadId++)
+                        {
+                            new Thread(CompilationThread).Start((object)compilationThreadId);
+                        }
+                        _hasCreatedCompilationThreads = true;
+                    }
+
+                    _compilationThreadSemaphore.Release(_parallelism - 1);
+                    CompileOnThread(0);
+                    _compilationSessionComplete.Wait();
                 }
 
                 // Re-enable generation of new tokens after the multi-threaded compile
                 NodeFactory.ManifestMetadataTable._mutableModule.DisableNewTokens = false;
             }
 
-            void CompileOneMethod(DependencyNodeCore<NodeFactory> dependency)
+            void CompilationThread(object objThreadId)
+            {
+                while(true)
+                {
+                    _compilationThreadSemaphore.Wait();
+                    lock(this)
+                    {
+                        if (_doneAllCompiling)
+                            return;
+                    }
+                    CompileOnThread((int)objThreadId);
+                }
+            }
+
+            void CompileOnThread(int compilationThreadId)
+            {
+                var compilationMethodList = _currentCompilationMethodList;
+                while (true)
+                {
+                    DependencyNodeCore<NodeFactory> dependency;
+                    lock (compilationMethodList)
+                    {
+                        if (!compilationMethodList.MoveNext())
+                        {
+                            if (Interlocked.Increment(ref _finishedThreadCount) == _parallelism)
+                                _compilationSessionComplete.Set();
+
+                            return;
+                        }
+                        dependency = compilationMethodList.Current;
+                    }
+
+                    CompileOneMethod(dependency, compilationThreadId);
+                }
+            }
+
+            void CompileOneMethod(DependencyNodeCore<NodeFactory> dependency, int compileThreadId)
             {
                 MethodWithGCInfo methodCodeNodeNeedingCode = dependency as MethodWithGCInfo;
                 if (methodCodeNodeNeedingCode == null)
@@ -735,19 +858,49 @@ namespace ILCompiler
                     Logger.Writer.WriteLine("Compiling " + methodName);
                 }
 
-                if (_printReproInstructions != null)
+                if (_nodeFactory.OptimizationFlags.PrintReproArgs)
                 {
-                    Logger.Writer.WriteLine($"Single method repro args:{_printReproInstructions(method)}");
+                    Logger.Writer.WriteLine($"Single method repro args:{GetReproInstructions(method)}");
                 }
 
                 try
                 {
                     using (PerfEventSource.StartStopEvents.JitMethodEvents())
                     {
-                        // Create only 1 CorInfoImpl per thread.
-                        // This allows SuperPMI to rely on non-reuse of handles in ObjectToHandle
-                        CorInfoImpl corInfoImpl = _corInfoImpls.GetValue(Thread.CurrentThread, thread => new CorInfoImpl(this));
+                        s_methodsCompiledPerThread++;
+                        bool createNewCorInfoImpl = false;
+
+                        if (_corInfoImpls[compileThreadId] == null)
+                            createNewCorInfoImpl = true;
+                        else
+                        {
+                            if (_parallelism == 1)
+                            {
+                                // Create only 1 CorInfoImpl if not using parallelism
+                                // This allows SuperPMI to rely on non-reuse of handles in ObjectToHandle
+                            }
+                            else
+                            {
+                                // Periodically create a new CorInfoImpl to clear out stale caches
+                                // This is done as the CorInfoImpl holds a cache of data structures visible to the JIT
+                                // Those data structures include both structures which will last for the lifetime of the compilation
+                                // process, as well as various temporary structures that would really be better off with thread lifetime.
+                                if ((s_methodsCompiledPerThread % 3000) == 0)
+                                {
+                                    createNewCorInfoImpl = true;
+                                }
+                            }
+                        }
+
+                        if (createNewCorInfoImpl)
+                            _corInfoImpls[compileThreadId] = new CorInfoImpl(this);
+
+                        CorInfoImpl corInfoImpl = _corInfoImpls[compileThreadId];
                         corInfoImpl.CompileMethod(methodCodeNodeNeedingCode, Logger);
+                        if (corInfoImpl.HasColdCode)
+                        {
+                            generatedColdCode = true;
+                        }
                     }
                 }
                 catch (TypeSystemException ex)
@@ -782,7 +935,12 @@ namespace ILCompiler
 
         public override void Dispose()
         {
-            _corInfoImpls?.Clear();
+            Array.Clear(_corInfoImpls);
+        }
+
+        public string GetReproInstructions(MethodDesc method)
+        {
+            return _printReproInstructions(method);
         }
     }
 }

@@ -22,6 +22,7 @@
 #include "assemblynative.hpp"
 #include "shimload.h"
 #include "stringliteralmap.h"
+#include "frozenobjectheap.h"
 #include "codeman.h"
 #include "comcallablewrapper.h"
 #include "eventtrace.h"
@@ -50,10 +51,6 @@
 #include "typeequivalencehash.hpp"
 
 #include "appdomain.inl"
-#include "typeparse.h"
-#include "threadpoolrequest.h"
-
-#include "nativeoverlapped.h"
 
 #ifndef TARGET_UNIX
 #include "dwreport.h"
@@ -95,12 +92,13 @@ SPTR_IMPL(SystemDomain, SystemDomain, m_pSystemDomain);
 #ifndef DACCESS_COMPILE
 
 // Base Domain Statics
-CrstStatic          BaseDomain::m_SpecialStaticsCrst;
+CrstStatic          BaseDomain::m_MethodTableExposedClassObjectCrst;
 
 int                 BaseDomain::m_iNumberOfProcessors = 0;
 
 // System Domain Statics
-GlobalStringLiteralMap* SystemDomain::m_pGlobalStringLiteralMap = NULL;
+GlobalStringLiteralMap*  SystemDomain::m_pGlobalStringLiteralMap = NULL;
+FrozenObjectHeapManager* SystemDomain::m_FrozenObjectHeapManager = NULL;
 
 DECLSPEC_ALIGN(16)
 static BYTE         g_pSystemDomainMemory[sizeof(SystemDomain)];
@@ -558,7 +556,7 @@ OBJECTHANDLE ThreadStaticHandleTable::AllocateHandles(DWORD nRequested)
 //*****************************************************************************
 void BaseDomain::Attach()
 {
-    m_SpecialStaticsCrst.Init(CrstSpecialStatics);
+    m_MethodTableExposedClassObjectCrst.Init(CrstMethodTableExposedObject);
 }
 
 BaseDomain::BaseDomain()
@@ -639,6 +637,7 @@ void BaseDomain::Init()
     m_NativeTypeLoadLock.Init(CrstInteropData, CrstFlags(CRST_REENTRANCY), TRUE);
 
     m_crstLoaderAllocatorReferences.Init(CrstLoaderAllocatorReferences);
+    m_crstStaticBoxInitLock.Init(CrstStaticBoxInit);
     // Has to switch thread to GC_NOTRIGGER while being held (see code:BaseDomain#AssemblyListLock)
     m_crstAssemblyList.Init(CrstAssemblyList, CrstFlags(
         CRST_GC_NOTRIGGER_WHEN_TAKEN | CRST_DEBUGGER_THREAD | CRST_TAKEN_DURING_SHUTDOWN));
@@ -666,6 +665,13 @@ void BaseDomain::InitVSD()
     GetLoaderAllocator()->InitVirtualCallStubManager(this);
 }
 
+void BaseDomain::InitThreadStaticBlockTypeMap()
+{
+    STANDARD_VM_CONTRACT;
+
+    m_NonGCThreadStaticBlockTypeIDMap.Init();
+    m_GCThreadStaticBlockTypeIDMap.Init();
+}
 
 void BaseDomain::ClearBinderContext()
 {
@@ -950,7 +956,6 @@ void SystemDomain::Attach()
 
     // Initialize stub managers
     PrecodeStubManager::Init();
-    DelegateInvokeStubManager::Init();
     JumpStubStubManager::Init();
     RangeSectionStubManager::Init();
     ILStubManager::Init();
@@ -961,8 +966,6 @@ void SystemDomain::Attach()
 #ifdef FEATURE_TIERED_COMPILATION
     CallCountingStubManager::Init();
 #endif
-
-    PerAppDomainTPCountList::InitAppDomainIndexList();
 
     m_SystemDomainCrst.Init(CrstSystemDomain, (CrstFlags)(CRST_REENTRANCY | CRST_TAKEN_DURING_SHUTDOWN));
     m_DelayedUnloadCrst.Init(CrstSystemDomainDelayedUnloadList, CRST_UNSAFE_COOPGC);
@@ -1036,10 +1039,7 @@ void SystemDomain::DetachEnd()
 void SystemDomain::Stop()
 {
     WRAPPER_NO_CONTRACT;
-    AppDomainIterator i(TRUE);
-
-    while (i.Next())
-        i.GetDomain()->Stop();
+    AppDomain::GetCurrentDomain()->Stop();
 }
 
 void SystemDomain::PreallocateSpecialObjects()
@@ -1196,6 +1196,24 @@ void SystemDomain::LazyInitGlobalStringLiteralMap()
     }
 }
 
+void SystemDomain::LazyInitFrozenObjectsHeap()
+{
+    CONTRACTL
+    {
+        THROWS;
+        GC_TRIGGERS;
+        MODE_ANY;
+        INJECT_FAULT(COMPlusThrowOM(););
+    }
+    CONTRACTL_END;
+
+    NewHolder<FrozenObjectHeapManager> pFoh(new FrozenObjectHeapManager());
+    if (InterlockedCompareExchangeT<FrozenObjectHeapManager*>(&m_FrozenObjectHeapManager, pFoh, nullptr) == nullptr)
+    {
+        pFoh.SuppressRelease();
+    }
+}
+
 /*static*/ void SystemDomain::EnumAllStaticGCRefs(promote_func* fn, ScanContext* sc)
 {
     CONTRACT_VOID
@@ -1205,19 +1223,6 @@ void SystemDomain::LazyInitGlobalStringLiteralMap()
         MODE_COOPERATIVE;
     }
     CONTRACT_END;
-
-    // We don't do a normal AppDomainIterator because we can't take the SystemDomain lock from
-    // here.
-    // We're only supposed to call this from a Server GC. We're walking here m_appDomainIdList
-    // m_appDomainIdList will have an AppDomain* or will be NULL. So the only danger is if we
-    // Fetch an AppDomain and then in some other thread the AppDomain is deleted.
-    //
-    // If the thread deleting the AppDomain (AppDomain::~AppDomain)was in Preemptive mode
-    // while doing SystemDomain::EnumAllStaticGCRefs we will issue a GCX_COOP(), which will wait
-    // for the GC to finish, so we are safe
-    //
-    // If the thread is in cooperative mode, it must have been suspended for the GC so a delete
-    // can't happen.
 
     _ASSERTE(GCHeapUtilities::IsGCInProgress() &&
              GCHeapUtilities::IsServerHeap()   &&
@@ -1372,16 +1377,19 @@ void SystemDomain::LoadBaseSystemClasses()
 
         g_pThreadClass = CoreLibBinder::GetClass(CLASS__THREAD);
 
-#ifdef FEATURE_COMINTEROP
-    if (g_pConfig->IsBuiltInCOMSupported())
-    {
-        g_pBaseCOMObject = CoreLibBinder::GetClass(CLASS__COM_OBJECT);
-    }
-    else
-    {
-        g_pBaseCOMObject = NULL;
-    }
-#endif
+        g_pWeakReferenceClass = CoreLibBinder::GetClass(CLASS__WEAKREFERENCE);
+        g_pWeakReferenceOfTClass = CoreLibBinder::GetClass(CLASS__WEAKREFERENCEGENERIC);
+
+    #ifdef FEATURE_COMINTEROP
+        if (g_pConfig->IsBuiltInCOMSupported())
+        {
+            g_pBaseCOMObject = CoreLibBinder::GetClass(CLASS__COM_OBJECT);
+        }
+        else
+        {
+            g_pBaseCOMObject = NULL;
+        }
+    #endif
 
         g_pIDynamicInterfaceCastableInterface = CoreLibBinder::GetClass(CLASS__IDYNAMICINTERFACECASTABLE);
 
@@ -1537,8 +1545,7 @@ bool SystemDomain::IsReflectionInvocationMethod(MethodDesc* pMeth)
         CLASS__DYNAMICMETHOD,
         CLASS__DELEGATE,
         CLASS__MULTICAST_DELEGATE,
-        CLASS__METHOD_INVOKER,
-        CLASS__CONSTRUCTOR_INVOKER,
+        CLASS__METHODBASEINVOKER,
     };
 
     static bool fInited = false;
@@ -1586,6 +1593,9 @@ Module* SystemDomain::GetCallersModule(StackCrawlMark* stackMark)
         INJECT_FAULT(COMPlusThrowOM(););
     }
     CONTRACTL_END;
+
+    if (stackMark == NULL)
+        return NULL;
 
     GCX_COOP();
 
@@ -1757,6 +1767,9 @@ void AppDomain::Create()
     // allocate a Virtual Call Stub Manager for the default domain
     pDomain->InitVSD();
 
+    // allocate a thread static block to index map
+    pDomain->InitThreadStaticBlockTypeMap();
+
     pDomain->SetStage(AppDomain::STAGE_OPEN);
     pDomain->CreateDefaultBinder();
 
@@ -1915,10 +1928,6 @@ AppDomain::AppDomain()
     m_ForceTrivialWaitOperations = false;
     m_Stage=STAGE_CREATING;
 
-#ifdef _DEBUG
-    m_dwIterHolders=0;
-#endif
-
 #ifdef FEATURE_TYPEEQUIVALENCE
     m_pTypeEquivalenceTable = NULL;
 #endif // FEATURE_TYPEEQUIVALENCE
@@ -1935,14 +1944,7 @@ AppDomain::~AppDomain()
     }
     CONTRACTL_END;
 
-
-    // release the TPIndex.  note that since TPIndex values are recycled the TPIndex
-    // can only be released once all threads in the AppDomain have exited.
-    if (GetTPIndex().m_dwIndex != 0)
-        PerAppDomainTPCountList::ResetAppDomainIndex(GetTPIndex());
-
     m_AssemblyCache.Clear();
-
 }
 
 //*****************************************************************************
@@ -1959,11 +1961,6 @@ void AppDomain::Init()
     m_pDelayedLoaderAllocatorUnloadList = NULL;
 
     SetStage( STAGE_CREATING);
-
-    //Allocate the threadpool entry before the appdomain id list. Otherwise,
-    //the thread pool list will be out of sync if insertion of id in
-    //the appdomain fails.
-    m_tpIndex = PerAppDomainTPCountList::AddNewTPIndex();
 
     BaseDomain::Init();
 
@@ -3259,7 +3256,7 @@ PVOID AppDomain::GetFriendlyNameNoSet(bool* isUtf8)
 
 #ifndef DACCESS_COMPILE
 
-BOOL AppDomain::AddFileToCache(AssemblySpec* pSpec, PEAssembly * pPEAssembly, BOOL fAllowFailure)
+BOOL AppDomain::AddFileToCache(AssemblySpec* pSpec, PEAssembly * pPEAssembly)
 {
     CONTRACTL
     {
@@ -3271,25 +3268,10 @@ BOOL AppDomain::AddFileToCache(AssemblySpec* pSpec, PEAssembly * pPEAssembly, BO
     }
     CONTRACTL_END;
 
-    {
-        GCX_PREEMP();
-        DomainCacheCrstHolderForGCCoop holder(this);
+    GCX_PREEMP();
+    DomainCacheCrstHolderForGCCoop holder(this);
 
-        // !!! suppress exceptions
-        if(!m_AssemblyCache.StorePEAssembly(pSpec, pPEAssembly) && !fAllowFailure)
-        {
-            // TODO: Disabling the below assertion as currently we experience
-            // inconsistency on resolving the Microsoft.Office.Interop.MSProject.dll
-            // This causes below assertion to fire and crashes the VS. This issue
-            // is being tracked with Dev10 Bug 658555. Brought back it when this bug
-            // is fixed.
-            // _ASSERTE(FALSE);
-
-            EEFileLoadException::Throw(pSpec, FUSION_E_CACHEFILE_FAILED, NULL);
-        }
-    }
-
-    return TRUE;
+    return m_AssemblyCache.StorePEAssembly(pSpec, pPEAssembly);
 }
 
 BOOL AppDomain::AddAssemblyToCache(AssemblySpec* pSpec, DomainAssembly *pAssembly)
@@ -3357,7 +3339,7 @@ void AppDomain::AddUnmanagedImageToCache(LPCWSTR libraryName, NATIVE_LIBRARY_HAN
         return;
     }
 
-    size_t len = (wcslen(libraryName) + 1) * sizeof(WCHAR);
+    size_t len = (u16_strlen(libraryName) + 1) * sizeof(WCHAR);
     AllocMemHolder<WCHAR> copiedName(GetLowFrequencyHeap()->AllocMem(S_SIZE_T(len)));
     memcpy(copiedName, libraryName, len);
 
@@ -3502,10 +3484,10 @@ BOOL AppDomain::PostBindResolveAssembly(AssemblySpec  *pPrePolicySpec,
             // The binder does a re-fetch of the
             // original binding spec and therefore will not cause inconsistency here.
             // For the purposes of the resolve event, failure to add to the cache still is a success.
-            AddFileToCache(pPrePolicySpec, result, TRUE /* fAllowFailure */);
+            AddFileToCache(pPrePolicySpec, result);
             if (*ppFailedSpec != pPrePolicySpec)
             {
-                AddFileToCache(pPostPolicySpec, result, TRUE /* fAllowFailure */ );
+                AddFileToCache(pPostPolicySpec, result);
             }
         }
     }
@@ -3566,7 +3548,7 @@ PEAssembly * AppDomain::BindAssemblySpec(
                     // Failure to add simply means someone else beat us to it. In that case
                     // the FindCachedFile call below (after catch block) will update result
                     // to the cached value.
-                    AddFileToCache(pSpec, result, TRUE /*fAllowFailure*/);
+                    AddFileToCache(pSpec, result);
                 }
                 else
                 {
@@ -3786,10 +3768,10 @@ void AppDomain::RaiseLoadingAssemblyEvent(DomainAssembly *pAssembly)
     {
         if (CoreLibBinder::GetField(FIELD__ASSEMBLYLOADCONTEXT__ASSEMBLY_LOAD)->GetStaticOBJECTREF() != NULL)
         {
-            struct _gc {
+            struct {
                 OBJECTREF    orThis;
             } gc;
-            ZeroMemory(&gc, sizeof(gc));
+            gc.orThis = NULL;
 
             ARG_SLOT args[1];
             GCPROTECT_BEGIN(gc);
@@ -3872,14 +3854,14 @@ AppDomain::RaiseUnhandledExceptionEvent(OBJECTREF *pThrowable, BOOL isTerminatin
     if (orDelegate == NULL)
         return FALSE;
 
-    struct _gc {
+    struct {
         OBJECTREF Delegate;
         OBJECTREF Sender;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.Delegate = orDelegate;
+    gc.Sender = NULL;
 
     GCPROTECT_BEGIN(gc);
-    gc.Delegate = orDelegate;
     if (orDelegate != NULL)
     {
         DistributeUnhandledExceptionReliably(&gc.Delegate, &gc.Sender, pThrowable, isTerminating);
@@ -3978,8 +3960,7 @@ void AppDomain::NotifyDebuggerUnload()
     if (!IsDebuggerAttached())
         return;
 
-    LOG((LF_CORDB, LL_INFO10, "AD::NDD domain %#08x %ls\n",
-         this, GetFriendlyNameForLogging()));
+    LOG((LF_CORDB, LL_INFO10, "AD::NDD domain %#08x\n", this));
 
     LOG((LF_CORDB, LL_INFO100, "AD::NDD: Interating domain bound assemblies\n"));
     AssemblyIterator i = IterateAssembliesEx((AssemblyIterationFlags)(kIncludeLoaded |  kIncludeLoading  | kIncludeExecution));
@@ -4182,13 +4163,15 @@ void DomainLocalModule::EnsureDynamicClassIndex(DWORD dwID)
     }
     CONTRACTL_END;
 
-    if (dwID < m_aDynamicEntries)
+    SIZE_T oldDynamicEntries = m_aDynamicEntries.Load();
+
+    if (dwID < oldDynamicEntries)
     {
         _ASSERTE(m_pDynamicClassTable.Load() != NULL);
         return;
     }
 
-    SIZE_T aDynamicEntries = max(16, m_aDynamicEntries.Load());
+    SIZE_T aDynamicEntries = max(16, oldDynamicEntries);
     while (aDynamicEntries <= dwID)
     {
         aDynamicEntries *= 2;
@@ -4199,7 +4182,10 @@ void DomainLocalModule::EnsureDynamicClassIndex(DWORD dwID)
         (void*)GetDomainAssembly()->GetLoaderAllocator()->GetHighFrequencyHeap()->AllocMem(
             S_SIZE_T(sizeof(DynamicClassInfo)) * S_SIZE_T(aDynamicEntries));
 
-    memcpy(pNewDynamicClassTable, m_pDynamicClassTable, sizeof(DynamicClassInfo) * m_aDynamicEntries);
+    if (oldDynamicEntries != 0)
+    {
+        memcpy((void*)pNewDynamicClassTable, m_pDynamicClassTable, sizeof(DynamicClassInfo) * oldDynamicEntries);
+    }
 
     // Note: Memory allocated on loader heap is zero filled
     // memset(pNewDynamicClassTable + m_aDynamicEntries, 0, (aDynamicEntries - m_aDynamicEntries) * sizeof(DynamicClassInfo));
@@ -4381,11 +4367,12 @@ DomainAssembly* AppDomain::RaiseTypeResolveEventThrowing(DomainAssembly* pAssemb
 
     GCX_COOP();
 
-    struct _gc {
+    struct {
         OBJECTREF AssemblyRef;
         STRINGREF str;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.AssemblyRef = NULL;
+    gc.str = NULL;
 
     GCPROTECT_BEGIN(gc);
 
@@ -4438,11 +4425,12 @@ Assembly* AppDomain::RaiseResourceResolveEvent(DomainAssembly* pAssembly, LPCSTR
 
     GCX_COOP();
 
-    struct _gc {
+    struct {
         OBJECTREF AssemblyRef;
         STRINGREF str;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.AssemblyRef = NULL;
+    gc.str = NULL;
 
     GCPROTECT_BEGIN(gc);
 
@@ -4499,11 +4487,12 @@ AppDomain::RaiseAssemblyResolveEvent(
 
     Assembly* pAssembly = NULL;
 
-    struct _gc {
+    struct {
         OBJECTREF AssemblyRef;
         STRINGREF str;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.AssemblyRef = NULL;
+    gc.str = NULL;
 
     GCPROTECT_BEGIN(gc);
     {
@@ -4638,7 +4627,7 @@ UINT32 BaseDomain::GetTypeID(PTR_MethodTable pMT) {
         PRECONDITION(pMT->GetDomain() == this);
     } CONTRACTL_END;
 
-    return m_typeIDMap.GetTypeID(pMT);
+    return m_typeIDMap.GetTypeID(pMT, true);
 }
 
 //------------------------------------------------------------------------
@@ -4666,6 +4655,57 @@ PTR_MethodTable BaseDomain::LookupType(UINT32 id) {
 
     CONSISTENCY_CHECK(CheckPointer(pMT));
     CONSISTENCY_CHECK(pMT->IsInterface());
+    return pMT;
+}
+
+//------------------------------------------------------------------------
+UINT32 BaseDomain::GetNonGCThreadStaticTypeIndex(PTR_MethodTable pMT)
+{
+    CONTRACTL {
+        THROWS;
+        GC_TRIGGERS;
+        PRECONDITION(pMT->GetDomain() == this);
+    } CONTRACTL_END;
+
+    return m_NonGCThreadStaticBlockTypeIDMap.GetTypeID(pMT, false);
+}
+
+//------------------------------------------------------------------------
+PTR_MethodTable BaseDomain::LookupNonGCThreadStaticBlockType(UINT32 id) {
+        CONTRACTL {
+        NOTHROW;
+        WRAPPER(GC_TRIGGERS);
+        CONSISTENCY_CHECK(id != TYPE_ID_THIS_CLASS);
+    } CONTRACTL_END;
+
+    PTR_MethodTable pMT = m_NonGCThreadStaticBlockTypeIDMap.LookupType(id);
+
+    CONSISTENCY_CHECK(CheckPointer(pMT));
+    return pMT;
+}
+//------------------------------------------------------------------------
+UINT32 BaseDomain::GetGCThreadStaticTypeIndex(PTR_MethodTable pMT)
+{
+    CONTRACTL {
+        THROWS;
+        GC_TRIGGERS;
+        PRECONDITION(pMT->GetDomain() == this);
+    } CONTRACTL_END;
+
+    return m_GCThreadStaticBlockTypeIDMap.GetTypeID(pMT, false);
+}
+
+//------------------------------------------------------------------------
+PTR_MethodTable BaseDomain::LookupGCThreadStaticBlockType(UINT32 id) {
+        CONTRACTL {
+        NOTHROW;
+        WRAPPER(GC_TRIGGERS);
+        CONSISTENCY_CHECK(id != TYPE_ID_THIS_CLASS);
+    } CONTRACTL_END;
+
+    PTR_MethodTable pMT = m_GCThreadStaticBlockTypeIDMap.LookupType(id);
+
+    CONSISTENCY_CHECK(CheckPointer(pMT));
     return pMT;
 }
 
@@ -5129,7 +5169,7 @@ AppDomain::EnumMemoryRegions(CLRDataEnumMemoryFlags flags, bool enumThis)
     {
         GetLoaderAllocator()->EnumMemoryRegions(flags);
     }
-    
+
     m_Assemblies.EnumMemoryRegions(flags);
     AssemblyIterator assem = IterateAssembliesEx((AssemblyIterationFlags)(kIncludeLoaded | kIncludeExecution));
     CollectibleAssemblyHolder<DomainAssembly *> pDomainAssembly;

@@ -28,6 +28,7 @@
 
 #include "gchelpers.inl"
 #include "eeprofinterfaces.inl"
+#include "frozenobjectheap.h"
 
 #ifdef FEATURE_COMINTEROP
 #include "runtimecallablewrapper.h"
@@ -341,6 +342,11 @@ void PublishObjectAndNotify(TObj* &orObject, GC_ALLOC_FLAGS flags)
 #endif // FEATURE_EVENT_TRACE
 }
 
+void PublishFrozenObject(Object*& orObject)
+{
+    PublishObjectAndNotify(orObject, GC_ALLOC_NO_FLAGS);
+}
+
 inline SIZE_T MaxArrayLength()
 {
     // Impose limits on maximum array length to prevent corner case integer overflow bugs
@@ -485,6 +491,83 @@ OBJECTREF AllocateSzArray(MethodTable* pArrayMT, INT32 cElements, GC_ALLOC_FLAGS
 
     PublishObjectAndNotify(orArray, flags);
     return ObjectToOBJECTREF((Object*)orArray);
+}
+
+OBJECTREF TryAllocateFrozenSzArray(MethodTable* pArrayMT, INT32 cElements)
+{
+    CONTRACTL{
+        THROWS;
+        GC_TRIGGERS;
+        MODE_COOPERATIVE;
+    } CONTRACTL_END;
+
+    SetTypeHandleOnThreadForAlloc(TypeHandle(pArrayMT));
+
+    _ASSERTE(pArrayMT->CheckInstanceActivated());
+    _ASSERTE(pArrayMT->GetInternalCorElementType() == ELEMENT_TYPE_SZARRAY);
+
+    // The initial validation is copied from AllocateSzArray impl
+
+    CorElementType elemType = pArrayMT->GetArrayElementType();
+
+    if (pArrayMT->ContainsPointers() && cElements > 0)
+    {
+        // For arrays with GC pointers we can only work with empty arrays
+        return NULL;
+    }
+
+    // Disallow the creation of void[] (an array of System.Void)
+    if (elemType == ELEMENT_TYPE_VOID)
+        COMPlusThrow(kArgumentException);
+
+    if (cElements < 0)
+        COMPlusThrow(kOverflowException);
+
+    if ((SIZE_T)cElements > MaxArrayLength())
+        ThrowOutOfMemoryDimensionsExceeded();
+
+    SIZE_T componentSize = pArrayMT->GetComponentSize();
+#ifdef TARGET_64BIT
+    // POSITIVE_INT32 * UINT16 + SMALL_CONST
+    // this cannot overflow on 64bit
+    size_t totalSize = cElements * componentSize + pArrayMT->GetBaseSize();
+
+#else
+    S_SIZE_T safeTotalSize = S_SIZE_T((DWORD)cElements) * S_SIZE_T((DWORD)componentSize) + S_SIZE_T((DWORD)pArrayMT->GetBaseSize());
+    if (safeTotalSize.IsOverflow())
+        ThrowOutOfMemoryDimensionsExceeded();
+
+    size_t totalSize = safeTotalSize.Value();
+#endif
+
+    // FrozenObjectHeapManager doesn't yet support objects with a custom alignment,
+    // so we give up on arrays of value types requiring 8 byte alignment on 32bit platforms.
+    if ((DATA_ALIGNMENT < sizeof(double)) && (elemType == ELEMENT_TYPE_R8))
+    {
+        return NULL;
+    }
+#ifdef FEATURE_64BIT_ALIGNMENT
+    MethodTable* pElementMT = pArrayMT->GetArrayElementTypeHandle().GetMethodTable();
+    if (pElementMT->RequiresAlign8() && pElementMT->IsValueType())
+    {
+        return NULL;
+    }
+#endif
+
+    FrozenObjectHeapManager* foh = SystemDomain::GetFrozenObjectHeapManager();
+    ArrayBase* orArray = static_cast<ArrayBase*>(
+        foh->TryAllocateObject(pArrayMT, PtrAlign(totalSize), [](Object* obj, void* elemCntPtr){
+            // Initialize newly allocated object before publish
+            static_cast<ArrayBase*>(obj)->m_NumComponents = *static_cast<DWORD*>(elemCntPtr);
+        }, &cElements));
+
+    if (orArray == nullptr)
+    {
+        // We failed to allocate on a frozen segment, fallback to AllocateSzArray
+        // E.g. if the array is too big to fit on a frozen segment
+        return NULL;
+    }
+    return ObjectToOBJECTREF(orArray);
 }
 
 void ThrowOutOfMemoryDimensionsExceeded()
@@ -838,9 +921,7 @@ STRINGREF AllocateString( DWORD cchStringLength )
 
     // Limit the maximum string size to <2GB to mitigate risk of security issues caused by 32-bit integer
     // overflows in buffer size calculations.
-    //
-    // If the value below is changed, also change AllocateUtf8String.
-    if (cchStringLength > 0x3FFFFFDF)
+    if (cchStringLength > CORINFO_String_MaxLength)
         ThrowOutOfMemory();
 
     SIZE_T totalSize = PtrAlign(StringObject::GetSize(cchStringLength));
@@ -860,6 +941,53 @@ STRINGREF AllocateString( DWORD cchStringLength )
 
     PublishObjectAndNotify(orString, flags);
     return ObjectToSTRINGREF(orString);
+
+}
+
+STRINGREF AllocateString(DWORD cchStringLength, bool preferFrozenHeap, bool* pIsFrozen)
+{
+    CONTRACTL{
+        THROWS;
+        GC_TRIGGERS;
+        MODE_COOPERATIVE;
+    } CONTRACTL_END;
+
+    _ASSERT(pIsFrozen != nullptr);
+
+    STRINGREF orStringRef = NULL;
+    StringObject* orString = nullptr;
+
+    // Limit the maximum string size to <2GB to mitigate risk of security issues caused by 32-bit integer
+    // overflows in buffer size calculations.
+    if (cchStringLength > CORINFO_String_MaxLength)
+        ThrowOutOfMemory();
+
+    const SIZE_T totalSize = PtrAlign(StringObject::GetSize(cchStringLength));
+    _ASSERTE(totalSize > cchStringLength);
+
+    if (preferFrozenHeap)
+    {
+        FrozenObjectHeapManager* foh = SystemDomain::GetFrozenObjectHeapManager();
+
+        orString = static_cast<StringObject*>(foh->TryAllocateObject(
+            g_pStringClass, totalSize, [](Object* obj, void* pStrLen) {
+                // Initialize newly allocated object before publish
+                static_cast<StringObject*>(obj)->SetStringLength(*static_cast<DWORD*>(pStrLen));
+            }, &cchStringLength));
+
+        if (orString != nullptr)
+        {
+            _ASSERTE(orString->GetBuffer()[cchStringLength] == W('\0'));
+            orStringRef = ObjectToSTRINGREF(orString);
+            *pIsFrozen = true;
+        }
+    }
+    if (orString == nullptr)
+    {
+        orStringRef = AllocateString(cchStringLength);
+        *pIsFrozen = false;
+    }
+    return orStringRef;
 }
 
 #ifdef FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
@@ -986,6 +1114,37 @@ OBJECTREF AllocateObject(MethodTable *pMT
     }
 
     return UNCHECKED_OBJECTREF_TO_OBJECTREF(oref);
+}
+
+OBJECTREF TryAllocateFrozenObject(MethodTable* pObjMT)
+{
+    CONTRACTL {
+        THROWS;
+        GC_TRIGGERS;
+        MODE_COOPERATIVE;
+        PRECONDITION(CheckPointer(pObjMT));
+        PRECONDITION(pObjMT->CheckInstanceActivated());
+    } CONTRACTL_END;
+
+    SetTypeHandleOnThreadForAlloc(TypeHandle(pObjMT));
+
+    if (pObjMT->ContainsPointers() || pObjMT->IsComObjectType())
+    {
+        return NULL;
+    }
+
+#ifdef FEATURE_64BIT_ALIGNMENT
+    if (pObjMT->RequiresAlign8())
+    {
+        // Custom alignment is not supported for frozen objects yet.
+        return NULL;
+    }
+#endif // FEATURE_64BIT_ALIGNMENT
+
+    FrozenObjectHeapManager* foh = SystemDomain::GetFrozenObjectHeapManager();
+    Object* orObject = foh->TryAllocateObject(pObjMT, PtrAlign(pObjMT->GetBaseSize()));
+
+    return ObjectToOBJECTREF(orObject);
 }
 
 //========================================================================

@@ -197,7 +197,7 @@ int32_t local_X509_NAME_get0_der(X509_NAME* x509Name, const uint8_t** pder, size
     return 1;
 }
 
-long local_OpenSSL_version_num()
+long local_OpenSSL_version_num(void)
 {
     return (long)SSLeay();
 }
@@ -340,7 +340,7 @@ int32_t local_EVP_PKEY_up_ref(EVP_PKEY* pkey)
     return CRYPTO_add_lock(&pkey->references, 1, CRYPTO_LOCK_EVP_PKEY, __FILE__, __LINE__) > 1;
 }
 
-EVP_CIPHER_CTX* local_EVP_CIPHER_CTX_new()
+EVP_CIPHER_CTX* local_EVP_CIPHER_CTX_new(void)
 {
     EVP_CIPHER_CTX* ctx = (EVP_CIPHER_CTX*)calloc(1, sizeof(EVP_CIPHER_CTX));
     return ctx;
@@ -368,7 +368,7 @@ void local_EVP_CIPHER_CTX_free(EVP_CIPHER_CTX* ctx)
     }
 }
 
-HMAC_CTX* local_HMAC_CTX_new()
+HMAC_CTX* local_HMAC_CTX_new(void)
 {
     HMAC_CTX* ctx = (HMAC_CTX*)calloc(1, sizeof(HMAC_CTX));
 
@@ -455,6 +455,14 @@ void local_RSA_get0_crt_params(const RSA* rsa, const BIGNUM** dmp1, const BIGNUM
             *iqmp = rsa->iqmp;
         }
     }
+}
+
+int local_RSA_get_multi_prime_extra_count(const RSA* rsa)
+{
+    (void)rsa;
+    // OpenSSL before 1.1 does not support multi-prime RSA, so it implicitly
+    // has zero extra primes.
+    return 0;
 }
 
 int32_t local_RSA_set0_key(RSA* rsa, BIGNUM* n, BIGNUM* e, BIGNUM* d)
@@ -824,6 +832,12 @@ void local_SSL_set_security_level(SSL* ssl, int32_t level)
     (void)level;
 }
 
+void local_SSL_CTX_set_keylog_callback(SSL_CTX *ctx, SSL_CTX_keylog_cb_func cb)
+{
+    (void)ctx;
+    (void)cb;
+}
+
 int local_BIO_up_ref(BIO *bio)
 {
     if (!bio)
@@ -905,7 +919,6 @@ int local_EVP_PKEY_public_check(EVP_PKEY_CTX* ctx)
     }
 }
 
-
 int local_ASN1_TIME_to_tm(const ASN1_TIME* s, struct tm* tm)
 {
     (void)s;
@@ -913,4 +926,25 @@ int local_ASN1_TIME_to_tm(const ASN1_TIME* s, struct tm* tm)
 
     return 0;
 }
+
+int local_BN_is_zero(const BIGNUM* a)
+{
+    return a->top == 0;
+}
+
+int local_BN_is_one(const BIGNUM* a)
+{
+    return BN_abs_is_word(a, 1) && !a->neg;
+}
+
+int local_BN_abs_is_word(const BIGNUM *a, const BN_ULONG w)
+{
+    return ((a->top == 1) && (a->d[0] == w)) || ((w == 0) && (a->top == 0));
+}
+
+int local_BN_is_odd(const BIGNUM* a)
+{
+    return (a->top > 0) && (a->d[0] & 1);
+}
+
 #endif

@@ -20,13 +20,15 @@ namespace Internal.Runtime.CompilerHelpers
                 return offset;
             }
 
+            Type structureType = Type.GetTypeFromHandle(structureTypeHandle)!;
+
             // if we can find the struct but couldn't find its field, throw Argument Exception
             if (structExists)
             {
-                throw new ArgumentException(SR.Format(SR.Argument_OffsetOfFieldNotFound, RuntimeAugments.GetLastResortString(structureTypeHandle)), nameof(fieldName));
+                throw new ArgumentException(SR.Format(SR.Argument_OffsetOfFieldNotFound, structureType), nameof(fieldName));
             }
 
-            throw new NotSupportedException(SR.Format(SR.StructMarshalling_MissingInteropData, Type.GetTypeFromHandle(structureTypeHandle)));
+            throw new NotSupportedException(SR.Format(SR.StructMarshalling_MissingInteropData, structureType));
         }
 
         public static int GetStructUnsafeStructSize(RuntimeTypeHandle structureTypeHandle)
@@ -44,7 +46,15 @@ namespace Internal.Runtime.CompilerHelpers
                 return structureTypeHandle.GetValueTypeSize();
             }
 
-            throw new NotSupportedException(SR.Format(SR.StructMarshalling_MissingInteropData, Type.GetTypeFromHandle(structureTypeHandle)));
+            // If the type is an interface or a generic type, the reason is likely that.
+            Type structureType = Type.GetTypeFromHandle(structureTypeHandle)!;
+            if (structureTypeHandle.IsInterface() || structureTypeHandle.IsGenericType())
+            {
+                throw new ArgumentException(SR.Format(SR.Arg_CannotMarshal, structureType));
+            }
+
+            // Otherwise assume we miss interop data for the type.
+            throw new NotSupportedException(SR.Format(SR.StructMarshalling_MissingInteropData, structureType));
         }
 
         public static IntPtr GetStructUnmarshalStub(RuntimeTypeHandle structureTypeHandle)

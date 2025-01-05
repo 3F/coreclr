@@ -28,6 +28,7 @@
 #include "eeconfig.h"
 #include "vars.hpp"
 #include "generics.h"
+#include "corinfo.h"
 
 #include "asmconstants.h"
 #include "virtualcallstub.h"
@@ -1028,7 +1029,7 @@ CPFH_RealFirstPassHandler(                  // ExceptionContinueSearch, etc.
 
         EEToProfilerExceptionInterfaceWrapper::ExceptionThrown(pThread);
 
-        g_exceptionCount++;
+        InterlockedIncrement((LONG*)&g_exceptionCount);
 
     } // End of case-1-or-3
 
@@ -1569,9 +1570,6 @@ EXCEPTION_HANDLER_IMPL(COMPlusFrameHandler)
         pContext ? GetIP(pContext) : 0, pContext ? GetSP(pContext) : 0, pEstablisherFrame);
 
     _ASSERTE((pContext == NULL) || ((pContext->ContextFlags & CONTEXT_CONTROL) == CONTEXT_CONTROL));
-
-    if (g_fNoExceptions)
-        return ExceptionContinueSearch; // No EH during EE shutdown.
 
     // Check if the exception represents a GCStress Marker. If it does,
     // we shouldnt record its entry in the TLS as such exceptions are
@@ -2965,6 +2963,8 @@ void ResumeAtJitEH(CrawlFrame* pCf,
         // InlinedCallFrame somewhere up the call chain that is not related to the current exception
         // handling.
 
+        // See the usages for USE_PER_FRAME_PINVOKE_INIT for more information.
+
 #ifdef DEBUG
         TADDR handlerFrameSP = pCf->GetRegisterSet()->SP;
 #endif // DEBUG
@@ -2976,10 +2976,22 @@ void ResumeAtJitEH(CrawlFrame* pCf,
                                                                      NULL /* StackwalkCacheUnwindInfo* */);
         _ASSERTE(unwindSuccess);
 
-        if (((TADDR)pThread->m_pFrame < pCf->GetRegisterSet()->SP) && ExecutionManager::IsReadyToRunCode(((InlinedCallFrame*)pThread->m_pFrame)->m_pCallerReturnAddress))
+        if (((TADDR)pThread->m_pFrame < pCf->GetRegisterSet()->SP))
         {
-            _ASSERTE((TADDR)pThread->m_pFrame >= handlerFrameSP);
-            pThread->m_pFrame->Pop(pThread);
+            TADDR returnAddress = ((InlinedCallFrame*)pThread->m_pFrame)->m_pCallerReturnAddress;
+#ifdef USE_PER_FRAME_PINVOKE_INIT
+            // If we're setting up the frame for each P/Invoke for the given platform,
+            // then we do this for all P/Invokes except ones in IL stubs.
+            if (returnAddress != NULL && !ExecutionManager::GetCodeMethodDesc(returnAddress)->IsILStub())
+#else
+            // If we aren't setting up the frame for each P/Invoke (instead setting up once per method),
+            // then ReadyToRun code is the only code using the per-P/Invoke logic.
+            if (ExecutionManager::IsReadyToRunCode(returnAddress))
+#endif
+            {
+                _ASSERTE((TADDR)pThread->m_pFrame >= handlerFrameSP);
+                pThread->m_pFrame->Pop(pThread);
+            }
         }
     }
 
@@ -3391,19 +3403,12 @@ LONG CLRNoCatchHandler(EXCEPTION_POINTERS* pExceptionInfo, PVOID pv)
     WRAPPER_NO_CONTRACT;
     STATIC_CONTRACT_ENTRY_POINT;
 
-    LONG result = EXCEPTION_CONTINUE_SEARCH;
-
-    // This function can be called during the handling of a SO
-    //BEGIN_ENTRYPOINT_VOIDRET;
-
-    result = CLRVectoredExceptionHandler(pExceptionInfo);
+    LONG result = CLRVectoredExceptionHandler(pExceptionInfo);
 
     if (EXCEPTION_EXECUTE_HANDLER == result)
     {
         result = EXCEPTION_CONTINUE_SEARCH;
     }
-
-    //END_ENTRYPOINT_VOIDRET;
 
     return result;
 #else  // !FEATURE_EH_FUNCLETS
@@ -3430,10 +3435,10 @@ AdjustContextForVirtualStub(
 
     PCODE f_IP = GetIP(pContext);
 
-    VirtualCallStubManager::StubKind sk;
+    StubCodeBlockKind sk;
     VirtualCallStubManager *pMgr = VirtualCallStubManager::FindStubManager(f_IP, &sk);
 
-    if (sk == VirtualCallStubManager::SK_DISPATCH)
+    if (sk == STUB_CODE_BLOCK_VSD_DISPATCH_STUB)
     {
         if (*PTR_WORD(f_IP) != X86_INSTR_CMP_IND_ECX_IMM32)
         {
@@ -3442,7 +3447,7 @@ AdjustContextForVirtualStub(
         }
     }
     else
-    if (sk == VirtualCallStubManager::SK_RESOLVE)
+    if (sk == STUB_CODE_BLOCK_VSD_RESOLVE_STUB)
     {
         if (*PTR_WORD(f_IP) != X86_INSTR_MOV_EAX_ECX_IND)
         {
@@ -3478,7 +3483,7 @@ AdjustContextForVirtualStub(
     // set the ESP to what it would be after the call (remove pushed arguments)
 
     size_t stackArgumentsSize;
-    if (sk == VirtualCallStubManager::SK_DISPATCH)
+    if (sk == STUB_CODE_BLOCK_VSD_DISPATCH_STUB)
     {
         ENABLE_FORBID_GC_LOADER_USE_IN_THIS_SCOPE();
 

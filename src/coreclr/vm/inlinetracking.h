@@ -26,7 +26,7 @@
 #include "corhdr.h"
 #include "shash.h"
 #include "sarray.h"
-#include "crsttypes.h"
+#include "crst.h"
 #include "daccess.h"
 #include "crossloaderallocatorhash.h"
 
@@ -149,7 +149,29 @@ public:
 typedef DPTR(InlineTrackingMap) PTR_InlineTrackingMap;
 
 
+#ifndef DACCESS_COMPILE
+// Used to walk the NGEN/R2R inlining data
+class NativeImageInliningIterator
+{
+public:
+    NativeImageInliningIterator();
 
+    HRESULT Reset(Module* pInlinerModule, MethodInModule inlinee);
+    BOOL Next();
+    MethodInModule GetMethod();
+
+private:
+    Module *m_pModule;
+    MethodInModule m_inlinee;
+    NewArrayHolder<MethodInModule> m_dynamicBuffer;
+    COUNT_T m_dynamicBufferSize;
+    COUNT_T m_dynamicAvailable;
+    COUNT_T m_currentPos;
+
+    const COUNT_T s_bufferSize = 10;
+    const COUNT_T s_failurePos = -2;
+};
+#endif // DACCESS_COMPILE
 
 // ------------------------------------ Persistance support ----------------------------------------------------------
 
@@ -172,9 +194,9 @@ typedef DPTR(InlineTrackingMap) PTR_InlineTrackingMap;
 //
 //                  It is totally possible to have more than one ZapInlineeRecords with the same key, not only due hash collision, but also due to
 //                  the fact that we create one record for each (inlinee module / inliner module) pair.
-//                  For example: we have MyModule!MyType that uses mscorlib!List<T>. Let's say List<T>.ctor got inlined into
-//                  MyType.GetAllThinds() and into List<MyType>.FindAll. In this case we'll have two InlineeRecords for mscorlib!List<T>.ctor
-//                  one for MyModule and another one for mscorlib.
+//                  For example: we have MyModule!MyType that uses System.Private.CoreLib!List<T>. Let's say List<T>.ctor got inlined into
+//                  MyType.GetAllThinds() and into List<MyType>.FindAll. In this case we'll have two InlineeRecords for System.Private.CoreLib!List<T>.ctor
+//                  one for MyModule and another one for System.Private.CoreLib.
 //                  PersistentInlineTrackingMap.GetInliners() always reads all ZapInlineeRecords as long as they have the same key, few of them filtered out
 //                  as hash collisions others provide legitimate inlining information for methods from different modules.
 //
@@ -392,7 +414,7 @@ public:
         CONTRACTL
         {
             NOTHROW;
-            GC_TRIGGERS;
+            GC_NOTRIGGER;
             CAN_TAKE_LOCK;
             MODE_ANY;
         }
@@ -413,7 +435,7 @@ public:
     static void StaticInitialize()
     {
         WRAPPER_NO_CONTRACT;
-        s_mapCrst.Init(CrstJitInlineTrackingMap);
+        s_mapCrst.Init(CrstJitInlineTrackingMap, CrstFlags(CRST_DEBUGGER_THREAD));
     }
 
     static CrstBase *GetMapCrst() { return &s_mapCrst; }

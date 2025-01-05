@@ -16,9 +16,6 @@
   #define ROUND_FLOAT              0       // Do not round intermed float expression results
   #define CPU_HAS_BYTE_REGS        0
 
-  #define CPBLK_UNROLL_LIMIT       64      // Upper bound to let the code generator to loop unroll CpBlk.
-  #define INITBLK_UNROLL_LIMIT     64      // Upper bound to let the code generator to loop unroll InitBlk.
-
 #ifdef FEATURE_SIMD
 #pragma error("SIMD Unimplemented yet LOONGARCH")
   #define ALIGN_SIMD_TYPES         1       // whether SIMD type locals are to be aligned
@@ -125,10 +122,6 @@
   // This is a float scratch register that does not conflict with the argument registers
   #define REG_SCRATCH_FLT          REG_F11
 
-  // This is a general register that can be optionally reserved for other purposes during codegen
-  #define REG_OPT_RSVD             REG_T1
-  #define RBM_OPT_RSVD             RBM_T1
-
   // Where is the exception object on entry to the handler block?
   #define REG_EXCEPTION_OBJECT     REG_A0
   #define RBM_EXCEPTION_OBJECT     RBM_A0
@@ -169,7 +162,7 @@
   #define REG_WRITE_BARRIER_SRC_BYREF    REG_T8
   #define RBM_WRITE_BARRIER_SRC_BYREF    RBM_T8
 
-  #define RBM_CALLEE_TRASH_NOGC          (RBM_T0|RBM_T1|RBM_T3|RBM_T4|RBM_T6|RBM_T7|RBM_DEFAULT_HELPER_CALL_TARGET)
+  #define RBM_CALLEE_TRASH_NOGC          (RBM_T0|RBM_T1|RBM_T3|RBM_T4|RBM_T7|RBM_DEFAULT_HELPER_CALL_TARGET)
 
   // Registers killed by CORINFO_HELP_ASSIGN_REF and CORINFO_HELP_CHECKED_ASSIGN_REF.
   #define RBM_CALLEE_TRASH_WRITEBARRIER         (RBM_WRITE_BARRIER_DST|RBM_CALLEE_TRASH_NOGC)

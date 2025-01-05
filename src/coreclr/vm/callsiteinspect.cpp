@@ -316,7 +316,7 @@ void CallsiteInspect::GetCallsiteArgs(
     }
     CONTRACTL_END;
 
-    struct _gc
+    struct
     {
         PTRARRAYREF Args;
         PTRARRAYREF ArgsTypes;
@@ -324,7 +324,11 @@ void CallsiteInspect::GetCallsiteArgs(
         OBJECTREF CurrArgType;
         OBJECTREF CurrArg;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.Args = NULL;
+    gc.ArgsTypes = NULL;
+    gc.ArgsIsByRef = NULL;
+    gc.CurrArgType = NULL;
+    gc.CurrArg = NULL;
     GCPROTECT_BEGIN(gc);
     {
         // Ensure the sig is in a known state
@@ -390,15 +394,15 @@ void CallsiteInspect::PropagateOutParametersBackToCallsite(
     }
     CONTRACTL_END;
 
-    struct _gc
+    struct
     {
         OBJECTREF RetVal;
         PTRARRAYREF OutArgs;
         OBJECTREF CurrArg;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
-    gc.OutArgs = outArgs;
     gc.RetVal = retVal;
+    gc.OutArgs = outArgs;
+    gc.CurrArg = NULL;
     GCPROTECT_BEGIN(gc);
     {
         FramedMethodFrame *frame = callsite.Frame;
@@ -429,7 +433,8 @@ void CallsiteInspect::PropagateOutParametersBackToCallsite(
                 *(ARG_SLOT *)(frame->GetReturnValuePtr()) = retVal;
             }
 #ifdef ENREGISTERED_RETURNTYPE_MAXSIZE
-            else if (argit.HasNonStandardByvalReturn())
+            else if (argit.HasNonStandardByvalReturn()
+                    && !(flags & CallsiteDetails::HResultReturn))
             {
                 // In these cases, put the pointer to the return buffer into
                 // the frame's return value slot.

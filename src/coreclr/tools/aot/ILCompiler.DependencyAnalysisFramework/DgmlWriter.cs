@@ -17,10 +17,10 @@ namespace ILCompiler.DependencyAnalysisFramework
         }
     }
 
-    internal class DgmlWriter<DependencyContextType> : IDisposable, IDependencyAnalyzerLogEdgeVisitor<DependencyContextType>, IDependencyAnalyzerLogNodeVisitor<DependencyContextType>
+    internal sealed class DgmlWriter<DependencyContextType> : IDisposable, IDependencyAnalyzerLogEdgeVisitor<DependencyContextType>, IDependencyAnalyzerLogNodeVisitor<DependencyContextType>
     {
         private XmlWriter _xmlWrite;
-        private bool _done = false;
+        private bool _done;
         private DependencyContextType _context;
 
         public DgmlWriter(XmlWriter xmlWrite, DependencyContextType context)
@@ -101,7 +101,7 @@ namespace ILCompiler.DependencyAnalysisFramework
         }
 
         private Dictionary<object, int> _nodeMappings = new Dictionary<object, int>();
-        private int _nodeNextId = 0;
+        private int _nodeNextId;
 
         private void AddNode(DependencyNodeCore<DependencyContextType> node)
         {
@@ -158,10 +158,8 @@ namespace ILCompiler.DependencyAnalysisFramework
         void IDependencyAnalyzerLogEdgeVisitor<DependencyContextType>.VisitEdge(DependencyNodeCore<DependencyContextType> nodeDepender, DependencyNodeCore<DependencyContextType> nodeDependerOther, DependencyNodeCore<DependencyContextType> nodeDependedOn, string reason)
         {
             var combinedNode = new Tuple<DependencyNodeCore<DependencyContextType>, DependencyNodeCore<DependencyContextType>>(nodeDepender, nodeDependerOther);
-            if (!_combinedNodesEdgeVisited.Contains(combinedNode))
+            if (_combinedNodesEdgeVisited.Add(combinedNode))
             {
-                _combinedNodesEdgeVisited.Add(combinedNode);
-
                 _xmlWrite.WriteStartElement("Link");
                 _xmlWrite.WriteAttributeString("Source", _nodeMappings[nodeDepender].ToString());
                 _xmlWrite.WriteAttributeString("Target", _nodeMappings[combinedNode].ToString());

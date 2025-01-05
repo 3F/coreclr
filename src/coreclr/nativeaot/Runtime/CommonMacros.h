@@ -64,6 +64,8 @@
 
 #ifndef __GCENV_BASE_INCLUDED__
 
+#include <cstdint>
+
 //
 // This macro returns val rounded up as necessary to be a multiple of alignment; alignment must be a power of 2
 //
@@ -132,38 +134,32 @@ inline bool IS_ALIGNED(T* val, uintptr_t alignment);
 #endif
 
 #ifndef __GCENV_BASE_INCLUDED__
+
+#if defined(HOST_WASM)
+#define OS_PAGE_SIZE    0x4
+#else
+#define OS_PAGE_SIZE    PalOsPageSize()
+#endif
+
 #if defined(HOST_AMD64)
 
 #define DATA_ALIGNMENT  8
-#define OS_PAGE_SIZE    0x1000
 
 #elif defined(HOST_X86)
 
 #define DATA_ALIGNMENT  4
-#ifndef OS_PAGE_SIZE
-#define OS_PAGE_SIZE    0x1000
-#endif
 
 #elif defined(HOST_ARM)
 
 #define DATA_ALIGNMENT  4
-#ifndef OS_PAGE_SIZE
-#define OS_PAGE_SIZE    0x1000
-#endif
 
 #elif defined(HOST_ARM64)
 
 #define DATA_ALIGNMENT  8
-#ifndef OS_PAGE_SIZE
-#define OS_PAGE_SIZE    0x1000
-#endif
 
 #elif defined(HOST_WASM)
 
 #define DATA_ALIGNMENT  4
-#ifndef OS_PAGE_SIZE
-#define OS_PAGE_SIZE    0x4
-#endif
 
 #else
 #error Unsupported target architecture
@@ -219,7 +215,7 @@ enum STARTUP_TIMELINE_EVENT_ID
 
 #ifdef PROFILE_STARTUP
 extern unsigned __int64 g_startupTimelineEvents[NUM_STARTUP_TIMELINE_EVENTS];
-#define STARTUP_TIMELINE_EVENT(eventid) PalQueryPerformanceCounter((LARGE_INTEGER*)&g_startupTimelineEvents[eventid]);
+#define STARTUP_TIMELINE_EVENT(eventid) g_startupTimelineEvents[eventid] = PalQueryPerformanceCounter();
 #else // PROFILE_STARTUP
 #define STARTUP_TIMELINE_EVENT(eventid)
 #endif // PROFILE_STARTUP

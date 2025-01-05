@@ -5,12 +5,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using ILCompiler;
 using Internal.TypeSystem;
+using static Internal.JitInterface.SYSTEMV_AMD64_CORINFO_STRUCT_REG_PASSING_DESCRIPTOR;
+using static Internal.JitInterface.SystemVClassificationType;
 
 namespace Internal.JitInterface
 {
-    using static SYSTEMV_AMD64_CORINFO_STRUCT_REG_PASSING_DESCRIPTOR;
-    using static SystemVClassificationType;
-
     internal static class SystemVStructClassificator
     {
         private struct SystemVStructRegisterPassingHelper
@@ -64,31 +63,6 @@ namespace Internal.JitInterface
             public int[]                       FieldSizes;
             public int[]                       FieldOffsets;
         };
-
-        private class FieldEnumerator
-        {
-            internal static IEnumerable<FieldDesc> GetInstanceFields(TypeDesc typeDesc, bool isFixedBuffer, int numIntroducedFields)
-            {
-                foreach (FieldDesc field in typeDesc.GetFields())
-                {
-                    if (field.IsStatic)
-                        continue;
-
-                    if (isFixedBuffer)
-                    {
-                        for (int i = 0; i < numIntroducedFields; i++)
-                        {
-                            yield return field;
-                        }
-                        break;
-                    }
-                    else
-                    {
-                        yield return field;
-                    }
-                }
-            }
-        }
 
         public static void GetSystemVAmd64PassStructInRegisterDescriptor(TypeDesc typeDesc, out SYSTEMV_AMD64_CORINFO_STRUCT_REG_PASSING_DESCRIPTOR structPassInRegDescPtr)
         {
@@ -167,7 +141,7 @@ namespace Internal.JitInterface
 
         // If we have a field classification already, but there is a union, we must merge the classification type of the field. Returns the
         // new, merged classification type.
-        static SystemVClassificationType ReClassifyField(SystemVClassificationType originalClassification, SystemVClassificationType newFieldClassification)
+        private static SystemVClassificationType ReClassifyField(SystemVClassificationType originalClassification, SystemVClassificationType newFieldClassification)
         {
             Debug.Assert((newFieldClassification == SystemVClassificationTypeInteger) ||
                             (newFieldClassification == SystemVClassificationTypeIntegerReference) ||
@@ -226,10 +200,7 @@ namespace Internal.JitInterface
             {
                 if (!field.IsStatic)
                 {
-                    if (firstField == null)
-                    {
-                        firstField = field;
-                    }
+                    firstField ??= field;
                     numIntroducedFields++;
                 }
             }
@@ -259,31 +230,25 @@ namespace Internal.JitInterface
 
             TypeDesc firstFieldElementType = firstField.FieldType;
             int firstFieldSize = firstFieldElementType.GetElementSize().AsInt;
+            bool hasImpliedRepeatedFields = mdType.HasImpliedRepeatedFields();
+            TypeDesc typeDescForFieldSearch = hasImpliedRepeatedFields ? new TypeWithRepeatedFields(mdType) : typeDesc;
 
-            // A fixed buffer type is always a value type that has exactly one value type field at offset 0
-            // and who's size is an exact multiple of the size of the field.
-            // It is possible that we catch a false positive with this check, but that chance is extremely slim
-            // and the user can always change their structure to something more descriptive of what they want
-            // instead of adding additional padding at the end of a one-field structure.
-            // We do this check here to save looking up the FixedBufferAttribute when loading the field
-            // from metadata.
-            bool isFixedBuffer = numIntroducedFields == 1
-                                    && firstFieldElementType.IsValueType
-                                    && firstField.Offset.AsInt == 0
-                                    && mdType.HasLayout()
-                                    && ((typeDesc.GetElementSize().AsInt % firstFieldSize) == 0);
-
-            if (isFixedBuffer)
+            if (hasImpliedRepeatedFields)
             {
                 numIntroducedFields = typeDesc.GetElementSize().AsInt / firstFieldSize;
             }
 
             int fieldIndex = 0;
-            foreach (FieldDesc field in FieldEnumerator.GetInstanceFields(typeDesc, isFixedBuffer, numIntroducedFields))
+            foreach (FieldDesc field in typeDescForFieldSearch.GetFields())
             {
+                if (field.IsStatic)
+                {
+                    continue;
+                }
+
                 Debug.Assert(fieldIndex < numIntroducedFields);
 
-                int fieldOffset = isFixedBuffer ? fieldIndex * firstFieldSize : field.Offset.AsInt;
+                int fieldOffset = field.Offset.AsInt;
                 int normalizedFieldOffset = fieldOffset + startOffsetOfStruct;
 
                 int fieldSize = field.FieldType.GetElementSize().AsInt;

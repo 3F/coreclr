@@ -73,9 +73,14 @@ namespace Internal.TypeSystem
             /// True if the type transitively has an Int128 in it or is an Int128
             /// </summary>
             public const int IsInt128OrHasInt128Fields = 0x800;
+
+            /// <summary>
+            /// True if the type transitively has a Vector<T> in it or is Vector<T>
+            /// </summary>
+            public const int IsVectorTOrHasVectorTFields = 0x1000;
         }
 
-        private class StaticBlockInfo
+        private sealed class StaticBlockInfo
         {
             public StaticsBlock NonGcStatics;
             public StaticsBlock GcStatics;
@@ -83,17 +88,15 @@ namespace Internal.TypeSystem
             public StaticsBlock ThreadGcStatics;
         }
 
-        ThreadSafeFlags _fieldLayoutFlags;
-
-        LayoutInt _instanceFieldSize;
-        LayoutInt _instanceFieldAlignment;
-        LayoutInt _instanceByteCountUnaligned;
-        LayoutInt _instanceByteAlignment;
+        private ThreadSafeFlags _fieldLayoutFlags;
+        private LayoutInt _instanceFieldSize;
+        private LayoutInt _instanceFieldAlignment;
+        private LayoutInt _instanceByteCountUnaligned;
+        private LayoutInt _instanceByteAlignment;
 
         // Information about various static blocks is rare, so we keep it out of line.
-        StaticBlockInfo _staticBlockInfo;
-
-        ValueTypeShapeCharacteristics _valueTypeShapeCharacteristics;
+        private StaticBlockInfo _staticBlockInfo;
+        private ValueTypeShapeCharacteristics _valueTypeShapeCharacteristics;
 
         /// <summary>
         /// Does a type transitively have any fields which are GC object pointers
@@ -152,6 +155,21 @@ namespace Internal.TypeSystem
                     ComputeInstanceLayout(InstanceLayoutKind.TypeAndFields);
                 }
                 return _fieldLayoutFlags.HasFlags(FieldLayoutFlags.IsInt128OrHasInt128Fields);
+            }
+        }
+
+        /// <summary>
+        /// Is a type Vector<T> or transitively have any fields of a type Vector<T>.
+        /// </summary>
+        public virtual bool IsVectorTOrHasVectorTFields
+        {
+            get
+            {
+                if (!_fieldLayoutFlags.HasFlags(FieldLayoutFlags.ComputedInstanceTypeLayout))
+                {
+                    ComputeInstanceLayout(InstanceLayoutKind.TypeAndFields);
+                }
+                return _fieldLayoutFlags.HasFlags(FieldLayoutFlags.IsVectorTOrHasVectorTFields);
             }
         }
 
@@ -452,6 +470,10 @@ namespace Internal.TypeSystem
             if (computedLayout.IsInt128OrHasInt128Fields)
             {
                 _fieldLayoutFlags.AddFlags(FieldLayoutFlags.IsInt128OrHasInt128Fields);
+            }
+            if (computedLayout.IsVectorTOrHasVectorTFields)
+            {
+                _fieldLayoutFlags.AddFlags(FieldLayoutFlags.IsVectorTOrHasVectorTFields);
             }
 
             if (computedLayout.Offsets != null)

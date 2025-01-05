@@ -7,17 +7,15 @@
 #include <memory>
 #include "windows.h"
 #include "psapi.h"
-#include "env/gcenv.structs.h"
-#include "env/gcenv.base.h"
-#include "env/gcenv.os.h"
-#include "env/gcenv.ee.h"
-#include "env/gcenv.windows.inl"
-#include "env/volatile.h"
+#include "gcenv.structs.h"
+#include "gcenv.base.h"
+#include "gcenv.os.h"
+#include "gcenv.ee.h"
+#include "gcenv.windows.inl"
+#include "volatile.h"
 #include "gcconfig.h"
 
 GCSystemInfo g_SystemInfo;
-
-static size_t g_RestrictedPhysicalMemoryLimit = (size_t)UINTPTR_MAX;
 
 static bool g_SeLockMemoryPrivilegeAcquired = false;
 
@@ -252,10 +250,6 @@ static size_t GetRestrictedPhysicalMemoryLimit()
 {
     LIMITED_METHOD_CONTRACT;
 
-    // The limit was cached already
-    if (g_RestrictedPhysicalMemoryLimit != (size_t)UINTPTR_MAX)
-        return g_RestrictedPhysicalMemoryLimit;
-
     size_t job_physical_memory_limit = (size_t)UINTPTR_MAX;
     uint64_t total_virtual = 0;
     uint64_t total_physical = 0;
@@ -337,8 +331,7 @@ exit:
         job_physical_memory_limit = 0;
     }
 
-    VolatileStore(&g_RestrictedPhysicalMemoryLimit, job_physical_memory_limit);
-    return g_RestrictedPhysicalMemoryLimit;
+    return job_physical_memory_limit;
 }
 
 // This function checks to see if GetLogicalProcessorInformation API is supported.
@@ -967,7 +960,7 @@ size_t GCToOSInterface::GetVirtualMemoryLimit()
 // Remarks:
 //  If a process runs with a restricted memory limit, it returns the limit. If there's no limit
 //  specified, it returns amount of actual physical memory.
-uint64_t GCToOSInterface::GetPhysicalMemoryLimit(bool* is_restricted)
+uint64_t GCToOSInterface::GetPhysicalMemoryLimit(bool* is_restricted, bool refresh)
 {
     if (is_restricted)
         *is_restricted = false;
@@ -1093,9 +1086,9 @@ int64_t GCToOSInterface::QueryPerformanceFrequency()
 // Get a time stamp with a low precision
 // Return:
 //  Time stamp in milliseconds
-uint32_t GCToOSInterface::GetLowPrecisionTimeStamp()
+uint64_t GCToOSInterface::GetLowPrecisionTimeStamp()
 {
-    return ::GetTickCount();
+    return ::GetTickCount64();
 }
 
 // Gets the total number of processors on the machine, not taking

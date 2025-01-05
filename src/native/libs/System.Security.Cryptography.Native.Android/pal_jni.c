@@ -86,6 +86,7 @@ jmethodID g_SSLParametersSetServerNames;
 // com/android/org/conscrypt/OpenSSLEngineImpl
 jclass    g_ConscryptOpenSSLEngineImplClass;
 jfieldID  g_ConscryptOpenSSLEngineImplSslParametersField;
+jfieldID  g_ConscryptOpenSSLEngineImplHandshakeSessionField;
 
 // com/android/org/conscrypt/SSLParametersImpl
 jclass    g_ConscryptSSLParametersImplClass;
@@ -95,6 +96,9 @@ jmethodID g_ConscryptSSLParametersImplSetUseSni;
 jclass    g_sslCtxClass;
 jmethodID g_sslCtxGetDefaultMethod;
 jmethodID g_sslCtxGetDefaultSslParamsMethod;
+
+// javax/crypto/spec/AEADBadTagException
+jclass    g_AEADBadTagExceptionClass;
 
 // javax/crypto/spec/GCMParameterSpec
 jclass    g_GCMParameterSpecClass;
@@ -423,8 +427,8 @@ jclass    g_SSLEngine;
 jmethodID g_SSLEngineBeginHandshake;
 jmethodID g_SSLEngineCloseOutbound;
 jmethodID g_SSLEngineGetApplicationProtocol;
-jmethodID g_SSLEngineGetHandshakeStatus;
 jmethodID g_SSLEngineGetHandshakeSession;
+jmethodID g_SSLEngineGetHandshakeStatus;
 jmethodID g_SSLEngineGetSession;
 jmethodID g_SSLEngineGetSSLParameters;
 jmethodID g_SSLEngineGetSupportedProtocols;
@@ -460,6 +464,7 @@ jmethodID g_SSLContextCreateSSLEngineMethodWithHostAndPort;
 jclass    g_SSLSession;
 jmethodID g_SSLSessionGetApplicationBufferSize;
 jmethodID g_SSLSessionGetCipherSuite;
+jmethodID g_SSLSessionGetLocalCertificates;
 jmethodID g_SSLSessionGetPacketBufferSize;
 jmethodID g_SSLSessionGetPeerCertificates;
 jmethodID g_SSLSessionGetProtocol;
@@ -476,6 +481,13 @@ jmethodID g_KeyAgreementGetInstance;
 jmethodID g_KeyAgreementInit;
 jmethodID g_KeyAgreementDoPhase;
 jmethodID g_KeyAgreementGenerateSecret;
+
+// javax/net/ssl/TrustManager
+jclass g_TrustManager;
+
+// net/dot/android/crypto/DotnetProxyTrustManager
+jclass    g_DotnetProxyTrustManager;
+jmethodID g_DotnetProxyTrustManagerCtor;
 
 jobject ToGRef(JNIEnv *env, jobject lref)
 {
@@ -616,6 +628,17 @@ jfieldID GetField(JNIEnv *env, bool isStatic, jclass klass, const char* name, co
     return fid;
 }
 
+jfieldID GetOptionalField(JNIEnv *env, bool isStatic, jclass klass, const char* name, const char* sig)
+{
+    jfieldID fid = isStatic ? (*env)->GetStaticFieldID(env, klass, name, sig) : (*env)->GetFieldID(env, klass, name, sig);
+    if (!fid) {
+        LOG_INFO("optional field %s %s was not found", name, sig);
+        // Failing to find an optional field causes an exception state, which we need to clear.
+        TryClearJNIExceptions(env);
+    }
+    return fid;
+}
+
 static void DetachThreadFromJNI(void* unused)
 {
     LOG_DEBUG("Detaching thread from JNI");
@@ -627,12 +650,12 @@ static pthread_key_t threadLocalEnvKey;
 static pthread_once_t threadLocalEnvInitKey = PTHREAD_ONCE_INIT;
 
 static void
-make_key()
+make_key(void)
 {
     (void) pthread_key_create(&threadLocalEnvKey, &DetachThreadFromJNI);
 }
 
-JNIEnv* GetJNIEnv()
+JNIEnv* GetJNIEnv(void)
 {
     JNIEnv *env = NULL;
     (*gJvm)->GetEnv(gJvm, (void**)&env, JNI_VERSION_1_6);
@@ -715,6 +738,8 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     g_ivPsClass =               GetClassGRef(env, "javax/crypto/spec/IvParameterSpec");
     g_ivPsCtor =                GetMethod(env, false, g_ivPsClass, "<init>", "([B)V");
 
+    g_AEADBadTagExceptionClass = GetClassGRef(env, "javax/crypto/AEADBadTagException");
+
     g_GCMParameterSpecClass =   GetClassGRef(env, "javax/crypto/spec/GCMParameterSpec");
     g_GCMParameterSpecCtor =    GetMethod(env, false, g_GCMParameterSpecClass, "<init>", "(I[B)V");
 
@@ -748,6 +773,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     if (g_ConscryptOpenSSLEngineImplClass != NULL)
     {
         g_ConscryptOpenSSLEngineImplSslParametersField =  GetField(env, false,  g_ConscryptOpenSSLEngineImplClass, "sslParameters", "Lcom/android/org/conscrypt/SSLParametersImpl;");
+        g_ConscryptOpenSSLEngineImplHandshakeSessionField = GetOptionalField(env, false,  g_ConscryptOpenSSLEngineImplClass, "handshakeSession", "Lcom/android/org/conscrypt/OpenSSLSessionImpl;");
 
         g_ConscryptSSLParametersImplClass = GetClassGRef(env, "com/android/org/conscrypt/SSLParametersImpl");
         g_ConscryptSSLParametersImplSetUseSni = GetMethod(env, false,  g_ConscryptSSLParametersImplClass, "setUseSni", "(Z)V");
@@ -1015,9 +1041,9 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     g_SSLEngineBeginHandshake =         GetMethod(env, false, g_SSLEngine, "beginHandshake", "()V");
     g_SSLEngineCloseOutbound =          GetMethod(env, false, g_SSLEngine, "closeOutbound", "()V");
     g_SSLEngineGetApplicationProtocol = GetOptionalMethod(env, false, g_SSLEngine, "getApplicationProtocol", "()Ljava/lang/String;");
+    g_SSLEngineGetHandshakeSession =    GetOptionalMethod(env, false, g_SSLEngine, "getHandshakeSession", "()Ljavax/net/ssl/SSLSession;");
     g_SSLEngineGetHandshakeStatus =     GetMethod(env, false, g_SSLEngine, "getHandshakeStatus", "()Ljavax/net/ssl/SSLEngineResult$HandshakeStatus;");
     g_SSLEngineGetSession =             GetMethod(env, false, g_SSLEngine, "getSession", "()Ljavax/net/ssl/SSLSession;");
-    g_SSLEngineGetHandshakeSession =    GetOptionalMethod(env, false, g_SSLEngine, "getHandshakeSession", "()Ljavax/net/ssl/SSLSession;");
     g_SSLEngineGetSSLParameters =       GetMethod(env, false, g_SSLEngine, "getSSLParameters", "()Ljavax/net/ssl/SSLParameters;");
     g_SSLEngineGetSupportedProtocols =  GetMethod(env, false, g_SSLEngine, "getSupportedProtocols", "()[Ljava/lang/String;");
     g_SSLEngineSetEnabledProtocols =    GetMethod(env, false, g_SSLEngine, "setEnabledProtocols", "([Ljava/lang/String;)V");
@@ -1049,6 +1075,7 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     g_SSLSession =                          GetClassGRef(env, "javax/net/ssl/SSLSession");
     g_SSLSessionGetApplicationBufferSize =  GetMethod(env, false, g_SSLSession, "getApplicationBufferSize", "()I");
     g_SSLSessionGetCipherSuite =            GetMethod(env, false, g_SSLSession, "getCipherSuite", "()Ljava/lang/String;");
+    g_SSLSessionGetLocalCertificates =      GetMethod(env, false, g_SSLSession, "getLocalCertificates", "()[Ljava/security/cert/Certificate;");
     g_SSLSessionGetPacketBufferSize =       GetMethod(env, false, g_SSLSession, "getPacketBufferSize", "()I");
     g_SSLSessionGetPeerCertificates =       GetMethod(env, false, g_SSLSession, "getPeerCertificates", "()[Ljava/security/cert/Certificate;");
     g_SSLSessionGetProtocol =               GetMethod(env, false, g_SSLSession, "getProtocol", "()Ljava/lang/String;");
@@ -1063,6 +1090,11 @@ JNI_OnLoad(JavaVM *vm, void *reserved)
     g_KeyAgreementInit           = GetMethod(env, false, g_KeyAgreementClass, "init", "(Ljava/security/Key;)V");
     g_KeyAgreementDoPhase        = GetMethod(env, false, g_KeyAgreementClass, "doPhase", "(Ljava/security/Key;Z)Ljava/security/Key;");
     g_KeyAgreementGenerateSecret = GetMethod(env, false, g_KeyAgreementClass, "generateSecret", "()[B");
+
+    g_TrustManager = GetClassGRef(env, "javax/net/ssl/TrustManager");
+
+    g_DotnetProxyTrustManager =     GetClassGRef(env, "net/dot/android/crypto/DotnetProxyTrustManager");
+    g_DotnetProxyTrustManagerCtor = GetMethod(env, false, g_DotnetProxyTrustManager, "<init>", "(J)V");
 
     return JNI_VERSION_1_6;
 }

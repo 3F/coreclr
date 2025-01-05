@@ -7,8 +7,6 @@ parameters:
   helixType: '(unspecified)'
   container: ''
   crossBuild: false
-  crossrootfsDir: ''
-  stagedBuild: false
   strategy: ''
   pool: ''
 
@@ -21,11 +19,13 @@ parameters:
   timeoutInMinutes: ''
   enableMicrobuild: ''
   gatherAssetManifests: false
+  disableComponentGovernance: false
+  templatePath: 'templates'
 
   variables: {} ## any extra variables to add to the defaults defined below
 
 jobs:
-- template: /eng/common/templates/job/job.yml
+- template: /eng/common/${{ parameters.templatePath }}/job/job.yml
   parameters:
 
     name: ${{ parameters.name }}
@@ -56,17 +56,17 @@ jobs:
     workspace:
       clean: all
 
-    ${{ if eq(parameters.osGroup, 'Linux') }}:
+    ${{ if eq(parameters.osGroup, 'linux') }}:
       agentOs: Ubuntu
-    ${{ if eq(parameters.osGroup, 'FreeBSD') }}:
+    ${{ if eq(parameters.osGroup, 'freebsd') }}:
       agentOs: FreeBSD
-    ${{ if in(parameters.osGroup, 'OSX', 'iOS') }}:
+    ${{ if in(parameters.osGroup, 'osx', 'ios') }}:
       agentOs: MacOS
     ${{ if eq(parameters.osGroup, 'windows') }}:
       agentOs: windows
 
-    # Component governance does not work on musl machines
-    ${{ if eq(parameters.osSubGroup, '_musl') }}:
+    # Disable component governance if requested or on musl machines where it does not work well
+    ${{ if or(eq(parameters.disableComponentGovernance, true), eq(parameters.osSubGroup, '_musl')) }}:
       disableComponentGovernance: true
 
     # Setting this results in the arcade job template including a step
@@ -77,15 +77,6 @@ jobs:
     variables:
     - name: buildConfig
       value: ${{ parameters.buildConfig }}
-
-    - name: archType
-      value: ${{ parameters.archType }}
-
-    - name: osGroup
-      value: ${{ parameters.osGroup }}
-
-    - name: osSubgroup
-      value: ${{ parameters.osSubgroup }}
 
     - ${{ if and(eq(variables['System.TeamProject'], 'internal'), ne(variables['Build.Reason'], 'PullRequest')) }}:
       - name: _HelixSource
@@ -107,6 +98,9 @@ jobs:
       - ${{insert}}: ${{ variable }}
 
     steps:
+    - ${{ if eq(parameters.osGroup, 'windows') }}:
+      - template: /eng/pipelines/common/templates/disable-vsupdate-or-failfast.yml
+
     - checkout: self
       clean: true
       fetchDepth: $(checkoutFetchDepth)

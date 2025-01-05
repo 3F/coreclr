@@ -57,8 +57,6 @@ ep_rt_object_free (void *ptr)
 }
 #endif /* !FEATURE_PERFTRACING_STANDALONE_PAL */
 
-static HANDLE _ipc_listen_ownership_handle = INVALID_HANDLE_VALUE;
-
 /*
  * Forward declares of all static functions.
  */
@@ -94,18 +92,6 @@ bool
 ipc_stream_close_func (void *object);
 
 static
-void
-ipc_close_ownership_handle (
-    ds_ipc_error_callback_func callback);
-
-static
-bool
-ipc_createpipe_helper (
-	DiagnosticsIpc *ipc,
-	bool ensure_pipe_creation,
-	ds_ipc_error_callback_func callback);
-
-static
 DiagnosticsIpcStream *
 ipc_stream_alloc (
 	HANDLE pipe,
@@ -122,9 +108,8 @@ ds_ipc_pal_init (void)
 }
 
 bool
-ds_ipc_pal_shutdown (ds_ipc_error_callback_func callback)
+ds_ipc_pal_shutdown (void)
 {
-    ipc_close_ownership_handle(callback);
 	return true;
 }
 
@@ -147,6 +132,7 @@ ds_ipc_alloc (
 
 	instance->overlap.hEvent = INVALID_HANDLE_VALUE;
 	instance->pipe = INVALID_HANDLE_VALUE;
+	instance->owningPipe = INVALID_HANDLE_VALUE;
 
 	if (ipc_name) {
 		characters_written = sprintf_s (
@@ -187,6 +173,27 @@ ds_ipc_free (DiagnosticsIpc *ipc)
 	ep_rt_object_free (ipc);
 }
 
+void
+ds_ipc_reset (DiagnosticsIpc *ipc)
+{
+	if (!ipc)
+		return;
+
+	if (ipc->pipe != INVALID_HANDLE_VALUE) {
+		DisconnectNamedPipe (ipc->pipe);
+		CloseHandle (ipc->pipe);
+		ipc->pipe = INVALID_HANDLE_VALUE;
+	}
+
+	if (ipc->overlap.hEvent != INVALID_HANDLE_VALUE) {
+		CloseHandle (ipc->overlap.hEvent);
+	}
+
+	memset(&ipc->overlap, 0, sizeof(OVERLAPPED)); // clear the overlapped objects state
+	ipc->overlap.hEvent = INVALID_HANDLE_VALUE;
+	ipc->is_listening = false;
+}
+
 int32_t
 ds_ipc_poll (
 	DiagnosticsIpcPollHandle *poll_handles_data,
@@ -206,6 +213,10 @@ ds_ipc_poll (
 			// SERVER
 			EP_ASSERT (poll_handles_data [i].ipc->mode == DS_IPC_CONNECTION_MODE_LISTEN);
 			handles [i] = poll_handles_data [i].ipc->overlap.hEvent;
+			if (handles [i] == INVALID_HANDLE_VALUE) {
+				// Invalid handle, wait will fail. Signal error
+				poll_handles_data [i].events = DS_IPC_POLL_EVENTS_ERR;
+			}
 		} else {
 			// CLIENT
 			bool success = true;
@@ -345,11 +356,9 @@ ep_on_error:
 	ep_exit_error_handler ();
 }
 
-static
 bool
-ipc_createpipe_helper (
+ds_ipc_listen (
 	DiagnosticsIpc *ipc,
-	bool ensure_pipe_creation,
 	ds_ipc_error_callback_func callback)
 {
 	bool result = false;
@@ -365,36 +374,24 @@ ipc_createpipe_helper (
 	if (ipc->is_listening)
 		return true;
 
-    if (!ensure_pipe_creation && _ipc_listen_ownership_handle == INVALID_HANDLE_VALUE)
-    {
-        if (callback)
-			callback ("Can't ensure we have ownership of the pipe. Disallowing creation.", -1);
-		return false;
-    }
+	EP_ASSERT (ipc->pipe == INVALID_HANDLE_VALUE);
 
-    if (ensure_pipe_creation && _ipc_listen_ownership_handle != INVALID_HANDLE_VALUE)
-    {
-        if (callback)
-			callback ("Inconsistent state - pipe sentinel already in use for listen.", -1);
-		return false;
-    }
-
-    EP_ASSERT (ipc->pipe == INVALID_HANDLE_VALUE);
-
-	const uint32_t in_buffer_size = 16 * 1024;
-	const uint32_t out_buffer_size = 16 * 1024;
-
-	DWORD creationFlags = PIPE_ACCESS_DUPLEX    // read/write access
+    DWORD creationFlags = PIPE_ACCESS_DUPLEX    // read/write access
                 | FILE_FLAG_OVERLAPPED;	        // async listening.
 
-	if (ensure_pipe_creation)
+    bool ensure_pipe_creation = ipc->owningPipe == INVALID_HANDLE_VALUE;
+    if (ensure_pipe_creation)
 	{
-		// Fail if we can't own pipe. This is the only way to ensure
-        // ownership of the pipe, and by extension the default DACL.
+		// Fail if we can't own pipe. Other than manually iterating the DACL,
+        // this is the only way to ensure ownership of the pipe via creation,
+        // and by extension that it has the default DACL.
         // Otherwise, Windows treats this as a FIFO queue get-or-create
         // request and we might end up with DACLs set by other creators.
 		creationFlags |= FILE_FLAG_FIRST_PIPE_INSTANCE;
 	}
+
+	const uint32_t in_buffer_size = 16 * 1024;
+	const uint32_t out_buffer_size = 16 * 1024;
 
 	DS_ENTER_BLOCKING_PAL_SECTION;
 	ipc->pipe = CreateNamedPipeA (
@@ -416,18 +413,15 @@ ipc_createpipe_helper (
 
     if (ensure_pipe_creation)
 	{
-	    EP_ASSERT (_ipc_listen_ownership_handle == INVALID_HANDLE_VALUE);
-
-        // The dupe and leak of the handle to ensure listen EP ownership for process duration.
+        // Dupe the handle and hang it off the IPC to ensure EP ownership for process duration.
         bool createdSentinel = DuplicateHandle(
                                     GetCurrentProcess(),
                                     ipc->pipe,
                                     GetCurrentProcess(),
-                                    &_ipc_listen_ownership_handle,
+                                    &(ipc->owningPipe),
                                     0,
                                     FALSE,
                                     DUPLICATE_SAME_ACCESS);
-
         if (!createdSentinel)
         {
             if (callback)
@@ -471,21 +465,8 @@ ep_on_exit:
 
 ep_on_error:
 	ds_ipc_close (ipc, false, callback);
-    if (ensure_pipe_creation)
-        ipc_close_ownership_handle(callback);
 	result = false;
 	ep_exit_error_handler ();
-}
-
-bool
-ds_ipc_listen (
-	DiagnosticsIpc *ipc,
-	ds_ipc_error_callback_func callback)
-{
-    // This is the first time that this listening channel is created
-    // from the perspective of the runtime. Request we ensure that we create
-    // the pipe.
-	return ipc_createpipe_helper(ipc, true, callback);
 }
 
 DiagnosticsIpcStream *
@@ -535,11 +516,11 @@ ds_ipc_accept (
 	CloseHandle (ipc->overlap.hEvent);
 	memset(&ipc->overlap, 0, sizeof(OVERLAPPED)); // clear the overlapped objects state
 	ipc->overlap.hEvent = INVALID_HANDLE_VALUE;
+    // We explicitly leave the ownership pipe handle untouched to root the IPC as long as the pipe has
+    // been bound to our process.
+	EP_ASSERT (ipc->owningPipe != INVALID_HANDLE_VALUE);
 
-    // At this point we have at least one open connection with this pipe,
-    // so this listen pipe won't recreate the named pipe and thus inherit
-    // all the necessary DACLs from the original listen call.
-	ep_raise_error_if_nok (ipc_createpipe_helper (ipc, false, callback));
+	ep_raise_error_if_nok (ds_ipc_listen (ipc, callback));
 
 ep_on_exit:
 	return stream;
@@ -607,27 +588,6 @@ ep_on_error:
 }
 
 void
-ipc_close_ownership_handle (
-    ds_ipc_error_callback_func callback)
-{
-    if (_ipc_listen_ownership_handle == INVALID_HANDLE_VALUE)
-        return;
-
-    const BOOL success_close_pipe = CloseHandle(_ipc_listen_ownership_handle);
-    if (success_close_pipe != TRUE)
-    {
-        if (callback)
-            callback ("Failed to IPC ownership sentinel handle", GetLastError());
-        // Explicitly don't reset it. Failing to close and setting it to an invalid handle
-        // leaks the handle in a way we can't diagnose anything. Leaving it rooted helps us
-        // assert state consistency.
-        return;
-    }
-
-    _ipc_listen_ownership_handle = INVALID_HANDLE_VALUE;
-}
-
-void
 ds_ipc_close (
 	DiagnosticsIpc *ipc,
 	bool is_shutdown,
@@ -635,7 +595,22 @@ ds_ipc_close (
 {
 	EP_ASSERT (ipc != NULL);
 
-	// don't attempt cleanup on shutdown and let the OS handle it.
+    // Always clean this resource - even on shutdown - since
+    // it roots resources accross embedding scenarios.
+	if (ipc->owningPipe != INVALID_HANDLE_VALUE) {
+        // Explicitly don't reset ownership if we fail to close.
+        // It gives us a diagnostic crumble.
+        if (CloseHandle(ipc->owningPipe) == TRUE) {
+            ipc->owningPipe = INVALID_HANDLE_VALUE;
+        }
+        else {
+            if (callback) {
+                callback ("Failed to IPC ownership sentinel handle", GetLastError());
+            }
+        }
+	}
+
+	// don't attempt cleanup on shutdown and let the OS handle it
 	if (is_shutdown) {
 		if (callback)
 			callback ("Closing without cleaning underlying handles", 100);

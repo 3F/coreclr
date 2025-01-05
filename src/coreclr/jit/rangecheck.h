@@ -569,9 +569,7 @@ public:
         BasicBlock*          block;
         Statement*           stmt;
         GenTreeLclVarCommon* tree;
-        GenTree*             parent;
-        Location(BasicBlock* block, Statement* stmt, GenTreeLclVarCommon* tree, GenTree* parent)
-            : block(block), stmt(stmt), tree(tree), parent(parent)
+        Location(BasicBlock* block, Statement* stmt, GenTreeLclVarCommon* tree) : block(block), stmt(stmt), tree(tree)
         {
         }
 
@@ -608,9 +606,9 @@ public:
     // TODO-CQ: This is not general enough.
     bool BetweenBounds(Range& range, GenTree* upper, int arrSize);
 
-    // Entry point to optimize range checks in the block. Assumes value numbering
+    // Entry point to optimize range checks in the method. Assumes value numbering
     // and assertion prop phases are completed.
-    void OptimizeRangeChecks();
+    bool OptimizeRangeChecks();
 
     // Given a "tree" node, check if it contains array bounds check node and
     // optimize to remove it, if possible. Requires "stmt" and "block" that
@@ -691,8 +689,8 @@ public:
     bool IsOverBudget();
 
 private:
-    // Given a lclvar use, try to find the lclvar's defining assignment and its containing block.
-    LclSsaVarDsc* GetSsaDefAsg(GenTreeLclVarCommon* lclUse);
+    // Given a lclvar use, try to find the lclvar's defining store and its containing block.
+    LclSsaVarDsc* GetSsaDefStore(GenTreeLclVarCommon* lclUse);
 
     GenTreeBoundsChk* m_pCurBndsChk;
 

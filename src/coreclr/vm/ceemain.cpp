@@ -156,7 +156,6 @@
 #include "virtualcallstub.h"
 #include "strongnameinternal.h"
 #include "syncclean.hpp"
-#include "typeparse.h"
 #include "debuginfostore.h"
 #include "finalizerthread.h"
 #include "threadsuspend.h"
@@ -170,14 +169,6 @@
 
 #include "stringarraylist.h"
 #include "stubhelpers.h"
-
-#ifdef FEATURE_STACK_SAMPLING
-#include "stacksampler.h"
-#endif
-
-#include "win32threadpool.h"
-
-#include <shlwapi.h>
 
 #ifdef FEATURE_COMINTEROP
 #include "runtimecallablewrapper.h"
@@ -289,8 +280,6 @@ HRESULT EnsureEEStarted()
     // which we will do further down.
     if (!g_fEEStarted)
     {
-        BEGIN_ENTRYPOINT_NOTHROW;
-
         // Initialize our configuration.
         CLRConfig::Initialize();
 
@@ -322,8 +311,6 @@ HRESULT EnsureEEStarted()
                 }
             }
         }
-
-        END_ENTRYPOINT_NOTHROW;
     }
     else
     {
@@ -405,6 +392,12 @@ BOOL g_singleVersionHosting;
 typedef BOOL(WINAPI* PINITIALIZECONTEXT2)(PVOID Buffer, DWORD ContextFlags, PCONTEXT* Context, PDWORD ContextLength, ULONG64 XStateCompactionMask);
 PINITIALIZECONTEXT2 g_pfnInitializeContext2 = NULL;
 
+static BOOLEAN WINAPI RtlDllShutdownInProgressFallback()
+{
+    return g_fProcessDetach;
+}
+PRTLDLLSHUTDOWNINPROGRESS g_pfnRtlDllShutdownInProgress = &RtlDllShutdownInProgressFallback;
+
 #ifdef TARGET_X86
 typedef VOID(__cdecl* PRTLRESTORECONTEXT)(PCONTEXT ContextRecord, struct _EXCEPTION_RECORD* ExceptionRecord);
 PRTLRESTORECONTEXT g_pfnRtlRestoreContext = NULL;
@@ -415,8 +408,12 @@ void InitializeOptionalWindowsAPIPointers()
     HMODULE hm = GetModuleHandleW(_T("kernel32.dll"));
     g_pfnInitializeContext2 = (PINITIALIZECONTEXT2)GetProcAddress(hm, "InitializeContext2");
 
-#ifdef TARGET_X86
     hm = GetModuleHandleW(_T("ntdll.dll"));
+    PRTLDLLSHUTDOWNINPROGRESS pfn = (PRTLDLLSHUTDOWNINPROGRESS)GetProcAddress(hm, "RtlDllShutdownInProgress");
+    if (pfn != NULL)
+        g_pfnRtlDllShutdownInProgress = pfn;
+
+#ifdef TARGET_X86
     g_pfnRtlRestoreContext = (PRTLRESTORECONTEXT)GetProcAddress(hm, "RtlRestoreContext");
 #endif //TARGET_X86
 }
@@ -627,12 +624,8 @@ void EEStartupHelper()
 
 #ifdef HOST_WINDOWS
         InitializeCrashDump();
-#endif // HOST_WINDOWS
 
-        // Initialize Numa and CPU group information
-        // Need to do this as early as possible. Used by creating object handle
-        // table inside Ref_Initialization() before GC is initialized.
-        NumaNodeInfo::InitNumaNodeInfo();
+#endif // HOST_WINDOWS
 #ifndef TARGET_UNIX
         CPUGroupInfo::EnsureInitialized();
 #endif // !TARGET_UNIX
@@ -644,7 +637,6 @@ void EEStartupHelper()
         IfFailGo(ExecutableAllocator::StaticInitialize(FatalErrorHandler));
 
         Thread::StaticInitialize();
-        ThreadpoolMgr::StaticInitialize();
 
         JITInlineTrackingMap::StaticInitialize();
         MethodDescBackpatchInfoTracker::StaticInitialize();
@@ -945,10 +937,6 @@ void EEStartupHelper()
         SystemDomain::System()->DefaultDomain()->LoadSystemAssemblies();
 
         SystemDomain::System()->DefaultDomain()->SetupSharedStatics();
-
-#ifdef FEATURE_STACK_SAMPLING
-        StackSampler::Init();
-#endif
 
 #ifdef FEATURE_MINIMETADATA_IN_TRIAGEDUMPS
         // retrieve configured max size for the mini-metadata buffer (defaults to 64KB)
@@ -1256,7 +1244,7 @@ void STDMETHODCALLTYPE EEShutDownHelper(BOOL fIsDllUnloading)
 
 #ifdef FEATURE_PERFMAP
         // Flush and close the perf map file.
-        PerfMap::Destroy();
+        PerfMap::Disable();
 #endif
 
         ceeInf.JitProcessShutdownWork();  // Do anything JIT-related that needs to happen at shutdown.
@@ -1352,9 +1340,6 @@ part2:
 
                 // Shutdown finalizer before we suspend all background threads. Otherwise we
                 // never get to finalize anything.
-
-                // No longer process exceptions
-                g_fNoExceptions = true;
 
                 // <TODO>@TODO: This does things which shouldn't occur in part 2.  Namely,
                 // calling managed dll main callbacks (AppDomain::SignalProcessDetach), and
@@ -1776,6 +1761,7 @@ struct TlsDestructionMonitor
                 thread->DetachThread(TRUE);
             }
 
+            DeleteThreadLocalMemory();
             ThreadDetaching();
         }
     }
@@ -1788,6 +1774,30 @@ thread_local TlsDestructionMonitor tls_destructionMonitor;
 void EnsureTlsDestructionMonitor()
 {
     tls_destructionMonitor.Activate();
+}
+
+#ifdef _MSC_VER
+__declspec(thread)  ThreadStaticBlockInfo t_ThreadStatics;
+#else
+__thread ThreadStaticBlockInfo t_ThreadStatics;
+#endif // _MSC_VER
+
+// Delete the thread local memory only if we the current thread
+// is the one executing this code. If we do not guard it, it will
+// end up deleting the thread local memory of the calling thread.
+void DeleteThreadLocalMemory()
+{
+    t_NonGCThreadStaticBlocksSize = 0;
+    t_GCThreadStaticBlocksSize = 0;
+
+    t_ThreadStatics.NonGCMaxThreadStaticBlocks = 0;
+    t_ThreadStatics.GCMaxThreadStaticBlocks = 0;
+
+    delete[] t_ThreadStatics.NonGCThreadStaticBlocks;
+    t_ThreadStatics.NonGCThreadStaticBlocks = nullptr;
+
+    delete[] t_ThreadStatics.GCThreadStaticBlocks;
+    t_ThreadStatics.GCThreadStaticBlocks = nullptr;
 }
 
 #ifdef DEBUGGING_SUPPORTED

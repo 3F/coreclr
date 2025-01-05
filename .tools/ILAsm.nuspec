@@ -43,7 +43,7 @@
     </description>
     <summary>IL Assembler (ILAsm) + IL Disassembler (ILDasm). The MIT License (MIT).</summary>
     <releaseNotes> changelog: https://github.com/3F/coreclr/blob/master/changelog.txt </releaseNotes>
-    <copyright>Copyright (c) .NET Foundation and Contributors; Copyright (c) 2016-2024  Denis Kuzmin &lt;x-3F@outlook.com&gt; github/3F</copyright>
+    <copyright>Copyright (c) .NET Foundation and Contributors; Copyright (c) 2016-2025  Denis Kuzmin &lt;x-3F@outlook.com&gt; github/3F</copyright>
     <tags>coreclr IL ILAsm ILDasm MSIL dotnet Assembler Disassembler compiler MITlicense native tools DllExport</tags>
   </metadata>
 </package>

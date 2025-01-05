@@ -168,7 +168,7 @@ PCODE ComPlusCall::GetStubForILStub(MethodDesc* pMD, MethodDesc** ppStubMD)
 {
     STANDARD_VM_CONTRACT;
 
-    _ASSERTE(pMD->IsComPlusCall() || pMD->IsGenericComPlusCall());
+    _ASSERTE(pMD->IsComPlusCall());
     _ASSERTE(*ppStubMD == NULL);
 
     DWORD dwStubFlags;
@@ -300,13 +300,14 @@ UINT32 CLRToCOMEventCallWorker(ComPlusMethodFrame* pFrame, ComPlusCallMethodDesc
     }
     CONTRACTL_END;
 
-    struct _gc {
+    struct {
         OBJECTREF EventProviderTypeObj;
         OBJECTREF EventProviderObj;
         OBJECTREF ThisObj;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
-
+    gc.EventProviderTypeObj = NULL;
+    gc.EventProviderObj = NULL;
+    gc.ThisObj = NULL;
 
     LOG((LF_STUBS, LL_INFO1000, "Calling CLRToCOMEventCallWorker %s::%s \n", pMD->m_pszDebugClassName, pMD->m_pszDebugMethodName));
 
@@ -363,7 +364,7 @@ UINT32 CLRToCOMEventCallWorker(ComPlusMethodFrame* pFrame, ComPlusCallMethodDesc
     return 0;
 }
 
-CallsiteDetails CreateCallsiteDetails(_In_ FramedMethodFrame *pFrame)
+static CallsiteDetails CreateCallsiteDetails(_In_ FramedMethodFrame *pFrame)
 {
     CONTRACTL
     {
@@ -441,10 +442,20 @@ CallsiteDetails CreateCallsiteDetails(_In_ FramedMethodFrame *pFrame)
         SigTypeContext::InitTypeContext(pMD, actualType, &typeContext);
     }
 
+    // If the signature is marked preserve sig, then the return
+    // is required to be an HRESULT, per COM rules. We set a flag to
+    // indicate this state to avoid issues when a C# developer defines
+    // an HRESULT in C# as a ValueClass with a single int field. This
+    // is convenient but does violate the COM ABI. Setting the flag
+    // lets us permit this convention and allow either a 4 byte primitive
+    // or the commonly used C# type "struct HResult { int Value; }".
+    if (IsMiPreserveSig(pMD->GetImplAttrs()))
+        callsiteFlags |= CallsiteDetails::HResultReturn;
+
     _ASSERTE(!signature.IsEmpty() && pModule != nullptr);
 
     // Create details
-    return CallsiteDetails{ { signature, pModule, &typeContext }, pFrame, pMD, fIsDelegate };
+    return CallsiteDetails{ { signature, pModule, &typeContext }, pFrame, pMD, fIsDelegate, callsiteFlags };
 }
 
 UINT32 CLRToCOMLateBoundWorker(
@@ -598,7 +609,14 @@ UINT32 CLRToCOMLateBoundWorker(
         OBJECTREF RetValType;
         OBJECTREF RetVal;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.MemberName = NULL;
+    gc.ItfTypeObj = NULL;
+    gc.Args = NULL;
+    gc.ArgsIsByRef = NULL;
+    gc.ArgsTypes = NULL;
+    gc.ArgsWrapperTypes = NULL;
+    gc.RetValType = NULL;
+    gc.RetVal = NULL;
     GCPROTECT_BEGIN(gc);
     {
         // Retrieve the exposed type object for the interface.

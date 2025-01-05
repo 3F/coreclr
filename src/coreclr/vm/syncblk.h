@@ -74,13 +74,9 @@ class AppDomain;
 #ifdef EnC_SUPPORTED
 class EnCSyncBlockInfo;
 typedef DPTR(EnCSyncBlockInfo) PTR_EnCSyncBlockInfo;
-
 #endif // EnC_SUPPORTED
 
 #include "eventstore.hpp"
-
-#include "eventstore.hpp"
-
 #include "synch.h"
 
 // At a negative offset from each Object is an ObjHeader.  The 'size' of the
@@ -440,6 +436,7 @@ private:
 
     ULONG           m_Recursion;
     PTR_Thread      m_HoldingThread;
+    SIZE_T          m_HoldingOSThreadId;
 
     LONG            m_TransientPrecious;
 
@@ -451,6 +448,7 @@ private:
     CLREvent        m_SemEvent;
 
     DWORD m_waiterStarvationStartTimeMs;
+    int m_emittedLockCreatedEvent;
 
     static const DWORD WaiterStarvationDurationMsBeforeStoppingPreemptingWaiters = 100;
 
@@ -461,9 +459,11 @@ private:
 // PreFAST has trouble with initializing a NULL PTR_Thread.
           m_HoldingThread(NULL),
 #endif // DACCESS_COMPILE
+          m_HoldingOSThreadId(0),
           m_TransientPrecious(0),
           m_dwSyncIndex(indx),
-          m_waiterStarvationStartTimeMs(0)
+          m_waiterStarvationStartTimeMs(0),
+          m_emittedLockCreatedEvent(0)
     {
         LIMITED_METHOD_CONTRACT;
     }
@@ -529,13 +529,14 @@ private:
     bool ShouldStopPreemptingWaiters() const;
 
 private: // friend access is required for this unsafe function
-    void InitializeToLockedWithNoWaiters(ULONG recursionLevel, PTR_Thread holdingThread)
+    void InitializeToLockedWithNoWaiters(ULONG recursionLevel, PTR_Thread holdingThread, SIZE_T holdingOSThreadId)
     {
         WRAPPER_NO_CONTRACT;
 
         m_lockState.InitializeToLockedWithNoWaiters();
         m_Recursion = recursionLevel;
         m_HoldingThread = holdingThread;
+        m_HoldingOSThreadId = holdingOSThreadId;
     }
 
 public:
@@ -626,9 +627,25 @@ public:
 #endif // !TARGET_UNIX
 
     InteropSyncBlockInfo()
+        : m_pUMEntryThunk{}
+#ifdef FEATURE_COMINTEROP
+        , m_pCCW{}
+#ifdef FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
+        , m_pCCF{}
+#endif // FEATURE_COMINTEROP_UNMANAGED_ACTIVATION
+        , m_pRCW{}
+#endif // FEATURE_COMINTEROP
+#ifdef FEATURE_COMWRAPPERS
+        , m_externalComObjectContext{}
+        , m_managedObjectComWrapperLock{}
+        , m_managedObjectComWrapperMap{}
+#endif // FEATURE_COMWRAPPERS
+#ifdef FEATURE_OBJCMARSHAL
+        , m_taggedMemory{}
+        , m_taggedAlloc{}
+#endif // FEATURE_OBJCMARSHAL
     {
         LIMITED_METHOD_CONTRACT;
-        ZeroMemory(this, sizeof(InteropSyncBlockInfo));
 
 #if defined(FEATURE_COMWRAPPERS)
         // The GC thread does enumerate these objects so add CRST_UNSAFE_COOPGC.
@@ -809,7 +826,7 @@ public:
         if (m_managedObjectComWrapperMap == NULL)
         {
             NewHolder<ManagedObjectComWrapperByIdMap> map = new ManagedObjectComWrapperByIdMap();
-            if (InterlockedCompareExchangeT((ManagedObjectComWrapperByIdMap**)&m_managedObjectComWrapperMap, (ManagedObjectComWrapperByIdMap *)map, NULL) == NULL)
+            if (InterlockedCompareExchangeT(&m_managedObjectComWrapperMap, (ManagedObjectComWrapperByIdMap *)map, NULL) == NULL)
             {
                 map.SuppressRelease();
             }
@@ -900,7 +917,7 @@ private:
     void* m_externalComObjectContext;
 
     CrstExplicitInit m_managedObjectComWrapperLock;
-    NewHolder<ManagedObjectComWrapperByIdMap> m_managedObjectComWrapperMap;
+    ManagedObjectComWrapperByIdMap* m_managedObjectComWrapperMap;
 #endif // FEATURE_COMWRAPPERS
 
 #ifdef FEATURE_OBJCMARSHAL
@@ -940,6 +957,10 @@ private:
     // Two pointers worth of bytes of the requirement for
     // the current consuming implementation so that is what
     // is being allocated.
+    // If the size of this array is changed, the NativeAOT version
+    // should be updated as well.
+    // See the TAGGED_MEMORY_SIZE_IN_POINTERS constant in
+    // ObjectiveCMarshal.NativeAot.cs
     BYTE m_taggedAlloc[2 * sizeof(void*)];
 #endif // FEATURE_OBJCMARSHAL
 };
@@ -1232,10 +1253,10 @@ class SyncBlock
     // This should ONLY be called when initializing a SyncBlock (i.e. ONLY from
     // ObjHeader::GetSyncBlock()), otherwise we'll have a race condition.
     // </NOTE>
-    void InitState(ULONG recursionLevel, PTR_Thread holdingThread)
+    void InitState(ULONG recursionLevel, PTR_Thread holdingThread, SIZE_T holdingOSThreadId)
     {
         WRAPPER_NO_CONTRACT;
-        m_Monitor.InitializeToLockedWithNoWaiters(recursionLevel, holdingThread);
+        m_Monitor.InitializeToLockedWithNoWaiters(recursionLevel, holdingThread, holdingOSThreadId);
     }
 
 #if defined(ENABLE_CONTRACTS_IMPL)
@@ -1288,7 +1309,7 @@ class SyncBlockCache
   private:
     PTR_SLink   m_pCleanupBlockList;    // list of sync blocks that need cleanup
     SLink*      m_FreeBlockList;        // list of free sync blocks
-    Crst        m_CacheLock;            // cache lock
+    CrstStatic  m_CacheLock;            // cache lock
     DWORD       m_FreeCount;            // count of active sync blocks
     DWORD       m_ActiveCount;          // number active
     SyncBlockArray *m_SyncBlocks;       // Array of new SyncBlocks.
@@ -1324,19 +1345,9 @@ class SyncBlockCache
     SPTR_DECL(SyncBlockCache, s_pSyncBlockCache);
     static SyncBlockCache*& GetSyncBlockCache();
 
-    void *operator new(size_t size, void *pInPlace)
-    {
-        LIMITED_METHOD_CONTRACT;
-        return pInPlace;
-    }
-
-    void operator delete(void *p)
-    {
-        LIMITED_METHOD_CONTRACT;
-    }
-
-    SyncBlockCache();
-    ~SyncBlockCache();
+    // Note: No constructors/destructors - global instance
+    void Init();
+    void Destroy();
 
     static void Attach();
     static void Detach();

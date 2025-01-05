@@ -1,7 +1,6 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using ILCompiler;
 using Internal.TypeSystem;
@@ -20,10 +19,7 @@ namespace Internal.JitInterface
             {
                 if (!field.IsStatic)
                 {
-                    if (firstField == null)
-                    {
-                        firstField = field;
-                    }
+                    firstField ??= field;
                     numIntroducedFields++;
                 }
             }
@@ -45,20 +41,9 @@ namespace Internal.JitInterface
             TypeDesc firstFieldElementType = firstField.FieldType;
             int firstFieldSize = firstFieldElementType.GetElementSize().AsInt;
 
-            // A fixed buffer type is always a value type that has exactly one value type field at offset 0
-            // and who's size is an exact multiple of the size of the field.
-            // It is possible that we catch a false positive with this check, but that chance is extremely slim
-            // and the user can always change their structure to something more descriptive of what they want
-            // instead of adding additional padding at the end of a one-field structure.
-            // We do this check here to save looking up the FixedBufferAttribute when loading the field
-            // from metadata.
-            bool isFixedBuffer = numIntroducedFields == 1
-                                    && firstFieldElementType.IsValueType
-                                    && firstField.Offset.AsInt == 0
-                                    && mdType.HasLayout()
-                                    && ((typeDesc.GetElementSize().AsInt % firstFieldSize) == 0);
+            bool hasImpliedRepeatedFields = mdType.HasImpliedRepeatedFields();
 
-            if (isFixedBuffer)
+            if (hasImpliedRepeatedFields)
             {
                 numIntroducedFields = typeDesc.GetElementSize().AsInt / firstFieldSize;
                 if (numIntroducedFields > 2)
@@ -95,7 +80,7 @@ namespace Internal.JitInterface
                         }
                         else if ((floatFieldFlags & (uint)StructFloatFieldInfoFlags.STRUCT_FLOAT_FIELD_FIRST) != 0)
                         {
-                            floatFieldFlags = floatFieldFlags ^ (uint)StructFloatFieldInfoFlags.STRUCT_MERGE_FIRST_SECOND_8;
+                            floatFieldFlags ^= (uint)StructFloatFieldInfoFlags.STRUCT_MERGE_FIRST_SECOND_8;
                         }
                         else
                         {

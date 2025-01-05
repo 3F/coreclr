@@ -88,3 +88,19 @@ buf must be big enough, or an out of bounds write may occur.
 Returns the number of bytes written.
 */
 PALEXPORT int32_t CryptoNative_EncodeSubjectPublicKeyInfo(EVP_PKEY* pkey, uint8_t* buf);
+
+/*
+Load a named key, via ENGINE_load_private_key, from the named engine.
+
+Returns a valid EVP_PKEY* on success, NULL on failure.
+haveEngine is 1 if OpenSSL ENGINE's are supported, otherwise 0.
+*/
+PALEXPORT EVP_PKEY* CryptoNative_LoadPrivateKeyFromEngine(const char* engineName, const char* keyName, int32_t* haveEngine);
+
+/*
+Load a named key, via ENGINE_load_public_key, from the named engine.
+
+Returns a valid EVP_PKEY* on success, NULL on failure.
+haveEngine is 1 if OpenSSL ENGINE's are supported, otherwise 0.
+*/
+PALEXPORT EVP_PKEY* CryptoNative_LoadPublicKeyFromEngine(const char* engineName, const char* keyName, int32_t* haveEngine);

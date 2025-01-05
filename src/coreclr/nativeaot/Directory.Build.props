@@ -24,10 +24,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- This prevents the default MsBuild targets from referencing System.Core.dll -->
     <AddAdditionalExplicitAssemblyReferences>false</AddAdditionalExplicitAssemblyReferences>
-    <!-- These prevent the default MsBuild targets from referencing System.dll and mscorlib.dll -->
-    <ExcludeMscorlibFacade>true</ExcludeMscorlibFacade>
     <RuntimeMetadataVersion>v4.0.30319</RuntimeMetadataVersion>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+     <!-- Override InformationalVersion during servicing as it's returned via public api. --> 
+    <InformationalVersion Condition="'$(PreReleaseVersionLabel)' == 'servicing'">$(ProductVersion)</InformationalVersion> 
+    <InformationalVersion Condition="'$(StabilizePackageVersion)' == 'true'">$(ProductVersion)</InformationalVersion> 
     <NoWarn>$(NoWarn),0419,0649,CA2249,CA1830</NoWarn>
 
     <!-- Disable nullability-related warnings -->
@@ -58,9 +58,23 @@
     <DefineConstants Condition="'$(FeatureCominterop)' == 'true'">FEATURE_COMINTEROP;$(DefineConstants)</DefineConstants>
   </PropertyGroup>
   <PropertyGroup>
-    <FeatureComWrappers>false</FeatureComWrappers>
-    <FeatureComWrappers Condition="'$(TargetsWindows)' == 'true'">true</FeatureComWrappers>
+    <FeatureComWrappers>true</FeatureComWrappers>
+    <DefineConstants Condition="'$(FeatureComWrappers)' == 'true'">FEATURE_COMWRAPPERS;$(DefineConstants)</DefineConstants>
   </PropertyGroup>
+  <PropertyGroup>
+    <FeatureObjCMarshal>false</FeatureObjCMarshal>
+    <FeatureObjCMarshal Condition="'$(TargetsOSX)' == 'true' or '$(TargetsMacCatalyst)' == 'true' or '$(TargetsiOS)' == 'true'or '$(TargetstvOS)' == 'true'">true</FeatureObjCMarshal>
+  </PropertyGroup>
+  <PropertyGroup>
+    <DefineConstants Condition="'$(FeatureObjCMarshal)' == 'true'">FEATURE_OBJCMARSHAL;$(DefineConstants)</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup>
+    <FeaturePerfTracing>true</FeaturePerfTracing>
+  </PropertyGroup>
+  <PropertyGroup>
+    <DefineConstants Condition="'$(FeaturePerfTracing)' == 'true'">FEATURE_PERFTRACING;$(DefineConstants)</DefineConstants>
+  </PropertyGroup>
+
 
   <!-- Platform specific properties -->
   <PropertyGroup Condition="'$(Platform)' == 'x64'">

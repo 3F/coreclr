@@ -417,7 +417,7 @@ public:
     // Remarks:
     //  If a process runs with a restricted memory limit, it returns the limit. If there's no limit
     //  specified, it returns amount of actual physical memory.
-    static uint64_t GetPhysicalMemoryLimit(bool* is_restricted=NULL);
+    static uint64_t GetPhysicalMemoryLimit(bool* is_restricted=NULL, bool refresh=false);
 
     // Get memory status
     // Parameters:
@@ -461,7 +461,7 @@ public:
     // Get a time stamp with a low precision
     // Return:
     //  Time stamp in milliseconds
-    static uint32_t GetLowPrecisionTimeStamp();
+    static uint64_t GetLowPrecisionTimeStamp();
 
     // Gets the total number of processors on the machine, not taking
     // into account current process affinity.

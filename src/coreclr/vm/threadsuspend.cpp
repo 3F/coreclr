@@ -250,7 +250,7 @@ Thread::SuspendThreadResult Thread::SuspendThread(BOOL fOneTryOnly, DWORD *pdwSu
             if (InterlockedOr(&m_dwForbidSuspendThread, 0))
             {
 #if defined(_DEBUG)
-                // Enable the diagnostic ::SuspendThread() if the
+                // Enable the diagnostic ClrSuspendThread() if the
                 //     DiagnosticSuspend config setting is set.
                 // This will interfere with the mutual suspend race but it's
                 //     here only for diagnostic purposes anyway
@@ -259,7 +259,7 @@ Thread::SuspendThreadResult Thread::SuspendThread(BOOL fOneTryOnly, DWORD *pdwSu
                     goto retry;
             }
 
-            dwSuspendCount = ::SuspendThread(hThread);
+            dwSuspendCount = ClrSuspendThread(hThread);
 
             //
             // Since SuspendThread is asynchronous, we now must wait for the thread to
@@ -271,7 +271,7 @@ Thread::SuspendThreadResult Thread::SuspendThread(BOOL fOneTryOnly, DWORD *pdwSu
             {
                 if (!EnsureThreadIsSuspended(hThread, this))
                 {
-                    ::ResumeThread(hThread);
+                    ClrResumeThread(hThread);
                     str = STR_Failure;
                     break;
                 }
@@ -308,7 +308,7 @@ Thread::SuspendThreadResult Thread::SuspendThread(BOOL fOneTryOnly, DWORD *pdwSu
                     ++nCnt;
                 }
 #endif // _DEBUG
-                ::ResumeThread(hThread);
+                ClrResumeThread(hThread);
 
 #if defined(_DEBUG)
                 // If the suspend diagnostics are enabled we need to spin here in order to avoid
@@ -388,10 +388,10 @@ retry:
 
         if (i64TimestampCur - i64TimestampStart >= i64TimestampTicksMax)
         {
-            dwSuspendCount = ::SuspendThread(hThread);
+            dwSuspendCount = ClrSuspendThread(hThread);
             _ASSERTE(!"It takes too long to suspend a thread");
             if ((int)dwSuspendCount >= 0)
-                ::ResumeThread(hThread);
+                ClrResumeThread(hThread);
         }
 #endif // _DEBUG
 
@@ -444,8 +444,8 @@ DWORD Thread::ResumeThread()
 
     _ASSERTE (m_ThreadHandleForResume != INVALID_HANDLE_VALUE);
 
-    //DWORD res = ::ResumeThread(GetThreadHandle());
-    DWORD res = ::ResumeThread(m_ThreadHandleForResume);
+    //DWORD res = ClrResumeThread(GetThreadHandle());
+    DWORD res = ClrResumeThread(m_ThreadHandleForResume);
     _ASSERTE (res != 0 && "Thread is not previously suspended");
 #ifdef _DEBUG_IMPL
     _ASSERTE (!m_Creator.IsCurrentThread());
@@ -1970,14 +1970,14 @@ CONTEXT* AllocateOSContextHelper(BYTE** contextBuffer)
     // Determine if the processor supports AVX so we could
     // retrieve extended registers
     DWORD64 FeatureMask = GetEnabledXStateFeatures();
-    if ((FeatureMask & XSTATE_MASK_AVX) != 0)
+    if ((FeatureMask & (XSTATE_MASK_AVX | XSTATE_MASK_AVX512)) != 0)
     {
         context = context | CONTEXT_XSTATE;
     }
 
     // Retrieve contextSize by passing NULL for Buffer
     DWORD contextSize = 0;
-    ULONG64 xStateCompactionMask = XSTATE_MASK_LEGACY | XSTATE_MASK_AVX;
+    ULONG64 xStateCompactionMask = XSTATE_MASK_LEGACY | XSTATE_MASK_AVX | XSTATE_MASK_MPX | XSTATE_MASK_AVX512;
     // The initialize call should fail but return contextSize
     BOOL success = g_pfnInitializeContext2 ?
         g_pfnInitializeContext2(NULL, context, NULL, &contextSize, xStateCompactionMask) :
@@ -2404,7 +2404,7 @@ void Thread::RareEnablePreemptiveGC()
 
         }
     }
-    STRESS_LOG0(LF_SYNC, LL_INFO100000, " RareEnablePreemptiveGC: leaving.\n");
+    STRESS_LOG0(LF_SYNC, LL_INFO100000, "RareEnablePreemptiveGC: leaving.\n");
 }
 
 // Called when we are passing through a safe point in CommonTripThread or
@@ -2764,6 +2764,7 @@ void __stdcall Thread::RedirectedHandledJITCase(RedirectReason reason)
     LOG((LF_SYNC, LL_INFO1000, "Resuming execution with RtlRestoreContext\n"));
     SetLastError(dwLastError); // END_PRESERVE_LAST_ERROR
 
+    __asan_handle_no_return();
 #ifdef TARGET_X86
     g_pfnRtlRestoreContext(pCtx, NULL);
 #else
@@ -2899,7 +2900,7 @@ BOOL Thread::RedirectThreadAtHandledJITCase(PFN_REDIRECTTARGET pTgt)
     // This should not normally fail.
     // The system silently ignores any feature specified in the FeatureMask
     // which is not enabled on the processor.
-    SetXStateFeaturesMask(pCtx, XSTATE_MASK_AVX);
+    SetXStateFeaturesMask(pCtx, (XSTATE_MASK_AVX | XSTATE_MASK_AVX512));
 #endif //defined(TARGET_X86) || defined(TARGET_AMD64)
 
     // Make sure we specify CONTEXT_EXCEPTION_REQUEST to detect "trap frame reporting".
@@ -3035,7 +3036,7 @@ BOOL Thread::RedirectCurrentThreadAtHandledJITCase(PFN_REDIRECTTARGET pTgt, CONT
     // Get may return 0 if no XState is set, which Set would not accept.
     if (srcFeatures != 0)
     {
-        success = SetXStateFeaturesMask(pCurrentThreadCtx, srcFeatures & XSTATE_MASK_AVX);
+        success = SetXStateFeaturesMask(pCurrentThreadCtx, srcFeatures & (XSTATE_MASK_AVX | XSTATE_MASK_AVX512));
         _ASSERTE(success);
         if (!success)
             return FALSE;
@@ -3394,6 +3395,12 @@ void ThreadSuspend::SuspendRuntime(ThreadSuspend::SUSPEND_REASON reason)
                 continue;
             }
 
+            if (thread->IsGCSpecial())
+            {
+                // GC threads can not be forced to run preemptively, so we will not try.
+                continue;
+            }
+
             // this is an interesting thread in cooperative mode, let's guide it to preemptive
 
             if (!Thread::UseContextBasedThreadRedirection())
@@ -3716,7 +3723,7 @@ void Thread::CommitGCStressInstructionUpdate()
         else
             *(DWORD*)destCodeWriterHolder.GetRW() = *(DWORD*)pbSrcCode;
 
-#elif defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#elif defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
 
         *(DWORD*)destCodeWriterHolder.GetRW() = *(DWORD*)pbSrcCode;
 
@@ -3925,6 +3932,7 @@ ThrowControlForThread(
                 _ASSERTE(!"Should not reach here");
             }
 #else // FEATURE_EH_FUNCLETS
+            __asan_handle_no_return();
             RtlRestoreContext(pThread->m_OSContext, NULL);
 #endif // !FEATURE_EH_FUNCLETS
             _ASSERTE(!"Should not reach here");
@@ -3948,7 +3956,9 @@ ThrowControlForThread(
     STRESS_LOG0(LF_SYNC, LL_INFO100, "ThrowControlForThread Aborting\n");
 
     // Here we raise an exception.
+    INSTALL_MANAGED_EXCEPTION_DISPATCHER
     RaiseComPlusException();
+    UNINSTALL_MANAGED_EXCEPTION_DISPATCHER
 }
 
 #if defined(FEATURE_HIJACK) && !defined(TARGET_UNIX)
@@ -3996,8 +4006,8 @@ BOOL Thread::HandleJITCaseForAbort()
     return FALSE;
 }
 
-// Threads suspended by the Win32 ::SuspendThread() are resumed in two ways.  If we
-// suspended them in error, they are resumed via the Win32 ::ResumeThread().  But if
+// Threads suspended by ClrSuspendThread() are resumed in two ways.  If we
+// suspended them in error, they are resumed via ClrResumeThread().  But if
 // this is the HandledJIT() case and the thread is in fully interruptible code, we
 // can resume them under special control.  ResumeRuntime and UserResume are cases
 // of this.
@@ -4875,7 +4885,7 @@ StackWalkAction SWCB_GetExecutionState(CrawlFrame *pCF, VOID *pData)
                     {
                          // We already have the caller context available at this point
                         _ASSERTE(pRDT->IsCallerContextValid);
-#if defined(TARGET_ARM) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64)
+#if defined(TARGET_ARM) || defined(TARGET_ARM64) || defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
 
                         // Why do we use CallerContextPointers below?
                         //
@@ -4894,7 +4904,7 @@ StackWalkAction SWCB_GetExecutionState(CrawlFrame *pCF, VOID *pData)
                         // Note that the JIT always pushes LR even for leaf methods to make hijacking
                         // work for them. See comment in code:Compiler::genPushCalleeSavedRegisters.
 
-#if defined(TARGET_LOONGARCH64)
+#if defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
                         if (pRDT->pCallerContextPointers->Ra == &pRDT->pContext->Ra)
 #else
                         if(pRDT->pCallerContextPointers->Lr == &pRDT->pContext->Lr)
@@ -4933,7 +4943,7 @@ StackWalkAction SWCB_GetExecutionState(CrawlFrame *pCF, VOID *pData)
                             // This is the case of IP being inside the method body and LR is
                             // pushed on the stack. We get it to determine the return address
                             // in the caller of the current non-interruptible frame.
-#if defined(TARGET_LOONGARCH64)
+#if defined(TARGET_LOONGARCH64) || defined(TARGET_RISCV64)
                             pES->m_ppvRetAddrPtr = (void **) pRDT->pCallerContextPointers->Ra;
 #else
                             pES->m_ppvRetAddrPtr = (void **) pRDT->pCallerContextPointers->Lr;

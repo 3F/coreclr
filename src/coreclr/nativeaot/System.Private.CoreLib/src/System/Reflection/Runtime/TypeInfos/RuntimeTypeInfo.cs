@@ -32,7 +32,6 @@ namespace System.Reflection.Runtime.TypeInfos
     //   - Overrides many "NotImplemented" members in TypeInfo with abstracts so failure to implement
     //     shows up as build error.
     //
-    [DebuggerDisplay("{_debugName}")]
     internal abstract partial class RuntimeTypeInfo : RuntimeType, ICloneable
     {
         protected RuntimeTypeInfo()
@@ -188,7 +187,7 @@ namespace System.Reflection.Runtime.TypeInfos
             return defaultMemberName != null ? GetMember(defaultMemberName) : Array.Empty<MemberInfo>();
         }
 
-        public sealed override InterfaceMapping GetInterfaceMap([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type ifaceType)
+        public sealed override InterfaceMapping GetInterfaceMap([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type interfaceType)
         {
             // restrictions and known limitations compared to CoreCLR:
             // - only interface.GetMethods() reflection visible interface methods are returned
@@ -199,27 +198,26 @@ namespace System.Reflection.Runtime.TypeInfos
             if (IsGenericParameter)
                 throw new InvalidOperationException(SR.Arg_GenericParameter);
 
-            if (ifaceType is null)
-                throw new ArgumentNullException(nameof(ifaceType));
+            ArgumentNullException.ThrowIfNull(interfaceType);
 
-            if (!(ifaceType is RuntimeTypeInfo))
-                throw new ArgumentException(SR.Argument_MustBeRuntimeType, nameof(ifaceType));
+            if (!(interfaceType is RuntimeTypeInfo))
+                throw new ArgumentException(SR.Argument_MustBeRuntimeType, nameof(interfaceType));
 
-            RuntimeTypeHandle interfaceTypeHandle = ifaceType.TypeHandle;
+            RuntimeTypeHandle interfaceTypeHandle = interfaceType.TypeHandle;
 
             ReflectionCoreExecution.ExecutionEnvironment.VerifyInterfaceIsImplemented(TypeHandle, interfaceTypeHandle);
-            Debug.Assert(ifaceType.IsInterface);
+            Debug.Assert(interfaceType.IsInterface);
             Debug.Assert(!IsInterface);
 
             // SZArrays implement the methods on IList`1, IEnumerable`1, and ICollection`1 with
             // runtime magic. We don't have accurate interface maps for them.
-            if (IsSZArray && ifaceType.IsGenericType)
+            if (IsSZArray && interfaceType.IsGenericType)
                 throw new ArgumentException(SR.Argument_ArrayGetInterfaceMap);
 
-            ReflectionCoreExecution.ExecutionEnvironment.GetInterfaceMap(this, ifaceType, out MethodInfo[] interfaceMethods, out MethodInfo[] targetMethods);
+            ReflectionCoreExecution.ExecutionEnvironment.GetInterfaceMap(this, interfaceType, out MethodInfo[] interfaceMethods, out MethodInfo[] targetMethods);
 
             InterfaceMapping im;
-            im.InterfaceType = ifaceType;
+            im.InterfaceType = interfaceType;
             im.TargetType = this;
             im.InterfaceMethods = interfaceMethods;
             im.TargetMethods = targetMethods;
@@ -237,6 +235,30 @@ namespace System.Reflection.Runtime.TypeInfos
             {
                 return Guid.Empty;
             }
+        }
+
+        //
+        // Left unsealed so that RuntimeFunctionPointerInfo can override.
+        //
+        public override Type[] GetFunctionPointerCallingConventions()
+        {
+            throw new InvalidOperationException(SR.InvalidOperation_NotFunctionPointer);
+        }
+
+        //
+        // Left unsealed so that RuntimeFunctionPointerInfo can override.
+        //
+        public override Type[] GetFunctionPointerParameterTypes()
+        {
+            throw new InvalidOperationException(SR.InvalidOperation_NotFunctionPointer);
+        }
+
+        //
+        // Left unsealed so that RuntimeFunctionPointerInfo can override.
+        //
+        public override Type GetFunctionPointerReturnType()
+        {
+            throw new InvalidOperationException(SR.InvalidOperation_NotFunctionPointer);
         }
 
         public abstract override bool HasSameMetadataDefinitionAs(MemberInfo other);
@@ -276,7 +298,7 @@ namespace System.Reflection.Runtime.TypeInfos
                         result.AddRange(baseType.GetInterfaces());
                     foreach (QTypeDefRefOrSpec directlyImplementedInterface in this.TypeRefDefOrSpecsForDirectlyImplementedInterfaces)
                     {
-                        Type ifc = directlyImplementedInterface.Resolve(typeContext);
+                        RuntimeTypeInfo ifc = directlyImplementedInterface.Resolve(typeContext);
                         if (result.Contains(ifc))
                             continue;
                         result.Add(ifc);
@@ -440,8 +462,7 @@ namespace System.Reflection.Runtime.TypeInfos
         [RequiresUnreferencedCode("If some of the generic arguments are annotated (either with DynamicallyAccessedMembersAttribute, or generic constraints), trimming can't validate that the requirements of those annotations are met.")]
         public sealed override Type MakeGenericType(params Type[] typeArguments)
         {
-            if (typeArguments == null)
-                throw new ArgumentNullException(nameof(typeArguments));
+            ArgumentNullException.ThrowIfNull(typeArguments);
 
             if (!IsGenericTypeDefinition)
                 throw new InvalidOperationException(SR.Format(SR.Arg_NotGenericTypeDefinition, this));
@@ -480,7 +501,7 @@ namespace System.Reflection.Runtime.TypeInfos
 
                 // Desktop compatibility: Treat generic type definitions as a constructed generic type using the generic parameters as type arguments.
                 if (runtimeTypeArgument.IsGenericTypeDefinition)
-                    runtimeTypeArgument = runtimeTypeArguments[i] = runtimeTypeArgument.GetConstructedGenericType(runtimeTypeArgument.RuntimeGenericTypeParameters);
+                    runtimeTypeArgument = runtimeTypeArguments[i] = runtimeTypeArgument.GetConstructedGenericTypeNoConstraintCheck(runtimeTypeArgument.RuntimeGenericTypeParameters);
 
                 if (runtimeTypeArgument.IsByRefLike)
                     throw new TypeLoadException(SR.CannotUseByRefLikeTypeInInstantiation);
@@ -709,21 +730,16 @@ namespace System.Reflection.Runtime.TypeInfos
         // Note: This can be (and is) called multiple times. We do not do this work in the constructor as calling ToString()
         // in the constructor causes some serious recursion issues.
         //
-        internal void EstablishDebugName()
+        internal RuntimeTypeInfo EstablishDebugName()
         {
-            bool populateDebugNames = DeveloperExperienceState.DeveloperExperienceModeEnabled;
 #if DEBUG
-            populateDebugNames = true;
-#endif
-            if (!populateDebugNames)
-                return;
-
             if (_debugName == null)
             {
                 _debugName = "Constructing..."; // Protect against any inadvertent reentrancy.
                 _debugName = ToString() ?? "";
             }
-            return;
+#endif
+            return this;
         }
 
         //
@@ -743,11 +759,7 @@ namespace System.Reflection.Runtime.TypeInfos
         // To implement this with the least amount of code smell, we'll implement the idealized version of BaseType here
         // and make the special-case adjustment in the public version of BaseType.
         //
-        // If you override this method, there is no need to overrride TypeRefDefOrSpecForBaseType.
-        //
-        // This method is left unsealed so that RuntimeCLSIDTypeInfo can override.
-        //
-        internal virtual Type BaseTypeWithoutTheGenericParameterQuirk
+        internal Type BaseTypeWithoutTheGenericParameterQuirk
         {
             get
             {
@@ -792,10 +804,37 @@ namespace System.Reflection.Runtime.TypeInfos
         {
             get
             {
+                // We have a very specialized helper to get the base type.
+                // It is not a general purpose base type, but works for the cases we care about.
+                // This avoids bringing in full type resolution support including constructing
+                // generic types.
+                static Type GetLimitedBaseType(RuntimeTypeInfo thisType)
+                {
+                    // If we have a type handle, just use that
+                    RuntimeTypeHandle typeHandle = thisType.InternalTypeHandleIfAvailable;
+                    if (!typeHandle.IsNull())
+                    {
+                        RuntimeTypeHandle baseTypeHandle;
+                        if (ReflectionCoreExecution.ExecutionEnvironment.TryGetBaseType(typeHandle, out baseTypeHandle))
+                            return Type.GetTypeFromHandle(baseTypeHandle);
+                    }
+
+                    // Metadata fallback. We only care about very limited subset of all possibilities.
+                    // The cases that we're interested in will all be definitions, and won't be generic.
+                    Type? baseType = null;
+                    QTypeDefRefOrSpec baseTypeDefOrRefOrSpec = thisType.TypeRefDefOrSpecForBaseType;
+                    if (baseTypeDefOrRefOrSpec.IsTypeDefinition)
+                    {
+                        QTypeDefinition baseTypeDef = baseTypeDefOrRefOrSpec.ToTypeDefinition();
+                        baseType = baseTypeDef.Resolve();
+                    }
+                    return baseType;
+                }
+
                 if (_lazyClassification == 0)
                 {
                     TypeClassification classification = TypeClassification.Computed;
-                    Type baseType = this.BaseType;
+                    Type baseType = GetLimitedBaseType(this);
                     if (baseType != null)
                     {
                         Type enumType = typeof(Enum);
@@ -808,14 +847,8 @@ namespace System.Reflection.Runtime.TypeInfos
                         if (baseType == valueType && this != enumType)
                         {
                             classification |= TypeClassification.IsValueType;
-                            foreach (Type primitiveType in ExecutionDomain.PrimitiveTypes)
-                            {
-                                if (this.Equals(primitiveType))
-                                {
-                                    classification |= TypeClassification.IsPrimitive;
-                                    break;
-                                }
-                            }
+                            if (ExecutionDomain.IsPrimitiveType(this))
+                                classification |= TypeClassification.IsPrimitive;
                         }
                     }
                     _lazyClassification = classification;
@@ -841,6 +874,8 @@ namespace System.Reflection.Runtime.TypeInfos
 
         private volatile TypeClassification _lazyClassification;
 
+#if DEBUG
         private string _debugName;
+#endif
     }
 }

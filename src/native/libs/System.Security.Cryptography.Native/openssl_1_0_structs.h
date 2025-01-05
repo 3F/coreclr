@@ -184,3 +184,12 @@ struct bio_st
     const void*_ignored11;
     int references;
 };
+
+struct bignum_st
+{
+    BN_ULONG *d;
+    int top;
+    int dmax;
+    int neg;
+    int flags;
+};

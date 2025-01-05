@@ -17,7 +17,6 @@
 #include "holder.h"
 #include "Crst.h"
 #include "event.h"
-#include "RWLock.h"
 #include "threadstore.h"
 #include "threadstore.inl"
 #include "thread.inl"
@@ -260,8 +259,11 @@ void Thread::Construct()
     // alloc_context ever needs different initialization, a matching change to the tls_CurrentThread
     // static initialization will need to be made.
 
-    m_uPalThreadIdForLogging = PalGetCurrentThreadIdForLogging();
-    m_threadId.SetToCurrentThread();
+    m_pTransitionFrame = TOP_OF_STACK_MARKER;
+    m_pDeferredTransitionFrame = TOP_OF_STACK_MARKER;
+    m_hPalThread = INVALID_HANDLE_VALUE;
+
+    m_threadId = PalGetCurrentOSThreadId();
 
     HANDLE curProcessPseudo = PalGetCurrentProcess();
     HANDLE curThreadPseudo  = PalGetCurrentThread();
@@ -275,8 +277,6 @@ void Thread::Construct()
     if (!PalGetMaximumStackBounds(&m_pStackLow, &m_pStackHigh))
         RhFailFast();
 
-    m_pTEB = PalNtCurrentTeb();
-
 #ifdef STRESS_LOG
     if (StressLog::StressLogOn(~0u, 0))
         m_pThreadStressLog = StressLog::CreateThreadStressLog(this);
@@ -284,8 +284,8 @@ void Thread::Construct()
 
     // Everything else should be initialized to 0 via the static initialization of tls_CurrentThread.
 
-    ASSERT(m_pThreadLocalModuleStatics == NULL);
-    ASSERT(m_numThreadLocalModuleStatics == 0);
+    ASSERT(m_pThreadLocalStatics == NULL);
+    ASSERT(m_pInlinedThreadLocalStatics == NULL);
 
     ASSERT(m_pGCFrameRegistrations == NULL);
 
@@ -305,14 +305,12 @@ bool Thread::IsInitialized()
 // -----------------------------------------------------------------------------------------------------------
 // GC support APIs - do not use except from GC itself
 //
-void Thread::SetGCSpecial(bool isGCSpecial)
+void Thread::SetGCSpecial()
 {
     if (!IsInitialized())
         Construct();
-    if (isGCSpecial)
-        SetState(TSF_IsGcSpecialThread);
-    else
-        ClearState(TSF_IsGcSpecialThread);
+
+    SetState(TSF_IsGcSpecialThread);
 }
 
 bool Thread::IsGCSpecial()
@@ -330,22 +328,13 @@ bool Thread::CatchAtSafePoint()
 
 uint64_t Thread::GetPalThreadIdForLogging()
 {
-    return m_uPalThreadIdForLogging;
-}
-
-bool Thread::IsCurrentThread()
-{
-    return m_threadId.IsCurrentThread();
+    return m_threadId;
 }
 
 void Thread::Detach()
 {
-    // Thread::Destroy is called when the thread's "home" fiber dies.  We mark the thread as "detached" here
-    // so that we can validate, in our DLL_THREAD_DETACH handler, that the thread was already destroyed at that
-    // point.
-    SetDetached();
-
     RedhawkGCInterface::ReleaseAllocContext(GetAllocContext());
+    SetDetached();
 }
 
 void Thread::Destroy()
@@ -354,18 +343,6 @@ void Thread::Destroy()
 
     if (m_hPalThread != INVALID_HANDLE_VALUE)
         PalCloseHandle(m_hPalThread);
-
-    if (m_pThreadLocalModuleStatics != NULL)
-    {
-        for (uint32_t i = 0; i < m_numThreadLocalModuleStatics; i++)
-        {
-            if (m_pThreadLocalModuleStatics[i] != NULL)
-            {
-                RhHandleFree(m_pThreadLocalModuleStatics[i]);
-            }
-        }
-        delete[] m_pThreadLocalModuleStatics;
-    }
 
 #ifdef STRESS_LOG
     ThreadStressLog* ptsl = reinterpret_cast<ThreadStressLog*>(GetThreadStressLog());
@@ -476,6 +453,18 @@ void Thread::GcScanRootsWorker(void * pfnEnumCallback, void * pvCallbackData, St
             // Transition frame may contain callee saved registers that need to be reported as well
             PInvokeTransitionFrame* pTransitionFrame = GetTransitionFrame();
             ASSERT(pTransitionFrame != NULL);
+
+            if (pTransitionFrame == INTERRUPTED_THREAD_MARKER)
+            {
+                GetInterruptedContext()->ForEachPossibleObjectRef
+                (
+                    [&](size_t* pRef)
+                    {
+                        RedhawkGCInterface::EnumGcRefConservatively((PTR_RtuObjectRef)pRef, pfnEnumCallback, pvCallbackData);
+                    }
+                );
+            }
+
             if (pTransitionFrame < pLowerBound)
                 pLowerBound = pTransitionFrame;
 
@@ -591,6 +580,12 @@ void Thread::Hijack()
         return;
     }
 
+    if (IsGCSpecial())
+    {
+        // GC threads can not be forced to run preemptively, so we will not try.
+        return;
+    }
+
 #ifdef FEATURE_SUSPEND_REDIRECTION
     // if the thread is redirected, leave it as-is.
     if (IsStateSet(TSF_Redirected))
@@ -615,10 +610,20 @@ void Thread::HijackCallback(NATIVE_CONTEXT* pThreadContext, void* pThreadToHijac
     Thread* pThread = (Thread*) pThreadToHijack;
     if (pThread == NULL)
     {
-        pThread = ThreadStore::GetCurrentThread();
+        pThread = ThreadStore::GetCurrentThreadIfAvailable();
+        if (pThread == NULL)
+        {
+            ASSERT(!"a not attached thread got signaled");
+            // perhaps we share the signal with something else?
+            return;
+        }
 
-        ASSERT(pThread != NULL);
-        ASSERT(pThread != ThreadStore::GetSuspendingThread());
+        if (pThread == ThreadStore::GetSuspendingThread())
+        {
+            ASSERT(!"trying to suspend suspending thread");
+            // perhaps we share the signal with something else?
+            return;
+        }
     }
 
     // we have a thread stopped, and we do not know where exactly.
@@ -649,11 +654,13 @@ void Thread::HijackCallback(NATIVE_CONTEXT* pThreadContext, void* pThreadToHijac
     // we may be able to do GC stack walk right where the threads is now,
     // as long as the location is a GC safe point.
     ICodeManager* codeManager = runtime->GetCodeManagerForAddress(pvAddress);
-    if (codeManager->IsSafePoint(pvAddress))
+    if (runtime->IsConservativeStackReportingEnabled() ||
+        codeManager->IsSafePoint(pvAddress))
     {
         // we may not be able to unwind in some locations, such as epilogs.
         // such locations should not contain safe points.
-        ASSERT(codeManager->IsUnwindable(pvAddress));
+        // when scanning conservatively we do not need to unwind
+        ASSERT(codeManager->IsUnwindable(pvAddress) || runtime->IsConservativeStackReportingEnabled());
 
         // if we are not given a thread to hijack
         // perform in-line wait on the current thread
@@ -911,6 +918,12 @@ bool Thread::IsHijacked()
     return m_pvHijackedReturnAddress != NULL;
 }
 
+void* Thread::GetHijackedReturnAddress()
+{
+    ASSERT(ThreadStore::GetCurrentThread() == this);
+    return m_pvHijackedReturnAddress;
+}
+
 void Thread::SetState(ThreadStateFlags flags)
 {
     PalInterlockedOr(&m_ThreadStateFlags, flags);
@@ -980,6 +993,8 @@ EXTERN_C NOINLINE void FASTCALL RhpWaitForGC2(PInvokeTransitionFrame * pFrame)
 // Standard calling convention variant and actual implementation for RhpGcPoll
 EXTERN_C NOINLINE void FASTCALL RhpGcPoll2(PInvokeTransitionFrame* pFrame)
 {
+    ASSERT(!Thread::IsHijackTarget(pFrame->m_RIP));
+
     Thread* pThread = ThreadStore::GetCurrentThread();
     pFrame->m_pThread = pThread;
 
@@ -1059,6 +1074,23 @@ void Thread::SetDetached()
     SetState(TSF_Detached);
 }
 
+bool Thread::IsActivationPending()
+{
+    return IsStateSet(TSF_ActivationPending);
+}
+
+void Thread::SetActivationPending(bool isPending)
+{
+    if (isPending)
+    {
+        SetState(TSF_ActivationPending);
+    }
+    else
+    {
+        ClearState(TSF_ActivationPending);
+    }
+}
+
 #endif // !DACCESS_COMPILE
 
 void Thread::ValidateExInfoStack()
@@ -1078,20 +1110,6 @@ void Thread::ValidateExInfoStack()
 #endif // !DACCESS_COMPILE
 }
 
-
-
-// Retrieve the start of the TLS storage block allocated for the given thread for a specific module identified
-// by the TLS slot index allocated to that module and the offset into the OS allocated block at which
-// Redhawk-specific data is stored.
-PTR_UInt8 Thread::GetThreadLocalStorage(uint32_t uTlsIndex, uint32_t uTlsStartOffset)
-{
-#if 0
-    return (*(uint8_t***)(m_pTEB + OFFSETOF__TEB__ThreadLocalStoragePointer))[uTlsIndex] + uTlsStartOffset;
-#else
-    return (*dac_cast<PTR_PTR_PTR_UInt8>(dac_cast<TADDR>(m_pTEB) + OFFSETOF__TEB__ThreadLocalStoragePointer))[uTlsIndex] + uTlsStartOffset;
-#endif
-}
-
 #ifndef DACCESS_COMPILE
 
 #ifndef TARGET_UNIX
@@ -1103,29 +1121,32 @@ EXTERN_C NATIVEAOT_API uint32_t __cdecl RhCompatibleReentrantWaitAny(UInt32_BOOL
 
 FORCEINLINE bool Thread::InlineTryFastReversePInvoke(ReversePInvokeFrame * pFrame)
 {
-    // Do we need to attach the thread?
-    if (!IsStateSet(TSF_Attached))
-        return false; // thread is not attached
+    // remember the current transition frame, so it will be restored when we return from reverse pinvoke
+    pFrame->m_savedPInvokeTransitionFrame = m_pTransitionFrame;
 
     // If the thread is already in cooperative mode, this is a bad transition that will be a fail fast unless we are in
     // a do not trigger mode.  The exception to the rule allows us to have [UnmanagedCallersOnly] methods that are called via
     // the "restricted GC callouts" as well as from native, which is necessary because the methods are CCW vtable
     // methods on interfaces passed to native.
-    if (IsCurrentThreadInCooperativeMode())
+    // We will allow threads in DoNotTriggerGc mode to do reverse PInvoke regardless of their coop state.
+    if (IsDoNotTriggerGcSet())
     {
-        if (IsDoNotTriggerGcSet())
-        {
-            // RhpTrapThreads will always be set in this case, so we must skip that check.  We must be sure to
-            // zero-out our 'previous transition frame' state first, however.
-            pFrame->m_savedPInvokeTransitionFrame = NULL;
-            return true;
-        }
-
-        return false; // bad transition
+        // We expect this scenario only when EE is stopped.
+        ASSERT(ThreadStore::IsTrapThreadsRequested());
+        // no need to do anything
+        return true;
     }
 
-    // save the previous transition frame
-    pFrame->m_savedPInvokeTransitionFrame = m_pTransitionFrame;
+    // Do we need to attach the thread?
+    if (!IsStateSet(TSF_Attached))
+        return false; // thread is not attached
+
+    if (IsCurrentThreadInCooperativeMode())
+        return false; // bad transition
+
+    // this is an ordinary transition to managed code
+    // GC threads should not do that
+    ASSERT(!IsGCSpecial());
 
     // must be in cooperative mode when checking the trap flag
     VolatileStoreWithoutBarrier(&m_pTransitionFrame, NULL);
@@ -1207,6 +1228,7 @@ FORCEINLINE void Thread::InlineReversePInvokeReturn(ReversePInvokeFrame * pFrame
 
 FORCEINLINE void Thread::InlinePInvoke(PInvokeTransitionFrame * pFrame)
 {
+    ASSERT(!IsDoNotTriggerGcSet() || ThreadStore::IsTrapThreadsRequested());
     pFrame->m_pThread = this;
     // set our mode to preemptive
     VolatileStoreWithoutBarrier(&m_pTransitionFrame, pFrame);
@@ -1238,78 +1260,35 @@ COOP_PINVOKE_HELPER(Object *, RhpGetThreadAbortException, ())
     return pCurThread->GetThreadAbortException();
 }
 
-Object* Thread::GetThreadStaticStorageForModule(uint32_t moduleIndex)
+Object** Thread::GetThreadStaticStorage()
 {
-    // Return a pointer to the TLS storage if it has already been
-    // allocated for the specified module.
-    if (moduleIndex < m_numThreadLocalModuleStatics)
-    {
-        Object** threadStaticsStorageHandle = (Object**)m_pThreadLocalModuleStatics[moduleIndex];
-        if (threadStaticsStorageHandle != NULL)
-        {
-            return *threadStaticsStorageHandle;
-        }
-    }
-
-    return NULL;
+    return &m_pThreadLocalStatics;
 }
 
-bool Thread::SetThreadStaticStorageForModule(Object * pStorage, uint32_t moduleIndex)
+COOP_PINVOKE_HELPER(Object**, RhGetThreadStaticStorage, ())
 {
-    // Grow thread local storage if needed.
-    if (m_numThreadLocalModuleStatics <= moduleIndex)
-    {
-        uint32_t newSize = moduleIndex + 1;
-        if (newSize < moduleIndex)
-        {
-            return false;
-        }
-
-        PTR_PTR_VOID pThreadLocalModuleStatics = new (nothrow) PTR_VOID[newSize];
-        if (pThreadLocalModuleStatics == NULL)
-        {
-            return false;
-        }
-
-        memset(&pThreadLocalModuleStatics[m_numThreadLocalModuleStatics], 0, sizeof(PTR_VOID) * (newSize - m_numThreadLocalModuleStatics));
-
-        if (m_pThreadLocalModuleStatics != NULL)
-        {
-            memcpy(pThreadLocalModuleStatics, m_pThreadLocalModuleStatics, sizeof(PTR_VOID) * m_numThreadLocalModuleStatics);
-            delete[] m_pThreadLocalModuleStatics;
-        }
-
-        m_pThreadLocalModuleStatics = pThreadLocalModuleStatics;
-        m_numThreadLocalModuleStatics = newSize;
-    }
-
-    if (m_pThreadLocalModuleStatics[moduleIndex] != NULL)
-    {
-        RhHandleSet(m_pThreadLocalModuleStatics[moduleIndex], pStorage);
-    }
-    else
-    {
-        void* threadStaticsStorageHandle = RhpHandleAlloc(pStorage, 2 /* Normal */);
-        if (threadStaticsStorageHandle == NULL)
-        {
-            return false;
-        }
-        m_pThreadLocalModuleStatics[moduleIndex] = threadStaticsStorageHandle;
-    }
-
-    return true;
+    Thread* pCurrentThread = ThreadStore::RawGetCurrentThread();
+    return pCurrentThread->GetThreadStaticStorage();
 }
 
-COOP_PINVOKE_HELPER(Object*, RhGetThreadStaticStorageForModule, (uint32_t moduleIndex))
+InlinedThreadStaticRoot* Thread::GetInlinedThreadStaticList()
 {
-    Thread * pCurrentThread = ThreadStore::RawGetCurrentThread();
-    return pCurrentThread->GetThreadStaticStorageForModule(moduleIndex);
+    return m_pInlinedThreadLocalStatics;
 }
 
-COOP_PINVOKE_HELPER(FC_BOOL_RET, RhSetThreadStaticStorageForModule, (Array * pStorage, uint32_t moduleIndex))
+void Thread::RegisterInlinedThreadStaticRoot(InlinedThreadStaticRoot* newRoot, TypeManager* typeManager)
 {
-    Thread * pCurrentThread = ThreadStore::RawGetCurrentThread();
-    FC_RETURN_BOOL(pCurrentThread->SetThreadStaticStorageForModule((Object*)pStorage, moduleIndex));
+    ASSERT(newRoot->m_next == NULL);
+    newRoot->m_next = m_pInlinedThreadLocalStatics;
+    m_pInlinedThreadLocalStatics = newRoot;
+    // we do not need typeManager for runtime needs, but it may be useful for debugging purposes.
+    newRoot->m_typeManager = typeManager;
+}
+
+COOP_PINVOKE_HELPER(void, RhRegisterInlinedThreadStaticRoot, (Object** root, TypeManager* typeManager))
+{
+    Thread* pCurrentThread = ThreadStore::RawGetCurrentThread();
+    pCurrentThread->RegisterInlinedThreadStaticRoot((InlinedThreadStaticRoot*)root, typeManager);
 }
 
 // This is function is used to quickly query a value that can uniquely identify a thread
@@ -1325,7 +1304,7 @@ COOP_PINVOKE_HELPER(uint8_t*, RhCurrentNativeThreadId, ())
 // This function is used to get the OS thread identifier for the current thread.
 COOP_PINVOKE_HELPER(uint64_t, RhCurrentOSThreadId, ())
 {
-    return PalGetCurrentThreadIdForLogging();
+    return PalGetCurrentOSThreadId();
 }
 
 // Standard calling convention variant and actual implementation for RhpReversePInvokeAttachOrTrapThread

@@ -81,7 +81,7 @@ int32_t SystemNative_FUTimens(intptr_t fd, TimeSpec* times)
     return result;
 }
 
-uint64_t SystemNative_GetTimestamp()
+uint64_t SystemNative_GetTimestamp(void)
 {
 #if HAVE_CLOCK_GETTIME_NSEC_NP
     return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -96,7 +96,7 @@ uint64_t SystemNative_GetTimestamp()
 #endif
 }
 
-int64_t SystemNative_GetBootTimeTicks()
+int64_t SystemNative_GetBootTimeTicks(void)
 {
 #if defined(TARGET_LINUX) || defined(TARGET_ANDROID)
     struct timespec ts;
@@ -121,6 +121,7 @@ int64_t SystemNative_GetBootTimeTicks()
 
 double SystemNative_GetCpuUtilization(ProcessCpuInformation* previousCpuInfo)
 {
+#if defined(HAVE_GETRUSAGE) && !defined(HOST_BROWSER)
     uint64_t kernelTime = 0;
     uint64_t userTime = 0;
 
@@ -169,4 +170,9 @@ double SystemNative_GetCpuUtilization(ProcessCpuInformation* previousCpuInfo)
     previousCpuInfo->lastRecordedKernelTime = kernelTime;
 
     return cpuUtilization;
+#else
+    (void)previousCpuInfo; // unused
+    assert(false);
+    return 0;
+#endif
 }

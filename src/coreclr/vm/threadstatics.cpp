@@ -52,20 +52,29 @@ void ThreadLocalBlock::FreeTLM(SIZE_T i, BOOL isThreadShuttingdown)
                         ThreadLocalModule::CollectibleDynamicEntry *entry = (ThreadLocalModule::CollectibleDynamicEntry*)pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry;
                         PTR_LoaderAllocator pLoaderAllocator = entry->m_pLoaderAllocator;
 
-                        if (entry->m_hGCStatics != NULL)
+                        // LoaderAllocator may be collected when the thread is shutting down.
+                        // We enter coop mode to ensure that we get a valid value of the exposed object and
+                        // can safely clean up handles if it is not yet collected.
+                        GCX_COOP();
+
+                        LOADERALLOCATORREF loaderAllocator = pLoaderAllocator->GetExposedObject();
+                        if (loaderAllocator != NULL)
                         {
-                            pLoaderAllocator->FreeHandle(entry->m_hGCStatics);
-                        }
-                        if (entry->m_hNonGCStatics != NULL)
-                        {
-                            pLoaderAllocator->FreeHandle(entry->m_hNonGCStatics);
+                            if (entry->m_hGCStatics != NULL)
+                            {
+                                pLoaderAllocator->FreeHandle(entry->m_hGCStatics);
+                            }
+                            if (entry->m_hNonGCStatics != NULL)
+                            {
+                                pLoaderAllocator->FreeHandle(entry->m_hNonGCStatics);
+                            }
                         }
                     }
                     delete pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry;
                     pThreadLocalModule->m_pDynamicClassTable[k].m_pDynamicEntry = NULL;
                 }
             }
-            delete pThreadLocalModule->m_pDynamicClassTable;
+            delete[] pThreadLocalModule->m_pDynamicClassTable;
             pThreadLocalModule->m_pDynamicClassTable = NULL;
         }
 
@@ -160,7 +169,7 @@ void ThreadLocalBlock::EnsureModuleIndex(ModuleIndex index)
     }
 
     if (pOldModuleSlots != NULL)
-        delete pOldModuleSlots;
+        delete[] pOldModuleSlots;
 }
 
 #endif
@@ -525,32 +534,22 @@ void    ThreadLocalModule::AllocateDynamicClass(MethodTable *pMT)
     {
         if (pDynamicStatics == NULL)
         {
-            SIZE_T dynamicEntrySize;
+            // If these allocations fail, we will throw
             if (pMT->Collectible())
             {
-                dynamicEntrySize = sizeof(CollectibleDynamicEntry);
+                pDynamicStatics = new CollectibleDynamicEntry(pMT->GetLoaderAllocator());
             }
             else
             {
-                dynamicEntrySize = DynamicEntry::GetOffsetOfDataBlob() + dwStaticBytes;
+                pDynamicStatics = new({dwStaticBytes}) NormalDynamicEntry();
             }
 
-            // If this allocation fails, we will throw
-            pDynamicStatics = (DynamicEntry*)new BYTE[dynamicEntrySize];
 
 #ifdef FEATURE_64BIT_ALIGNMENT
             // The memory block has be aligned at MAX_PRIMITIVE_FIELD_SIZE to guarantee alignment of statics
             static_assert_no_msg(sizeof(NormalDynamicEntry) % MAX_PRIMITIVE_FIELD_SIZE == 0);
             _ASSERTE(IS_ALIGNED(pDynamicStatics, MAX_PRIMITIVE_FIELD_SIZE));
 #endif
-
-            // Zero out the new DynamicEntry
-            memset((BYTE*)pDynamicStatics, 0, dynamicEntrySize);
-
-            if (pMT->Collectible())
-            {
-                ((CollectibleDynamicEntry*)pDynamicStatics)->m_pLoaderAllocator = pMT->GetLoaderAllocator();
-            }
 
             // Save the DynamicEntry in the DynamicClassTable
             m_pDynamicClassTable[dwID].m_pDynamicEntry = pDynamicStatics;

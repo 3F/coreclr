@@ -1311,6 +1311,11 @@ LExit:
 
     DebuggerRCThread* t = (DebuggerRCThread*)g_pRCThread;
 
+    if (FAILED(SetThreadName(t->m_thread, W(".NET Debugger"))))
+    {
+        LOG((LF_CORDB, LL_INFO10000, "DebuggerRCThread name set failed\n"));
+    }
+
     t->ThreadProc(); // this thread is local, go and become the helper
 
     return 0;
@@ -1366,7 +1371,6 @@ HRESULT DebuggerRCThread::Start(void)
         {
             LOG((LF_CORDB, LL_EVERYTHING, "DebuggerRCThread failed, err=%d\n", GetLastError()));
             hr = HRESULT_FROM_GetLastError();
-
         }
         else
         {
@@ -1591,7 +1595,7 @@ bool DebuggerRCThread::IsRCThreadReady()
     // leaving the threadid still non-0. So check the actual thread object
     // and make sure it's still around.
     int ret = WaitForSingleObject(m_thread, 0);
-    LOG((LF_CORDB, LL_EVERYTHING, "DRCT::IsReady - wait(0x%p)=%d, GetLastError() = %d\n", m_thread, ret, GetLastError()));
+    LOG((LF_CORDB, LL_EVERYTHING, "DRCT::IsReady - wait(%p)=0x%x, GetLastError() = 0x%x\n", m_thread, ret, GetLastError()));
 
     if (ret != WAIT_TIMEOUT)
     {

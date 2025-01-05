@@ -30,7 +30,7 @@
 #include "array.h"
 #include "eepolicy.h"
 
-
+#include <minipal/cpuid.h>
 
 
 FCIMPL0(UINT32, SystemNative::GetTickCount)
@@ -48,8 +48,6 @@ FCIMPL0(UINT64, SystemNative::GetTickCount64)
     return ::GetTickCount64();
 }
 FCIMPLEND;
-
-
 
 
 extern "C" VOID QCALLTYPE Environment_Exit(INT32 exitcode)
@@ -162,13 +160,11 @@ void SystemNative::GenericFailFast(STRINGREF refMesgString, EXCEPTIONREF refExce
         EXCEPTIONREF refExceptionForWatsonBucketing;
         STRINGREF refErrorSourceString;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
-
-    GCPROTECT_BEGIN(gc);
-
     gc.refMesgString = refMesgString;
     gc.refExceptionForWatsonBucketing = refExceptionForWatsonBucketing;
     gc.refErrorSourceString = refErrorSourceString;
+
+    GCPROTECT_BEGIN(gc);
 
     // Managed code injected FailFast maps onto the unmanaged version
     // (EEPolicy::HandleFatalError) in the following manner: the exit code is
@@ -238,7 +234,7 @@ void SystemNative::GenericFailFast(STRINGREF refMesgString, EXCEPTIONREF refExce
     else
     {
         pszMessage = W("There is not enough memory to print the supplied FailFast message.");
-        cchMessage = (DWORD)wcslen(pszMessage);
+        cchMessage = (DWORD)u16_strlen(pszMessage);
     }
 
     if (cchMessage == 0) {

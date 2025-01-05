@@ -59,13 +59,6 @@ void SafeExitProcess(UINT exitCode, ShutdownCompleteAction sca = SCA_ExitProcess
         }
     }
 
-    // Turn off exception processing, because if some other random DLL has a
-    //  fault in DLL_PROCESS_DETACH, we could get called for exception handling.
-    //  Since we've turned off part of the runtime, we can't, for instance,
-    //  properly execute the GC that handling an exception might trigger.
-    g_fNoExceptions = true;
-    LOG((LF_EH, LL_INFO10, "SafeExitProcess: turning off exceptions\n"));
-
     if (sca == SCA_TerminateProcessWhenShutdownComplete)
     {
         // disabled because if we fault in this code path we will trigger our Watson code
@@ -467,13 +460,8 @@ void EEPolicy::LogFatalError(UINT exitCode, UINT_PTR address, LPCWSTR pszMessage
             }
             else
             {
-                // Fetch the localized Fatal Execution Engine Error text or fall back on a hardcoded variant if things get dire.
-                InlineSString<80> ssMessage;
-                InlineSString<80> ssErrorFormat;
-                if(!ssErrorFormat.LoadResource(CCompRC::Optional, IDS_ER_UNMANAGEDFAILFASTMSG ))
-                    ssErrorFormat.Set(W("at IP 0x%1 (0x%2) with exit code 0x%3."));
-                SmallStackSString addressString;
-                addressString.Printf(W("%p"), pExceptionInfo? (PVOID)pExceptionInfo->ExceptionRecord->ExceptionAddress : (PVOID)address);
+                WCHAR addressString[MaxIntegerDecHexString + 1];
+                FormatInteger(addressString, ARRAY_SIZE(addressString), "%p", pExceptionInfo ? (SIZE_T)pExceptionInfo->ExceptionRecord->ExceptionAddress : (SIZE_T)address);
 
                 // We should always have the reference to the runtime's instance
                 _ASSERTE(GetClrModuleBase() != NULL);
@@ -481,14 +469,15 @@ void EEPolicy::LogFatalError(UINT exitCode, UINT_PTR address, LPCWSTR pszMessage
                 // Setup the string to contain the runtime's base address. Thus, when customers report FEEE with just
                 // the event log entry containing this string, we can use the absolute and base addresses to determine
                 // where the fault happened inside the runtime.
-                SmallStackSString runtimeBaseAddressString;
-                runtimeBaseAddressString.Printf(W("%p"), GetClrModuleBase());
+                WCHAR runtimeBaseAddressString[MaxIntegerDecHexString + 1];
+                FormatInteger(runtimeBaseAddressString, ARRAY_SIZE(runtimeBaseAddressString), "%p", (SIZE_T)GetClrModuleBase());
 
-                SmallStackSString exitCodeString;
-                exitCodeString.Printf(W("%x"), exitCode);
+                WCHAR exitCodeString[MaxIntegerDecHexString + 1];
+                FormatInteger(exitCodeString, ARRAY_SIZE(exitCodeString), "%x", exitCode);
 
                 // Format the string
-                ssMessage.FormatMessage(FORMAT_MESSAGE_FROM_STRING, (LPCWSTR)ssErrorFormat, 0, 0, addressString, runtimeBaseAddressString,
+                InlineSString<80> ssMessage;
+                ssMessage.FormatMessage(FORMAT_MESSAGE_FROM_STRING, W("at IP 0x%1 (0x%2) with exit code 0x%3."), 0, 0, addressString, runtimeBaseAddressString,
                     exitCodeString);
                 reporter.AddDescription(ssMessage);
             }
@@ -616,14 +605,39 @@ void DECLSPEC_NORETURN EEPolicy::HandleFatalStackOverflow(EXCEPTION_POINTERS *pE
     if (pExceptionInfo && pExceptionInfo->ContextRecord)
     {
         GCX_COOP();
+        CONTEXT *pExceptionContext = pExceptionInfo->ContextRecord;
+
 #if defined(TARGET_X86) && defined(TARGET_WINDOWS)
         // For Windows x86, we don't have a reliable method to unwind to the first managed call frame,
         // so we handle at least the cases when the stack overflow happens in JIT helpers
         AdjustContextForJITHelpers(pExceptionInfo->ExceptionRecord, pExceptionInfo->ContextRecord);
 #else
-        Thread::VirtualUnwindToFirstManagedCallFrame(pExceptionInfo->ContextRecord);
+        // There are three possible kinds of locations where the stack overflow can happen:
+        // 1. In managed code
+        // 2. In native code with no explicit frame above the topmost managed frame
+        // 3. In native code with a explicit frame(s) above the topmost managed frame
+        // The FaultingExceptionFrame's context needs to point to the topmost managed code frame except for the case 3.
+        // In that case, it needs to point to the actual frame where the stack overflow happened, otherwise the stack 
+        // walker would skip the explicit frame(s) and misbehave.
+        Thread *pThread = GetThreadNULLOk();
+        if (pThread)
+        {
+            // Use the context in the FaultingExceptionFrame as a temporary store for unwinding to the first managed frame
+            CopyOSContext((&fef)->GetExceptionContext(), pExceptionInfo->ContextRecord);
+            Thread::VirtualUnwindToFirstManagedCallFrame((&fef)->GetExceptionContext());
+            if (GetSP((&fef)->GetExceptionContext()) > (TADDR)pThread->GetFrame())
+            {
+                // If the unwind has crossed any explicit frame, use the original exception context.
+                pExceptionContext = pExceptionInfo->ContextRecord;
+            }
+            else
+            {
+                // Otherwise use the first managed frame context.
+                pExceptionContext = (&fef)->GetExceptionContext();
+            }
+        }
 #endif
-        fef.InitAndLink(pExceptionInfo->ContextRecord);
+        fef.InitAndLink(pExceptionContext);
     }
 
     static volatile LONG g_stackOverflowCallStackLogged = 0;

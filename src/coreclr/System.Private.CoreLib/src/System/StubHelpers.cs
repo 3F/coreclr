@@ -382,7 +382,7 @@ namespace System.StubHelpers
         {
             if (IntPtr.Zero != pNative)
             {
-                Marshal.FreeCoTaskMem((IntPtr)(((long)pNative) - sizeof(uint)));
+                Marshal.FreeCoTaskMem(pNative - sizeof(uint));
             }
         }
     }  // class VBByValStrMarshaler
@@ -532,7 +532,7 @@ namespace System.StubHelpers
         // Needs to match exactly with MngdNativeArrayMarshaler in ilmarshalers.h
         internal struct MarshalerState
         {
-#pragma warning disable CA1823 // not used by managed code
+#pragma warning disable CA1823, IDE0044 // not used by managed code
             private IntPtr m_pElementMT;
             private IntPtr m_Array;
             private IntPtr m_pManagedNativeArrayMarshaler;
@@ -643,7 +643,7 @@ namespace System.StubHelpers
         }
 
         // Pointer to MngdNativeArrayMarshaler, ownership not assumed.
-        private IntPtr pvArrayMarshaler;
+        private readonly IntPtr pvArrayMarshaler;
 
         // Type of action to perform after the CLR-to-unmanaged call.
         private BackPropAction backPropAction;
@@ -1074,7 +1074,7 @@ namespace System.StubHelpers
             m_obj = obj;
         }
 
-        private object m_obj;
+        private readonly object m_obj;
 
         protected override void DestroyCore()
         {
@@ -1092,7 +1092,7 @@ namespace System.StubHelpers
             m_handle = handle;
         }
 
-        private SafeHandle m_handle;
+        private readonly SafeHandle m_handle;
 
         // This field is passed by-ref to SafeHandle.DangerousAddRef.
         // DestroyCore ignores this element if m_owned is not set to true.
@@ -1111,11 +1111,77 @@ namespace System.StubHelpers
         }
     }  // class CleanupWorkListElement
 
+    internal unsafe struct CopyConstructorCookie
+    {
+        private void* m_source;
+
+        private nuint m_destinationOffset;
+
+        public delegate*<void*, void*, void> m_copyConstructor;
+
+        public delegate*<void*, void> m_destructor;
+
+        public CopyConstructorCookie* m_next;
+
+        [StackTraceHidden]
+        public void ExecuteCopy(void* destinationBase)
+        {
+            if (m_copyConstructor != null)
+            {
+                m_copyConstructor((byte*)destinationBase + m_destinationOffset, m_source);
+            }
+
+            if (m_destructor != null)
+            {
+                m_destructor(m_source);
+            }
+        }
+    }
+
+    internal unsafe struct CopyConstructorChain
+    {
+        public void* m_realTarget;
+        public CopyConstructorCookie* m_head;
+
+        public void Add(CopyConstructorCookie* cookie)
+        {
+            cookie->m_next = m_head;
+            m_head = cookie;
+        }
+
+        [ThreadStatic]
+        private static CopyConstructorChain s_copyConstructorChain;
+
+        public void Install(void* realTarget)
+        {
+            m_realTarget = realTarget;
+            s_copyConstructorChain = this;
+        }
+
+        [StackTraceHidden]
+        private void ExecuteCopies(void* destinationBase)
+        {
+            for (CopyConstructorCookie* current = m_head; current != null; current = current->m_next)
+            {
+                current->ExecuteCopy(destinationBase);
+            }
+        }
+
+        [UnmanagedCallersOnly]
+        [StackTraceHidden]
+        public static void* ExecuteCurrentCopiesAndGetTarget(void* destinationBase)
+        {
+            void* target = s_copyConstructorChain.m_realTarget;
+            s_copyConstructorChain.ExecuteCopies(destinationBase);
+            // Reset this instance to ensure we don't accidentally execute the copies again.
+            // All of the pointers point to the stack, so we don't need to free any memory.
+            s_copyConstructorChain = default;
+            return target;
+        }
+    }
+
     internal static class StubHelpers
     {
-        [MethodImpl(MethodImplOptions.InternalCall)]
-        internal static extern IntPtr GetNDirectTarget(IntPtr pMD);
-
         [MethodImpl(MethodImplOptions.InternalCall)]
         internal static extern IntPtr GetDelegateTarget(Delegate pThis);
 
@@ -1297,7 +1363,7 @@ namespace System.StubHelpers
 #endif
 
         [Intrinsic]
-        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        [MethodImpl(MethodImplOptions.InternalCall)]
         internal static extern IntPtr NextCallReturnAddress();
     }  // class StubHelpers
 }

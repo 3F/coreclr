@@ -294,7 +294,7 @@ FCIMPL4(IUnknown*, StubHelpers::GetCOMIPFromRCW, Object* pSrcUNSAFE, MethodDesc*
     CONTRACTL
     {
         FCALL_CHECK;
-        PRECONDITION(pMD->IsComPlusCall() || pMD->IsGenericComPlusCall() || pMD->IsEEImpl());
+        PRECONDITION(pMD->IsComPlusCall() || pMD->IsEEImpl());
     }
     CONTRACTL_END;
 
@@ -455,15 +455,6 @@ FCIMPL0(void, StubHelpers::ClearLastError)
 }
 FCIMPLEND
 
-FCIMPL1(void*, StubHelpers::GetNDirectTarget, NDirectMethodDesc* pNMD)
-{
-    FCALL_CONTRACT;
-
-    FCUnique(0xa2);
-    return pNMD->GetNDirectTarget();
-}
-FCIMPLEND
-
 FCIMPL1(void*, StubHelpers::GetDelegateTarget, DelegateObject *pThisUNSAFE)
 {
     PCODE pEntryPoint = NULL;
@@ -561,6 +552,7 @@ FCIMPL3(SIZE_T, StubHelpers::ProfilerBeginTransitionCallback, SIZE_T pSecretPara
     }
 
     {
+        _ASSERTE(pThread != nullptr);
         GCX_PREEMP_THREAD_EXISTS(pThread);
 
         ProfilerManagedToUnmanagedTransitionMD(pRealMD, COR_PRF_TRANSITION_CALL);
@@ -591,6 +583,7 @@ FCIMPL2(void, StubHelpers::ProfilerEndTransitionCallback, MethodDesc* pRealMD, T
     // and the transition requires us to set up a HMF.
     HELPER_METHOD_FRAME_BEGIN_0();
     {
+        _ASSERTE(pThread != nullptr);
         GCX_PREEMP_THREAD_EXISTS(pThread);
 
         ProfilerUnmanagedToManagedTransitionMD(pRealMD, COR_PRF_TRANSITION_RETURN);

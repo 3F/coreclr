@@ -76,6 +76,8 @@ public:
     unsigned int  GenOptimizeType(void)                     const {LIMITED_METHOD_CONTRACT;  return iJitOptimizeType; }
     bool          JitFramed(void)                           const {LIMITED_METHOD_CONTRACT;  return fJitFramed; }
     bool          JitMinOpts(void)                          const {LIMITED_METHOD_CONTRACT;  return fJitMinOpts; }
+    bool          JitEnableOptionalRelocs(void)             const {LIMITED_METHOD_CONTRACT;  return fJitEnableOptionalRelocs; }
+    bool          DisableOptimizedThreadStaticAccess(void)  const {LIMITED_METHOD_CONTRACT;  return fDisableOptimizedThreadStaticAccess; }
 
     // Tiered Compilation config
 #if defined(FEATURE_TIERED_COMPILATION)
@@ -92,6 +94,7 @@ public:
 
 #if defined(FEATURE_PGO)
     bool          TieredPGO(void) const { LIMITED_METHOD_CONTRACT;  return fTieredPGO; }
+    bool          TieredPGO_InstrumentOnlyHotCode(void) const { LIMITED_METHOD_CONTRACT;  return tieredPGO_InstrumentOnlyHotCode; }
 #endif
 
 #if defined(FEATURE_READYTORUN)
@@ -143,8 +146,6 @@ public:
 
 #ifdef _DEBUG
     bool GenDebuggableCode(void)                    const {LIMITED_METHOD_CONTRACT;  return fDebuggable; }
-
-    bool ShouldExposeExceptionsInCOMToConsole()     const {LIMITED_METHOD_CONTRACT;  return (iExposeExceptionsInCOM & 1) != 0; }
 
     static bool RegexOrExactMatch(LPCUTF8 regex, LPCUTF8 input);
 
@@ -469,9 +470,6 @@ public:
 
 #endif
 
-    int ThreadPoolThreadTimeoutMs() const { LIMITED_METHOD_CONTRACT; return threadPoolThreadTimeoutMs; }
-    int ThreadPoolThreadsToKeepAlive() const { LIMITED_METHOD_CONTRACT; return threadPoolThreadsToKeepAlive; }
-
 private: //----------------------------------------------------------------
 
     bool fInited;                   // have we synced to the registry at least once?
@@ -482,6 +480,8 @@ private: //----------------------------------------------------------------
     bool fTrackDynamicMethodDebugInfo; //  Enable/Disable tracking dynamic method debug info
     bool fJitFramed;                   // Enable/Disable EBP based frames
     bool fJitMinOpts;                  // Enable MinOpts for all jitted methods
+    bool fJitEnableOptionalRelocs;     // Allow optional relocs
+    bool fDisableOptimizedThreadStaticAccess; // Disable OptimizedThreadStatic access
 
     unsigned iJitOptimizeType; // 0=Blended,1=SmallCode,2=FastCode,              default is 0=Blended
 
@@ -526,8 +526,6 @@ private: //----------------------------------------------------------------
 
     bool   fConditionalContracts;       // Conditional contracts (off inside asserts)
     bool   fSuppressChecks;             // Disable checks (including contracts)
-
-    DWORD  iExposeExceptionsInCOM;      // Should we exposed exceptions that will be transformed into HRs?
 
     unsigned m_SuspendThreadDeadlockTimeoutMs;  // Used in Thread::SuspendThread()
     unsigned m_SuspendDeadlockTimeout; // Used in Thread::SuspendRuntime.
@@ -647,9 +645,6 @@ private: //----------------------------------------------------------------
     DWORD testThreadAbort;
 #endif
 
-    int threadPoolThreadTimeoutMs;
-    int threadPoolThreadsToKeepAlive;
-
 #if defined(FEATURE_TIERED_COMPILATION)
     bool fTieredCompilation;
     bool fTieredCompilation_QuickJit;
@@ -664,6 +659,7 @@ private: //----------------------------------------------------------------
 
 #if defined(FEATURE_PGO)
     bool fTieredPGO;
+    bool tieredPGO_InstrumentOnlyHotCode;
 #endif
 
 #if defined(FEATURE_READYTORUN)

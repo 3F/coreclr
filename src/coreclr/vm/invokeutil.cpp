@@ -570,7 +570,8 @@ OBJECTREF InvokeUtil::CreateClassLoadExcept(OBJECTREF* classes, OBJECTREF* excep
         OBJECTREF o;
         STRINGREF str;
     } gc;
-    ZeroMemory(&gc, sizeof(gc));
+    gc.o = NULL;
+    gc.str = NULL;
 
     MethodTable *pVMClassLoadExcept = CoreLibBinder::GetException(kReflectionTypeLoadException);
     gc.o = AllocateObject(pVMClassLoadExcept);
@@ -680,7 +681,7 @@ void InvokeUtil::ValidateObjectTarget(FieldDesc *pField, TypeHandle enclosingTyp
         return;
 
     if (!pField->IsStatic() && !*target)
-        COMPlusThrow(kTargetException,W("RFLCT.Targ_StatFldReqTarg"));
+        COMPlusThrow(kTargetException,W("RFLCT_Targ_StatFldReqTarg"));
 
     // Verify that the object is of the proper type...
     TypeHandle ty = (*target)->GetTypeHandle();
@@ -905,9 +906,13 @@ void InvokeUtil::SetValidField(CorElementType fldType,
         {
             void* pFieldData;
             if (pField->IsStatic())
+            {
                 pFieldData = pField->GetCurrentStaticAddress();
+            }
             else
-                pFieldData = (*((BYTE**)target)) + pField->GetOffset() + sizeof(Object);
+            {
+                pFieldData = pField->GetInstanceAddress(*target);
+            }
 
             if (*valueObj == NULL)
                 InitValueClass(pFieldData, pMT);
@@ -1048,9 +1053,12 @@ OBJECTREF InvokeUtil::GetFieldValue(FieldDesc* pField, TypeHandle fieldType, OBJ
         GCPROTECT_BEGIN(obj);
         // calculate the offset to the field...
         if (pField->IsStatic())
+        {
             p = pField->GetCurrentStaticAddress();
-        else {
-                p = (*((BYTE**)target)) + pField->GetOffset() + sizeof(Object);
+        }
+        else
+        {
+            p = pField->GetInstanceAddress(*target);
         }
         GCPROTECT_END();
 
