@@ -114,7 +114,7 @@
 %token _SIZE _PACK
 %token _VTABLE _VTFIXUP FROMUNMANAGED_ CALLMOSTDERIVED_ _VTENTRY RETAINAPPDOMAIN_
         /* manifest */
-%token _FILE NOMETADATA_ _HASH _ASSEMBLY _PUBLICKEY _PUBLICKEYTOKEN ALGORITHM_ _VER _LOCALE EXTERN_
+%token _FILE NOMETADATA_ _TYPEREF _HASH _ASSEMBLY _PUBLICKEY _PUBLICKEYTOKEN ALGORITHM_ _VER _LOCALE EXTERN_
 %token _MRESOURCE
 %token _MODULE _EXPORT
 %token LEGACY_ LIBRARY_ X86_ AMD64_ ARM_ ARM64_
@@ -1967,6 +1967,10 @@ assemblyDecls           : /* EMPTY */
 assemblyDecl            : _HASH ALGORITHM_ int32              { PASMM->SetAssemblyHashAlg($3); }
                         | secDecl
                         | asmOrRefDecl
+                        | _TYPEREF dottedName AT_ dottedName          { PASMM->AddAssemblyTypeRefLink($2, $4, /*ANY_*/FALSE, /*DENY_*/FALSE); }
+                        | _TYPEREF dottedName ANY_ AT_ dottedName     { PASMM->AddAssemblyTypeRefLink($2, $5, /*ANY_*/TRUE, /*DENY_*/FALSE); }
+                        | _TYPEREF dottedName CONSTRAINT_ DENY_       { PASMM->AddAssemblyTypeRefLink($2, NULL, /*ANY_*/FALSE, /*DENY_*/TRUE); }
+                        | _TYPEREF dottedName CONSTRAINT_ ANY_ DENY_  { PASMM->AddAssemblyTypeRefLink($2, NULL, /*ANY_*/TRUE, /*DENY_*/TRUE); }
                         ;
 
 intOrWildcard           : int32                               { $$ = $1; }

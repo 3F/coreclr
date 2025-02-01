@@ -209,6 +209,7 @@
     KYWD( ".manifestres",   _MRESOURCE,         NO_VALUE )
     KYWD( ".mresource",     _MRESOURCE,         NO_VALUE )
     KYWD( ".module",        _MODULE,            NO_VALUE )
+    KYWD( ".typeref",       _TYPEREF,           NO_VALUE )
         /* Field marshaling keywords */
     KYWD( "marshal",        MARSHAL_,           NO_VALUE )
     KYWD( "custom",         CUSTOM_,            NO_VALUE )

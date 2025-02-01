@@ -277,6 +277,9 @@ void    AsmMan::StartAssembly(_In_ __nullterminated char* szName, _In_opt_z_ cha
     ((Assembler*)m_pAssembler)->m_CustomDescrListStack.PUSH(((Assembler*)m_pAssembler)->m_pCustomDescrList);
     ((Assembler*)m_pAssembler)->m_pCustomDescrList = m_pCurAsmRef ? &(m_pCurAsmRef->m_CustomDescrList) : NULL;
 
+    AddTypeRefLinkToMscorlib("System");
+    AddTypeRefLinkToMscorlib("System.", /*fAny*/ TRUE);
+    AddTypeRefLink("System.Span`", /*szResolutionScope*/ NULL, /*fAny*/ TRUE, /*fDeny*/ TRUE);
 }
 // copied from asmparse.y
 static void corEmitInt(BinStr* buff, unsigned data)
@@ -822,6 +825,121 @@ void    AsmMan::SetManifestResAsmRef(_In_ __nullterminated char* szAsmRefName)
     {
         m_pCurManRes->szAsmRefName = szAsmRefName;
     }
+}
+
+void AsmMan::AddAssemblyTypeRefLink
+(
+    _In_ __nullterminated LPSTR szName,
+    _In_ __nullterminated LPSTR szResolutionScope,
+    BOOL fAny,
+    BOOL fDeny
+)
+{
+    AddTypeRefLinkYacc(szName, szResolutionScope, fAny, fDeny);
+}
+
+BOOL AsmMan::AddTypeRefLink
+(
+    BOOL utilize,
+    LPCSTR szName, LPCSTR szResolutionScope, BOOL fAny, BOOL fDeny
+)
+{
+    if(m_pAssembly)
+    {
+        // disposal is under AsmManAssembly
+        AsmManTypeRefLink* lnk = new (nothrow) AsmManTypeRefLink(utilize);
+        lnk->szName = szName;
+        lnk->szResolutionScope = szResolutionScope;
+        lnk->m_fAny = fAny;
+        lnk->m_fDeny = fDeny;
+
+        m_pAssembly->m_TypeRefLinkList.PUSH(lnk);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+AsmManTypeRefLink* AsmMan::FindTypeRefLinkRecord
+(
+    _In_ __nullterminated LPCSTR pszFullClassName,
+    std::function<BOOL(AsmManTypeRefLink*)> predicate,
+    UINT32* pStartIdx
+)
+{
+    if(!m_pAssembly) return NULL;
+
+    UINT32 _default = 0;
+    if(!pStartIdx) pStartIdx = &_default;
+
+    AsmManTypeRefLink* lnk;
+    for(; lnk = m_pAssembly->m_TypeRefLinkList.PEEK(*pStartIdx); ++(*pStartIdx))
+    {
+        if((!lnk->m_fAny && !strcmp(pszFullClassName, lnk->szName))
+            ||
+            (lnk->m_fAny && !strncmp(pszFullClassName, lnk->szName, strlen(lnk->szName))))
+        {
+            if(predicate(lnk)) return lnk;
+        }
+    }
+    return NULL;
+}
+
+LPCSTR AsmMan::HasTypeRefLinkRecord
+(
+    _In_ __nullterminated LPCSTR pszFullClassName,
+    UINT32* pStartIdx
+)
+{
+    AsmManTypeRefLink* rc = FindTypeRefLinkRecord(pszFullClassName, [](AsmManTypeRefLink* l) -> BOOL
+    {
+        return !l->m_fDeny;
+    },
+    pStartIdx);
+
+    return rc ? rc->szResolutionScope : NULL;
+}
+
+TypeRefFilterResult AsmMan::FilterUsingTypeRefLink
+(
+    _In_ __nullterminated LPCSTR pszFullClassName,
+    _Out_ SString& refRecord
+)
+{
+    if(!m_pAssembly) return TypeRefFilterResult::None;
+
+    TypeRefFilterResult fRet = TypeRefFilterResult::None;
+    bool ignoreLink = false;
+    for(UINT32 i = 0, max = m_pAssembly->m_TypeRefLinkList.COUNT(); i < max; ++i)
+    {
+        if(fRet != TypeRefFilterResult::Link && !ignoreLink)
+        {
+            refRecord.SetUTF8(HasTypeRefLinkRecord(pszFullClassName, &i));
+            if(refRecord.GetCount() > 0) fRet = TypeRefFilterResult::Link;
+            else { i = -1; ignoreLink = true; }
+        }
+        else if(fRet != TypeRefFilterResult::Deny)
+        {
+            if(IsDenied(pszFullClassName, &i)) fRet = TypeRefFilterResult::Deny;
+            else break;
+            if(ignoreLink) break;
+        }
+    }
+    return fRet;
+}
+
+BOOL AsmMan::IsDenied
+(
+    _In_ __nullterminated LPCSTR pszFullClassName,
+    UINT32* pStartIdx
+)
+{
+    if(FindTypeRefLinkRecord(pszFullClassName, [](AsmManTypeRefLink* l) -> BOOL
+    {
+        return l->m_fDeny;
+    },
+    pStartIdx)) return TRUE;
+
+    return FALSE;
 }
 
 HRESULT AsmMan::EmitManifest()

@@ -1193,6 +1193,10 @@ assemblyDecls           : /* EMPTY */
 assemblyDecl            : '.hash' 'algorithm' int32 
                         | secDecl
                         | asmOrRefDecl
+                        | '.typeref' dottedName 'at' dottedName 
+                        | '.typeref' dottedName 'any' 'at' dottedName 
+                        | '.typeref' dottedName 'constraint' 'deny' 
+                        | '.typeref' dottedName 'constraint' 'any' 'deny' 
                         ;
 
 intOrWildcard           : int32 

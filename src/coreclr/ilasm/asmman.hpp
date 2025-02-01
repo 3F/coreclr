@@ -8,6 +8,7 @@
 #define ASMMAN_HPP
 
 #include "specstrings.h"
+#include <functional>
 
 struct AsmManFile
 {
@@ -28,6 +29,35 @@ struct AsmManFile
 //typedef SORTEDARRAY<AsmManFile> AsmManFileList;
 typedef FIFO<AsmManFile> AsmManFileList;
 
+struct AsmManTypeRefLink
+{
+    LPCSTR szName;
+    LPCSTR szResolutionScope;
+
+    BOOL m_fAny;
+    BOOL m_fDeny;
+
+    AsmManTypeRefLink(BOOL utilize)
+        : szName(NULL), szResolutionScope(NULL), m_fAny(FALSE), m_fDeny(FALSE),
+        utilize(utilize)
+    {
+
+    };
+
+    ~AsmManTypeRefLink()
+    {
+        if(utilize)
+        {
+            if(szName) delete[] szName;
+            if(szResolutionScope) delete[] szResolutionScope;
+        }
+    };
+
+private:
+    BOOL utilize;
+};
+typedef FIFO<AsmManTypeRefLink> AsmManTypeRefLinkList;
+
 struct AsmManAssembly
 {
 	BOOL	isRef;
@@ -43,6 +73,7 @@ struct AsmManAssembly
 	BinStr*	pHashBlob;
 	BinStr*	pLocale;
     BOOL    m_fNew;
+    AsmManTypeRefLinkList m_TypeRefLinkList;
     // Security attributes
     PermissionDecl* m_pPermissions;
     PermissionSetDecl* m_pPermissionSets;
@@ -60,6 +91,9 @@ struct AsmManAssembly
         if(pPublicKeyToken) delete pPublicKeyToken;
         if(pHashBlob) delete pHashBlob;
         if(pLocale) delete pLocale;
+
+        AsmManTypeRefLink* lnk;
+        while(lnk = m_TypeRefLinkList.POP()) if(lnk) delete lnk;
     }
     int ComparedTo(AsmManAssembly* pX){ return strcmp(szAlias,pX->szAlias); }
 };
@@ -155,6 +189,11 @@ struct AsmManStrongName
         if (m_pbSignatureKey)
             delete [] m_pbSignatureKey;
     }
+};
+
+enum class TypeRefFilterResult
+{
+    None, Link, Deny
 };
 
 class ErrorReporter;
@@ -267,6 +306,23 @@ public:
         }
         return 0;
     };
+
+    void AddAssemblyTypeRefLink(_In_ __nullterminated LPSTR szName, _In_ __nullterminated LPSTR szResolutionScope, BOOL fAny, BOOL fDeny);
+    AsmManTypeRefLink* FindTypeRefLinkRecord(_In_ __nullterminated LPCSTR pszFullClassName, std::function<BOOL(AsmManTypeRefLink*)> cb, UINT32* pStartIdx = NULL);
+    LPCSTR HasTypeRefLinkRecord(_In_ __nullterminated LPCSTR pszFullClassName, UINT32* pStartIdx = NULL);
+    TypeRefFilterResult FilterUsingTypeRefLink(_In_ __nullterminated LPCSTR pszFullClassName, _Out_ SString& pLink);
+    BOOL IsDenied(_In_ __nullterminated LPCSTR pszFullClassName, UINT32* pStartIdx = NULL);
+
+    BOOL AddTypeRefLink(LPCSTR szName, LPCSTR szResolutionScope = NULL, BOOL fAny = FALSE, BOOL fDeny = FALSE)
+        { return AddTypeRefLink(/*utilize*/FALSE, szName, szResolutionScope, fAny, fDeny); };
+
+    BOOL AddTypeRefLinkToMscorlib(LPCSTR szName, BOOL fAny = FALSE, BOOL fDeny = FALSE)
+        { return AddTypeRefLink(szName, "mscorlib", fAny, fDeny); };
+
+private:
+    BOOL AddTypeRefLink(BOOL utilize, LPCSTR szName, LPCSTR szResolutionScope, BOOL fAny, BOOL fDeny);
+    BOOL AddTypeRefLinkYacc(LPCSTR szName, LPCSTR szResolutionScope, BOOL fAny, BOOL fDeny)
+        { return AddTypeRefLink(/*utilize*/TRUE, szName, szResolutionScope, fAny, fDeny); };
 
 };
 

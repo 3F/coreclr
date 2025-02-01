@@ -24,7 +24,75 @@ Copyright (c) 2016-2025  Denis Kuzmin <x-3F@outlook.com> github/3F
 [![NuGet package](https://img.shields.io/nuget/v/ILAsm.svg)](https://www.nuget.org/packages/ILAsm/)
 [![release](https://img.shields.io/github/release/3F/coreclr.svg)](https://github.com/3F/coreclr/releases/latest)
 
-Note the following,
+### /REBASE
+
+[Rebase](https://github.com/3F/DllExport/pull/123) system object in order `netstandard` \> `System.Runtime` \> `mscorlib` is available starting from 4.700.2+
+
+#### .typeref custom definitions
+
+Starting from 9.3.0+ you can change the binding of any type for specific assemblies using the following `.typeref` directive:
+
+grammar:
+
+```yacc
+assemblyDecl : '.hash' 'algorithm' int32 
+            | secDecl
+            | asmOrRefDecl
+            | '.typeref' dottedName 'at' dottedName 
+            | '.typeref' dottedName 'any' 'at' dottedName 
+            | '.typeref' dottedName 'constraint' 'deny' 
+            | '.typeref' dottedName 'constraint' 'any' 'deny' 
+            ;
+```
+
+The format for changing the link:
+
+```csharp
+.typeref 'Type' [any] at 'ResolutionScope'
+```
+The format for rejecting defined records (predefined by the user and the assembler):
+
+```csharp
+.typeref 'Type' constraint [any] deny
+```
+
+Note keyword `any` points to multiple definitions starting from the specified *Name*
+
+For example, predefined assembler's `.typeref` directives (when */REB* is activated) will mean something like: 
+
+```csharp
+// 9.3.0+
+.assembly 'ClassLibrary1'
+{
+    .typeref 'System.' any at 'mscorlib'
+    .typeref 'System' at 'mscorlib'
+    .typeref 'System.Span`' constraint any deny
+    
+    .custom instance void ...
+    .custom instance void ...
+    .hash algorithm 0x00008004
+    .ver 1:0:0:0
+}
+```
+
+Multiple definitions are competitive or interchangeable. Priority is given to the last from top to bottom. For example,
+
+```csharp
+.typeref 'System.' any at 'System.Runtime'
+.typeref 'System.Math' constraint deny
+.typeref 'System.IO.' constraint any deny
+.typeref 'System.' any at 'mscorlib'
+```
+
+are equal to
+
+```csharp
+.typeref 'System.' any at 'mscorlib'
+```
+
+etc.
+
+### /CVRES
 
 .res / .obj
 
@@ -34,10 +102,14 @@ In order to provide a compatible resource converter to obj COFF-format when asse
 ilasm ... /CVR=cvtres.exe
 ```
 
-**PDB** files are available through GitHub Releases:
-https://github.com/3F/coreclr/releases
+#### Automatic search for resource converter
 
-NuGet Package Preferences:  
+Automatic search is available starting from 9.3.0+ by using [hMSBuild](https://github.com/3F/hMSBuild) to resolve *.res* / *.obj* processing automatically.
+
+## NuGet Package Preferences
 
 * `$(ILAsm_RootPkg)` - path to ILAsm package folder.
 * `$(ILAsm_PathToBin)` - path to `\bin` folder., e.g. *$(ILAsm_PathToBin)Win.x64\ilasm.exe*
+
+**PDB** files are available through GitHub Releases:
+https://github.com/3F/coreclr/releases

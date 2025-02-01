@@ -128,15 +128,33 @@ mdToken Assembler::ResolveClassRef(mdToken tkResScope, _In_ __nullterminated con
         else  // needs to be resolved
             if(!m_fIsMscorlib) tkResScope = GetBaseAsmRef();
     }
+
     if(tkResScope == 1)
     {
         if((pClass = FindCreateClass(pszFullClassName)) != NULL) tkRet = pClass->m_cl;
     }
     else
     {
+        if(m_sysObjRebase)
+        {
+            SString rLink;
+            TypeRefFilterResult typeRef = m_pManifest->FilterUsingTypeRefLink(pszFullClassName, rLink);
+
+            AsmManAssembly* rt = m_pManifest->m_AsmRefLst.PEEK(1);
+            if(rt && rt->tkTok == tkResScope && typeRef != TypeRefFilterResult::Deny)
+            {
+                tkResScope = m_pManifest->m_AsmRefLst.PEEK(0)->tkTok;
+            }
+            else if(typeRef == TypeRefFilterResult::Link && rLink.GetCount() > 0)
+            {
+                tkResScope = m_pManifest->GetAsmRefTokByName(rLink.GetUTF8());
+            }
+        }
+
         tkRet = MakeTypeRef(tkResScope, pszFullClassName);
         pClass = NULL;
     }
+
     if(ppClass) *ppClass = pClass;
     if(ptkSpecial) *ptkSpecial = tkRet;
     return tkRet;
