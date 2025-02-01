@@ -1,5 +1,4 @@
-:: build.ilasm -all -x86 -x64 -release
-:: https://github.com/3F/coreclr
+::! https://github.com/3F/coreclr
 @echo off
 set "args=%*"
 

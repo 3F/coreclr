@@ -133,8 +133,9 @@ protected:
     HRESULT MapTokens(CeeGenTokenMapper *pMapper, IMetaDataImport *pImport);
     HRESULT MapTokensForMethod(CeeGenTokenMapper *pMapper,BYTE *pCode, LPCWSTR szMethodName);
 private:
-    HRESULT ConvertResource(const WCHAR * pszFilename, __in_ecount(cchTempFilename) WCHAR *pszTempFilename, size_t cchTempFilename, PEWriter &pewriter);
-    BOOL RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEWriter &pewriter);
+    HRESULT ConvertResource(const WCHAR* pszFilename, __in_ecount(cchTempFilename) WCHAR* pszTempFilename, size_t cchTempFilename, PEWriter& pewriter);
+    DWORD RunProcess(const StackSString& args, _Out_ SString* stdStream = nullptr, DWORD buffer = 4096);
+    void FindCvtRes(PathString& pathResult);
 };
 
 

@@ -14,7 +14,10 @@
 #include "corerror.h"
 #include <posterror.h>
 
-#include <shlwapi.h>
+#include <filesystem>
+
+// https://github.com/3F/coreclr/issues/2
+const TCHAR* CVTRES_EXE = _T("cvtres.exe");
 
 // The following block contains a template for the default entry point stubs of a COM+
 // IL only program.  One can emit these stubs (with some fix-ups) and make
@@ -251,7 +254,7 @@ CeeFileGenWriter::CeeFileGenWriter() // ctor is protected
     m_outputFileName = NULL;
     m_resourceFileName = NULL;
     m_dllSwitch = false;
-    m_pathToCvtRes = nullptr;
+    m_pathToCvtRes = NULL;
 
     m_entryPoint = 0;
     m_comImageFlags = COMIMAGE_FLAGS_ILONLY;    // ceegen PEs don't have native code
@@ -496,7 +499,7 @@ HRESULT CeeFileGenWriter::setPathToCvtRes(_In_ LPWSTR path)
     int len = lstrlenW(path) + 1;
     m_pathToCvtRes = (LPWSTR)new (nothrow) WCHAR[len];
 
-    TESTANDRETURN(m_pathToCvtRes != nullptr, E_OUTOFMEMORY);
+    TESTANDRETURN(m_pathToCvtRes != NULL, E_OUTOFMEMORY);
     wcscpy_s(m_pathToCvtRes, len, path);
 
     return S_OK;
@@ -914,241 +917,301 @@ HRESULT CeeFileGenWriter::emitExeMain()
     return S_OK;
 } // HRESULT CeeFileGenWriter::emitExeMain()
 
-/**
-* Gets path to converter of resources .res -> obj COFF-format.
-* https://github.com/3F/DllExport/issues/17
-* https://github.com/3F/coreclr/issues/2
-* @param workdir Path to current directory.
-* @param path Path specified by /CVRES key.
-* @param fname File name of converter. null value is valid for handler by default. 
-* @param ret [out] Final path to converter will be here.
-*/
-void pathToCvtRes(LPCWSTR workdir, LPCWSTR path, LPCWSTR fname, __out PathString& ret)
+#ifndef TARGET_UNIX
+
+void TrimPathAsDirectory(const PathString& pathInput, _Out_ PathString& pathOutput)
 {
-    auto retval = [&](LPCWSTR v = nullptr)
-    {
-        ret.Clear();
-        if(v != nullptr) {
-            ret.Append(v);
-        }
-    };
+    pathOutput.Set(pathInput);
 
-    size_t len = lstrlenW(path);
-
-    if(fname == nullptr) {
-        fname = L"cvtres.exe";
-    }
-
-    if(path == nullptr || len < 1) {
-        retval(fname); // leave 'as is' for env.PATH
-        return;
-    }
-
-    // check special symbols in path
-
-    signed char /* : */colon = 0, /* \ */slashL = 0, /* / */slashR = 0;
-    for(size_t i = 0; i < len; ++i)
-    {
-        if(path[i] == L':') {
-            colon = 1;
-            break;
-        }        
-        if(path[i] == L'\\' && ++slashL > 1) {
-            if(i < 2) {
-                slashL = -1;
-            }
-            break;
-        }        
-        if(path[i] == L'/') {
-            slashR = (i == 0) ? -1 : 1;
-            break;
-        }
-    }
-
-    // rules
-
-    if(colon == 0 && slashL == 0 && slashR == 0) // filename only
-    {
-        if(workdir == nullptr) {
-            retval(path);
-            return;
-        }
-
-        ret.Append(workdir); ret.Append(path);
-        if(_waccess(ret.GetUnicode(), 0 /* Check for file existence */) == 0) {
-            return;
-        }
-
-        retval(path);
-        return;
-    }
-
-    ret.Append(path);
-
-    for(auto it = ret.End(), rend = ret.Begin(); it-- != rend;)
+    for(SString::Iterator it = pathOutput.End(), rend = pathOutput.Begin(); it-- != rend;)
     {
         WCHAR c = *it;
 
-        if(c == L' ') continue;
-        ret.Truncate(it + 1);
-
-        if(c == L'/' || c == L'\\') ret.Append(fname);
-        break;
-    }
-
-    if(slashL == -1 || slashR == -1 || colon > 0) { // absolute
-        return;
-    }
-
-    if(workdir != nullptr) {
-        ret.Insert(ret.Begin(), workdir); // workdir + path ^
+        if(c == L'/' || c == L'\\')
+        {
+            pathOutput.Truncate(it + 1);
+            return;
+        }
     }
 }
 
-#ifndef TARGET_UNIX
-BOOL CeeFileGenWriter::RunProcess(LPCWSTR tempResObj, LPCWSTR pszFilename, DWORD* pdwExitCode, PEWriter &pewriter)
+bool ExistsCvtRes(const PathString& path, bool isDir = false)
 {
-    BOOL fSuccess = FALSE;
+    PathString check;
+    if(isDir)
+    {
+        check.Set(path);
+    }
+    else
+    {
+        TrimPathAsDirectory(path, check);
+    }
+    
+    check.Append(CVTRES_EXE);
+    return _waccess(check.GetUnicode(), 0 /* Check for file existence */) == 0;
+}
+
+void EnsureCvtResExeFile(LPCWSTR input, _Out_ PathString& output)
+{
+    if(lstrlenW(input) < 1)
+    {
+        output.Set(CVTRES_EXE);
+        return;
+    }
+
+    output.Set(input);
+
+    for(SString::Iterator it = output.End(), rend = output.Begin(); it-- != rend;)
+    {
+        WCHAR c = *it;
+
+        if(c == _T(' ')) continue;
+        output.Truncate(it + 1);
+
+        if(c == _T('/') || c == _T('\\'))
+        {
+            output.Append(CVTRES_EXE);
+        }
+        break;
+    }
+}
+
+void CeeFileGenWriter::FindCvtRes(PathString& pathResult)
+{
+    // check near current module
+
+    WszGetModuleFileName((HMODULE)GetCurrentModuleBase(), pathResult);
+    if(ExistsCvtRes(pathResult))
+    {
+        TrimPathAsDirectory(pathResult, pathResult);
+        pathResult.Append(CVTRES_EXE);
+        return;
+    }
+
+    // check .NET Framework/64 using hMSBuild
+
+    StackSString cmd;
+    cmd.Append(_T("hMSBuild.bat -only-path -no-vs -no-less-4"));
+
+    if(RunProcess(cmd, &pathResult) == ERROR_SUCCESS && ExistsCvtRes(pathResult))
+    {
+        TrimPathAsDirectory(pathResult, pathResult);
+        pathResult.Append(CVTRES_EXE);
+        return;
+    }
+
+    using recursive_directory_iterator = std::filesystem::recursive_directory_iterator;
+
+    // check MSVC using hMSBuild
+
+    cmd.Set(_T("hMSBuild.bat -only-path -notamd64 -no-less-15"));
+
+    if(RunProcess(cmd, &pathResult) == ERROR_SUCCESS)
+    {
+        TrimPathAsDirectory(pathResult, pathResult);
+
+        pathResult.Append(_T("..\\..\\..\\VC\\Tools\\MSVC\\"));
+
+        recursive_directory_iterator dstver(pathResult.GetUnicode());
+        pathResult.Clear();
+        pathResult.Append(dstver->path().c_str());
+
+        PathString hostx86;
+        hostx86.Set(pathResult);
+        hostx86.Append(_T("\\bin\\Hostx86\\x86\\"));
+        hostx86.Append(CVTRES_EXE);
+
+        if(ExistsCvtRes(hostx86))
+        {
+            pathResult.Set(hostx86);
+            return;
+        }
+
+        pathResult.Append(_T("\\bin\\Hostx64\\x64\\"));
+        pathResult.Append(CVTRES_EXE);
+        if(ExistsCvtRes(pathResult)) return;
+    }
+
+    // check WinSxS
+
+    pathResult.Set(_T("C:\\Windows\\WinSxS\\"));
+
+    for(recursive_directory_iterator it(pathResult.GetUnicode()), end; it != end; ++it)
+    {
+        if(!it->is_directory()) continue;
+
+        std::string path = it->path().string();
+
+        if(path.find("amd64_netfx4-cvtres_exe_") != std::string::npos
+            || path.find("x86_netfx4-cvtres_exe_") != std::string::npos)
+        {
+            PathString winSxS(it->path().c_str());
+            winSxS.Append(_T("\\"));
+            winSxS.Append(CVTRES_EXE);
+
+            if(ExistsCvtRes(winSxS))
+            {
+                pathResult.Set(winSxS);
+                return;
+            }
+        }
+
+        it.disable_recursion_pending();
+    }
+
+    pathResult.Clear();
+} // void CeeFileGenWriter::FindCvtRes
+
+DWORD CeeFileGenWriter::RunProcess(const StackSString& args, _Out_ SString* stdStream, DWORD buffer)
+{
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = NULL;
+
+    HANDLE hStdOutR = NULL;
+    HANDLE hStdOutW = NULL;
+
+    if(!CreatePipe(&hStdOutR, &hStdOutW, &sa, 0)
+        || !SetHandleInformation(hStdOutR, HANDLE_FLAG_INHERIT, 0))
+    {
+        return FALSE;
+    }
+
+    STARTUPINFOW scfg;
+    ZeroMemory(&scfg, sizeof(scfg));
+    scfg.cb = sizeof(scfg);
+    scfg.hStdOutput = hStdOutW;
+    scfg.hStdError = hStdOutW;
+    scfg.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    scfg.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi;
 
-    PathString cvtres;
-    pathToCvtRes(nullptr, m_pathToCvtRes, nullptr, cvtres);
-
-    const WCHAR* wzMachine;
-    if(pewriter.isIA64())
-        wzMachine = L"IA64";
-    else if(pewriter.isAMD64())
-        wzMachine = L"AMD64";
-    else if(pewriter.isARM())
-        wzMachine = L"ARM";
-    else
-        wzMachine = L"IX86";
-
-    // Res file, so convert it
-    StackSString ssCmdLine;
-
-    LPWSTR ext = PathFindExtension(pszFilename);
-    if(*ext == NULL)
+    DWORD exitCode;
+    if(WszCreateProcess
+    (
+        NULL,
+        args.GetUnicode(),
+        NULL,
+        NULL,
+        true,
+        0,
+        0,
+        NULL,
+        &scfg,
+        &pi
+    ))
     {
-        ssCmdLine.Printf(L"%s /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s.\"",
-                    cvtres.GetUnicode(),
-                    wzMachine,
-                    tempResObj,
-                    pszFilename);
-    }
-    else
-    {
-        ssCmdLine.Printf(L"%s /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s\"",
-                    cvtres.GetUnicode(),
-                    wzMachine,
-                    tempResObj,
-                    pszFilename);
-    }
-
-    STARTUPINFOW start;
-    ZeroMemory(&start, sizeof(start));
-    start.cb = sizeof(start);
-    start.dwFlags = STARTF_USESHOWWINDOW;
-    start.wShowWindow = SW_HIDE;
-
-    fSuccess = WszCreateProcess(
-                                NULL,
-                                ssCmdLine.GetUnicode(),
-                                NULL,
-                                NULL,
-                                true,
-                                0,
-                                0,
-                                NULL,
-                                &start,
-                                &pi);
-
-    // If process runs, wait for it to finish
-    if (fSuccess) {
         WaitForSingleObject(pi.hProcess, INFINITE);
-
-        GetExitCodeProcess(pi.hProcess, pdwExitCode);
+        GetExitCodeProcess(pi.hProcess, &exitCode);
 
         CloseHandle(pi.hProcess);
-
         CloseHandle(pi.hThread);
+        CloseHandle(hStdOutW);
+
+        if(stdStream)
+        {
+            CHAR* dst = (*stdStream).OpenUTF8Buffer(buffer);
+
+            DWORD dwRead;
+            ReadFile(hStdOutR, dst, buffer, &dwRead, NULL);
+            (*stdStream).CloseBuffer(dwRead);
+        }
     }
-    return fSuccess;
-} // BOOL RunProcess()
-
-// Ensure that pszFilename is an object file (not just a binary resource)
-// If we convert, then return obj filename in pszTempFilename
-HRESULT CeeFileGenWriter::ConvertResource(const WCHAR * pszFilename, __in_ecount(cchTempFilename) WCHAR *pszTempFilename, size_t cchTempFilename, PEWriter &pewriter)
-{
-    HANDLE hFile = WszCreateFile(pszFilename, GENERIC_READ,
-        FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-
-// failure
-    if (!hFile || (hFile == INVALID_HANDLE_VALUE))
+    else
     {
-        //dbprintf("Can't find resource files:%S\n", pszFilename);
-        return HRESULT_FROM_GetLastError();
+        exitCode = GetLastError();
     }
 
-// Read first 4 bytes. If they're all 0, we have a win32 .res file which must be
-// converted. (So call CvtRes.exe). Else it's an obj file.
+    return exitCode;
+} // DWORD CeeFileGenWriter::RunProcess
 
-    DWORD dwCount = -1;
-    DWORD dwData  = -1;
-
-    BOOL fRet = ReadFile(hFile,
-                    &dwData,
-                    4,
-                    &dwCount,
-                    NULL
+// If we convert, then return obj filename in pszTempFilename
+HRESULT CeeFileGenWriter::ConvertResource(const WCHAR* pszFilename, __in_ecount(cchTempFilename) WCHAR* pszTempFilename, size_t cchTempFilename, PEWriter& pewriter)
+{
+    HANDLE hFile = WszCreateFile
+    (
+        pszFilename,
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
     );
+
+    if(!hFile || (hFile == INVALID_HANDLE_VALUE)) return HRESULT_FROM_GetLastError();
+
+    // Read first 4 bytes. If they're all 0, we have a win32 .res file which must be
+    // converted (e.g. cvtres.exe). Else it's an obj file.
+    DWORD dwCount = -1, dwData = -1;
+    BOOL fRet = ReadFile(hFile, &dwData, 4, &dwCount, NULL);
 
     CloseHandle(hFile);
 
-    if (!fRet) {
-        //dbprintf("Invalid resource file:%S\n", pszFilename);
-        return HRESULT_FROM_GetLastError();
-    }
+    if(!fRet) return HRESULT_FROM_GetLastError();
 
-    if (dwData != 0)
-    {
-        return S_OK;
-    }
+    if(dwData != 0) return S_OK; // obj, we don't need to convert pszFilename
 
-    PathString tempResObj;
-    PathString tempResPath;
-
-    // Create the temp file where the temp path is at rather than where the application is at.
-    if (!WszGetTempPath( tempResPath))
+    PathString tempResObj, tempResPath;
+    if(!WszGetTempPath(tempResPath) || !WszGetTempFileName(tempResPath, L"RES", 0, tempResObj))
     {
         return HRESULT_FROM_GetLastError();
     }
 
-    if (!WszGetTempFileName(tempResPath, L"RES", 0, tempResObj))
+    LPCWSTR lpCvtRes;
+    PathString pCvtRes;
+
+    if(m_pathToCvtRes == NULL)
     {
-        //dbprintf("GetTempFileName failed\n");
-        return HRESULT_FROM_GetLastError();
-    }
-
-    DWORD dwExitCode;
-    fRet = RunProcess(tempResObj, pszFilename, &dwExitCode, pewriter);
-
-    if (!fRet)
-    {   // Couldn't run cvtres.exe
-        return PostError(CEE_E_CVTRES_NOT_FOUND);
-    }
-    else if (dwExitCode != 0)
-    {   // CvtRes.exe ran, but failed
-        return HRESULT_FROM_WIN32(ERROR_RESOURCE_DATA_NOT_FOUND);
+        FindCvtRes(pCvtRes);
+        lpCvtRes = pCvtRes.GetUnicode();
     }
     else
-    {   // Conversion succesful, so return filename.
-        wcscpy_s(pszTempFilename, cchTempFilename, tempResObj);
+    {
+        lpCvtRes = m_pathToCvtRes;
     }
- 
+
+    PathString cvtres;
+    EnsureCvtResExeFile(lpCvtRes, cvtres);
+
+    //TODO: ARM64, F-12
+
+    const WCHAR* machine;
+    if(pewriter.isIA64()) machine = L"IA64";
+
+    else if(pewriter.isAMD64()) machine = L"AMD64";
+
+    else if(pewriter.isARM()) machine = L"ARM";
+
+    else machine = L"IX86";
+
+    // res, convert to obj COFF-format using cvtres
+    StackSString cmd;
+    cmd.Printf
+    (
+        L"%s /NOLOGO /READONLY /MACHINE:%s \"/OUT:%s\" \"%s\"",
+        cvtres.GetUnicode(),
+        machine,
+        (LPCWSTR)tempResObj,
+        pszFilename
+    );
+
+    DWORD pCode = RunProcess(cmd);
+
+    if(pCode == ERROR_FILE_NOT_FOUND) // Couldn't run cvtres.exe
+    {
+        return PostError(CEE_E_CVTRES_NOT_FOUND);
+    }
+    else if (pCode != ERROR_SUCCESS) // cvtres.exe ran, but failed
+    {
+        return HRESULT_FROM_WIN32(ERROR_RESOURCE_DATA_NOT_FOUND);
+    }
+
+    wcscpy_s(pszTempFilename, cchTempFilename, tempResObj);
     return S_OK;
-} // HRESULT ConvertResource()
+} // HRESULT CeeFileGenWriter::ConvertResource
 
 // This function reads a resource file and emits it into the generated PE file.
 // 1. We can only link resources in obj format. Must convert from .res to .obj
