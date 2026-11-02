@@ -609,9 +609,8 @@ HRESULT PEWriter::Init(PESectionMan *pFrom, DWORD createFlags)
     {
         m_ntHeaders->FileHeader.Machine = VAL16(IMAGE_FILE_MACHINE_ARM64);
 
-        // The OS loader already knows how to initialize pure managed assemblies and we have no legacy OS
-        // support to worry about on ARM64 so don't ever create the stub for ARM64 binaries.
-        m_createCorMainStub = false;
+        // The OS loader initializes pure managed assemblies by itself, but an image with unmanaged exports
+        // is not IL-only, so the loader runs its entry point. Keep the stub so that it reaches _CorDllMain.
     }
     else
     {

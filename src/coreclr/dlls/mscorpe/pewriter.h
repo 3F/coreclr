@@ -103,6 +103,9 @@ public:
     bool isARM()  // true  -> target machine is ARM
     { return (m_ntHeaders->FileHeader.Machine == VAL16(IMAGE_FILE_MACHINE_ARMNT)); }
 
+    bool isARM64()  // true  -> target machine is ARM64
+    { return (m_ntHeaders->FileHeader.Machine == VAL16(IMAGE_FILE_MACHINE_ARM64)); }
+
     bool createCorMainStub() // do we need the CorExeMain/CorDllMain stubs?
     { return m_createCorMainStub; }
 

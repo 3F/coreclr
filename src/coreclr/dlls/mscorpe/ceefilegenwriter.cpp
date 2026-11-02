@@ -123,6 +123,29 @@ const BYTE DllMainAMD64Template[] =
 #define CorDllMainAMD64IATOffset		2
 
 //*****************************************************************************
+// This stub is designed for an ARM64 Windows application.  It will call the
+// _CorExeMain or _CorDllMain function in mscoree.dll.
+//
+//    ldr x16, [pc, #12]    ; address of the iat entry
+//    ldr x16, [x16]
+//    br  x16
+//
+// The address in the template is address of the iat entry which is
+// fixed up by the loader when the image is paged in.
+//*****************************************************************************
+
+const BYTE CorMainARM64Template[] =
+{
+	// Jump through IAT to _CorExeMain or _CorDllMain
+    0x70, 0x00, 0x00, 0x58, // ldr x16, [pc, #12]
+    0x10, 0x02, 0x40, 0xF9, // ldr x16, [x16]
+    0x00, 0x02, 0x1F, 0xD6, // br x16
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // address of iat entry
+};
+
+#define CorMainARM64IATOffset		12
+
+//*****************************************************************************
 // This stub is designed for an ia64 Windows application.  It will call the
 // _CorExeMain function in mscoree.dll.  This entry point will in turn load
 // and run the IL program.
@@ -857,6 +880,33 @@ HRESULT CeeFileGenWriter::emitExeMain()
             addAddrReloc(getTextSection(), exeMainBuf, entryPointOffset+CorExeMainAMD64IATOffset, m_iDataSectionIAT);
         }
     }
+    else if (getPEWriter().isARM64())
+    {
+        // Put the entry point code into the PE file
+        unsigned entryPointOffset = getTextSection().dataLen();
+        int iatOffset = (int) (entryPointOffset + CorMainARM64IATOffset);
+        align = 8;    // ARM64 fixups must be 8-byte aligned (this also keeps the code 4-byte aligned)
+
+        // The IAT offset must be aligned because fixup is applied to it.
+        diff = ((iatOffset + align -1) & ~(align-1)) - iatOffset;
+        if (diff)
+        {
+            char* pDiff = getTextSection().getBlock(diff);
+            if(NULL==pDiff) return E_OUTOFMEMORY;
+            memset(pDiff,0,diff);
+            entryPointOffset += diff;
+        }
+        _ASSERTE((getTextSection().dataLen() + CorMainARM64IATOffset) % align == 0);
+        _ASSERTE(entryPointOffset % 4 == 0);
+
+        getPEWriter().setEntryPointTextOffset(entryPointOffset);
+        UCHAR *corMainBuf = (UCHAR*)getTextSection().getBlock(sizeof(CorMainARM64Template));
+        if(corMainBuf==NULL) return E_OUTOFMEMORY;
+        memcpy(corMainBuf, CorMainARM64Template, sizeof(CorMainARM64Template));
+        //mscoree.dll
+        setAddrReloc(corMainBuf+CorMainARM64IATOffset, m_iDataDlls[0].m_iatOffset + m_iDataOffsetIAT);
+        addAddrReloc(getTextSection(), corMainBuf, entryPointOffset+CorMainARM64IATOffset, m_iDataSectionIAT);
+    }
     else if (getPEWriter().isIA64())
     {
         // Must have a PE+ PE64 file
@@ -1176,14 +1226,14 @@ HRESULT CeeFileGenWriter::ConvertResource(const WCHAR* pszFilename, __in_ecount(
     PathString cvtres;
     EnsureCvtResExeFile(lpCvtRes, cvtres);
 
-    //TODO: ARM64, F-12
-
     const WCHAR* machine;
     if(pewriter.isIA64()) machine = L"IA64";
 
     else if(pewriter.isAMD64()) machine = L"AMD64";
 
     else if(pewriter.isARM()) machine = L"ARM";
+
+    else if(pewriter.isARM64()) machine = L"ARM64";
 
     else machine = L"IX86";
 

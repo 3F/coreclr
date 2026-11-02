@@ -504,6 +504,14 @@ static const WORD ExportStubARMTemplate[] =
     0xf8df, 0xf000,         // ldr pc, [pc, #0]
     0x0000, 0x0000          //address of VTFixup slot
 };
+static const DWORD ExportStubARM64Template[] =
+{
+	// Jump through VTFixup table
+    0x58000070,             // ldr x16, [pc, #12]
+    0xF9400210,             // ldr x16, [x16]
+    0xD61F0200,             // br x16
+    0x00000000, 0x00000000  //address of VTFixup slot
+};
 
 DWORD   Assembler::EmitExportStub(DWORD dwVTFSlotRVA)
 {
@@ -534,6 +542,13 @@ DWORD   Assembler::EmitExportStub(DWORD dwVTFSlotRVA)
         EXPORT_STUB_SIZE = sizeof(ExportStubARMTemplate);
         OFFSET_OF_ADDR = 4;
         STUB_ALIGNMENT = 4;
+    }
+    else if(m_dwCeeFileFlags & ICEE_CREATE_MACHINE_ARM64)
+    {
+        STUB_TEMPLATE = (BYTE*)&ExportStubARM64Template[0];
+        EXPORT_STUB_SIZE = sizeof(ExportStubARM64Template);
+        OFFSET_OF_ADDR = 12;
+        STUB_ALIGNMENT = 8;
     }
     else
     {
