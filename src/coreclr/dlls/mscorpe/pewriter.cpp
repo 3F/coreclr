@@ -243,20 +243,6 @@ static inline HRESULT SubOvf_U_U(INT64 & r, UINT64 a, UINT64 b)
 }
 #endif
 
-// Map a CeeSectionRelocType to the PE base relocation type written to .reloc
-static int GetBaseRelocType(int relocType)
-{
-    switch (relocType)
-    {
-    case srRelocHighLow: // 3
-        return IMAGE_REL_BASED_HIGHLOW; // 3
-    case srRelocDir64: // 9
-        return IMAGE_REL_BASED_DIR64; // 10
-    default:
-        _ASSERTE(!"Relocation type has no base relocation");
-        return IMAGE_REL_BASED_ABSOLUTE;
-    }
-}
 
 /******************************************************************/
 /* apply the relocs for this section.
@@ -508,7 +494,7 @@ HRESULT PEWriterSection::applyRelocs(IMAGE_NT_HEADERS  *  pNtHeaders,
 
         if (fBaseReloc && !noBaseBaseReloc)
         {
-            pBaseRelocSection->AddBaseReloc(curRVA, GetBaseRelocType(curType));
+            pBaseRelocSection->AddBaseReloc(curRVA, (curType == srRelocDir64) ? IMAGE_REL_BASED_DIR64 : curType);
         }
 
 #ifdef LOGGING
