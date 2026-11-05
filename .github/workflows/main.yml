@@ -1,0 +1,110 @@
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!local/**'
+      - '!gh-pages'
+    tags-ignore:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+      - '!local/**'
+      - '!gh-pages'
+  workflow_dispatch:
+    inputs:
+      publish_nuget:
+        description: 'Publish to NuGet.org'
+        required: true
+        type: boolean
+        default: false
+      publish_github_release:
+        description: 'Draft GitHub Release'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ${{ vars.VM_IMAGE }}
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: ${{ vars.FETCH_DEPTH }}
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            ${{ vars.SPARSE_CHECKOUT_IGNORE }}
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: build
+        shell: cmd
+        run: ${{ vars.BUILD_CMD }}
+
+      - name: coreclr x64 + PDB
+        uses: actions/upload-artifact@v6
+        with:
+          name: x64
+          path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x64/coreclr.*.7z
+          if-no-files-found: error
+
+      - name: coreclr x86 + PDB
+        uses: actions/upload-artifact@v6
+        with:
+          name: x86
+          path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x86/coreclr.*.7z
+          if-no-files-found: error
+
+      - name: nupkg ILAsm x86 + x64
+        uses: actions/upload-artifact@v6
+        with:
+          name: NuGet
+          path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/ILAsm.*.nupkg
+          if-no-files-found: error
+
+      - name: NuGet login
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Push package to NuGet.org
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true
+        run: >
+          dotnet nuget push artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/ILAsm.*.nupkg
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+      - name: Draft GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          name: CI-${{ github.sha }}
+          tag_name: ci-${{ github.sha }}
+          draft: true
+          prerelease: true
+          body: |
+            `🎲 CI build` ${{ vars.BUILD_CMD }}
+            **Worker image:** ${{ vars.VM_IMAGE }}
+            **Build:** ${{ github.run_id }}-${{ github.run_attempt }} (${{ github.sha }} )
+            **❕** Only for tests. 🗨 Commit message:
+            
+            ${{ github.event.head_commit.message }}
+          files: |
+            artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x64/coreclr.*.7z
+            artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x86/coreclr.*.7z
+            artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/ILAsm.*.nupkg
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
