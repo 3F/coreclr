@@ -101,7 +101,7 @@ void PrintLogo()
     printf("\n.NET IL Disassembler " VER_3FMOD_PRODUCT_STR " | github.com/3F/coreclr\n");
     printf("\n%s", VER_LEGALCOPYRIGHT_LOGO_STR);
     printf("\nCopyright (c) .NET Foundation and Contributors");
-    printf("\nCopyright (c) 2016-2025  Denis Kuzmin <x-3F@outlook.com> github/3F");
+    printf("\nCopyright (c) " VER_3FMOD_YEARS_STR "  Denis Kuzmin <x-3F@outlook.com> github/3F");
     printf("\n\n");
 }
 

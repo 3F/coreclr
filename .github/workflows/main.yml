@@ -35,13 +35,23 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: ${{ vars.FETCH_DEPTH }}
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /*
             ${{ vars.SPARSE_CHECKOUT_IGNORE }}
+
+      - name: Get commit message
+        id: commit_msg
+        shell: bash
+        run: |
+          msg=$(git log -1 --no-merges --pretty=%B)
+          # escape special characters for output:
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$msg" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v3
@@ -51,21 +61,21 @@ jobs:
         run: ${{ vars.BUILD_CMD }}
 
       - name: coreclr x64 + PDB
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: x64
           path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x64/coreclr.*.7z
           if-no-files-found: error
 
       - name: coreclr x86 + PDB
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: x86
           path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x86/coreclr.*.7z
           if-no-files-found: error
 
       - name: nupkg ILAsm x86 + x64
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: NuGet
           path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/ILAsm.*.nupkg
@@ -80,16 +90,24 @@ jobs:
 
       - name: Push package to NuGet.org
         if: github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true
-        run: >
-          dotnet nuget push artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/ILAsm.*.nupkg
-          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
-          --source https://api.nuget.org/v3/index.json
-          --skip-duplicate
+        shell: pwsh
+        run: |
+          $pkg = Get-ChildItem -Path "artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/" -Filter "*.nupkg" | Select-Object -First 1
+          if (-not $pkg) {
+            Write-Error "Not found .nupkg"
+            exit 1
+          }
+          Write-Host "Pushing $($pkg.FullName)"
+          nuget push $pkg.FullName `
+            -ApiKey ${{ steps.login.outputs.NUGET_API_KEY }} `
+            -Source https://api.nuget.org/v3/index.json `
+            -SkipDuplicate
 
       - name: Draft GitHub Release
         if: github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
+          token: ${{ secrets.PUBLISH_GHR_PAT }}
           name: CI-${{ github.sha }}
           tag_name: ci-${{ github.sha }}
           draft: true
@@ -100,7 +118,7 @@ jobs:
             **Build:** ${{ github.run_id }}-${{ github.run_attempt }} (${{ github.sha }} )
             **❕** Only for tests. 🗨 Commit message:
             
-            ${{ github.event.head_commit.message }}
+            ${{ steps.commit_msg.outputs.message }}
           files: |
             artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x64/coreclr.*.7z
             artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x86/coreclr.*.7z

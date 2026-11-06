@@ -13,7 +13,7 @@ Licensed under the [MIT License (MIT)](https://github.com/3F/coreclr/blob/master
 
 ```r
 Copyright (c) .NET Foundation and Contributors
-Copyright (c) 2016-2025  Denis Kuzmin <x-3F@outlook.com> github/3F
+Copyright (c) 2016-2026  Denis Kuzmin <x-3F@outlook.com> github/3F
 ```
 
 ## ILAsm on coreclr

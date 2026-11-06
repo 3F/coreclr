@@ -31,3 +31,4 @@
 #define VER_3FMOD_BNAME_STR         ""
 #define VER_3FMOD_BREV              0
 #define VER_3FMOD_PRODUCT_STR       ""
+#define VER_3FMOD_YEARS_STR         ""
