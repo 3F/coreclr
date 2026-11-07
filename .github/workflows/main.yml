@@ -1,4 +1,4 @@
-name: Build and Publish
+name: Build
 
 on:
   push:
@@ -8,13 +8,12 @@ on:
       - '!gh-pages'
     tags-ignore:
       - '**'
-  pull_request:
-    branches:
-      - '**'
-      - '!local/**'
-      - '!gh-pages'
   workflow_dispatch:
     inputs:
+      build_pr:
+        description: '(Optional) PR number'
+        required: false
+        type: string
       publish_nuget:
         description: 'Publish to NuGet.org'
         required: true
@@ -37,6 +36,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.build_pr && format('refs/pull/{0}/head', inputs.build_pr) || github.ref }}
           fetch-depth: ${{ vars.FETCH_DEPTH }}
           sparse-checkout-cone-mode: false
           sparse-checkout: |

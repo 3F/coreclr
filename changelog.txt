@@ -1,6 +1,19 @@
 3F's IL Assembler / coreclr - https://github.com/3F/coreclr
 - - - - - - - - - - - - - - - 
 
+[9.5.0] 2026.11.07
+
+    * NEW: ARM64 (AArch64) support for unmanaged exports. PR #8 (Thanks @sicklittlemonkey)
+           https://github.com/3F/coreclr/pull/8
+    
+    * FIXED: Incorrect value in 64-bit base relocation type. Part of #8 (Thanks @sicklittlemonkey)
+    
+    * CHANGED: Updated hMSBuild 2.5 as .res/.obj auto searcher
+               https://github.com/3F/hMSBuild/releases/tag/2.5
+               
+    * CHANGED: +.pkg.install v1 support in ILAsm nuget packages.
+    
+
 [9.4.0] 2025.06.06
 
     * NEW: Native PDB (MSF) support in disassembler.

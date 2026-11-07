@@ -1,7 +1,7 @@
 [.NET Core CLR (coreclr)](https://github.com/3F/coreclr)
 =========================
 
-[![Build status](https://ci.appveyor.com/api/projects/status/asb0nbj8tly2rp7p/branch/master?svg=true)](https://ci.appveyor.com/project/3Fs/coreclr-62ql7/branch/master)
+[![Build status](https://github.com/3F/coreclr/actions/workflows/main.yml/badge.svg)](https://github.com/3F/coreclr/actions/workflows/main.yml)
 [![License](https://img.shields.io/badge/License-MIT-74A5C2.svg)](https://github.com/3F/coreclr/blob/master/LICENSE.TXT)
 
 .NET Core complete runtime implementation. Also includes IL Assembler, IL Disassembler, RyuJIT, the .NET GC, native interop and many other components.
@@ -121,9 +121,13 @@ ilasm ... /CVR=cvtres.exe
 
 Automatic search is available starting from 9.3.0+ by using [hMSBuild](https://github.com/3F/hMSBuild) and other predefined falbacks to resolve *.res* / *.obj* processing automatically.
 
-#### `.line` with support for both PDB types (MSF + Portable(BSJB))
+### `.line` with support for both PDB types (MSF + Portable(BSJB))
 
 [Read more about](https://github.com/3F/coreclr/issues/3)
+
+### ARM64 (AArch64) support for unmanaged exports (e.g. [DllExport](https://github.com/3F/DllExport))
+
+[Read more about](https://github.com/3F/coreclr/pull/8)
 
 ## NuGet Package Preferences
 
