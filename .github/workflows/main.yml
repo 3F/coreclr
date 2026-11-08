@@ -3,9 +3,7 @@ name: Build
 on:
   push:
     branches:
-      - '**'
-      - '!local/**'
-      - '!gh-pages'
+      - release
     tags-ignore:
       - '**'
   workflow_dispatch:
@@ -60,6 +58,13 @@ jobs:
         shell: cmd
         run: ${{ vars.BUILD_CMD }}
 
+      - name: coreclr arm64 + PDB
+        uses: actions/upload-artifact@v7
+        with:
+          name: arm64
+          path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/arm64/coreclr.*.7z
+          if-no-files-found: error
+
       - name: coreclr x64 + PDB
         uses: actions/upload-artifact@v7
         with:
@@ -74,7 +79,7 @@ jobs:
           path: artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x86/coreclr.*.7z
           if-no-files-found: error
 
-      - name: nupkg ILAsm x86 + x64
+      - name: nupkg ILAsm x86 + x64 + arm64
         uses: actions/upload-artifact@v7
         with:
           name: NuGet
@@ -110,6 +115,7 @@ jobs:
           token: ${{ secrets.PUBLISH_GHR_PAT }}
           name: CI-${{ github.sha }}
           tag_name: ci-${{ github.sha }}
+          target_commitish: ${{ github.sha }}
           draft: true
           prerelease: true
           body: |
@@ -122,6 +128,7 @@ jobs:
           files: |
             artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x64/coreclr.*.7z
             artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/x86/coreclr.*.7z
+            artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/arm64/coreclr.*.7z
             artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/ILAsm.*.nupkg
           fail_on_unmatched_files: true
         env:

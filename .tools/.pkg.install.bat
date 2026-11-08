@@ -14,13 +14,13 @@ if "%~2"=="install" goto :install
 if "%~2"=="run" goto :install
 
 set "filter="
+set "defaultArch=x64,x86,arm64"
 setlocal enableDelayedExpansion
 
 if not defined use (
 
     if "%tmode%"=="touch" (
-        call :xcopyX x64 "" +
-        call :xcopyX x86 "" +
+        call :processArch "%defaultArch%" "" +
     )
 
 ) else (
@@ -34,21 +34,19 @@ if not defined use (
         set "oprev=@"
     )
 
-    if "!xcmd!"=="x64" (
-        call :xcopyX x64 !oprev!
+    if not defined xcmd (
+        if defined oprev call :processArch "%defaultArch%" "!oprev!" +
 
-    ) else if "!xcmd!"=="x86" (
-        call :xcopyX x86 !oprev!
+    ) else (
+        set "_xcmd=!xcmd:+=,!"
+        if "!_xcmd!"=="!xcmd!" ( set "plus=" ) else set "plus=+"
 
-    ) else if "!xcmd!"=="x64+x86" (
-        call :xcopyX x64 "!oprev!" +
-        call :xcopyX x86 "!oprev!" +
+        call :processArch "!_xcmd!" "!oprev!" !plus!
+    )
+    exit /B 0
 
-    ) else if "!xcmd!"=="x86+x64" (
-        call :xcopyX x86 "!oprev!" +
-        call :xcopyX x64 "!oprev!" +
-
-    ) else if "!xcmd!"=="-" (
+    :notarch
+    if "!xcmd!"=="-" (
         exit /B 0
 
     ) else (
@@ -57,6 +55,16 @@ if not defined use (
 )
 
 exit /B 0
+
+:processArch
+    :: (1) architectures separated by `,`
+    :: [2] (optional) direction flag
+    :: [3] (optional) use of a combination
+    for %%a in (%~1) do (
+        if not "%%~a"=="x64" if not "%%~a"=="x86" if not "%%~a"=="arm64" goto :notarch
+        call :xcopyX %%~a "%~2" %~3
+    )
+exit /B0
 
 :xcopyX
     :: (1) arch
@@ -114,15 +122,17 @@ exit /B 0
     echo.
     echo.For example,
     echo.& echo gnt ~ILAsm 
-    echo.& echo     ILAsm\x64\, ILAsm\x86\
-    echo.& echo gnt ~ILAsm -p:use=x64
-    echo.& echo     ILAsm\
+           echo      ILAsm\x64\, ILAsm\x86\, ILAsm\arm64\
     echo.& echo gnt ~ILAsm -p:use=x86
-    echo.& echo     ILAsm\
+           echo      ILAsm\
+    echo.& echo gnt ~ILAsm -p:use=arm64
+           echo      ILAsm\
     echo.& echo gnt ~ILAsm -p:use=@x64
-    echo.& echo     x64\ILAsm\
-    echo.& echo gnt ~ILAsm -p:use=@x64+x86
-    echo.& echo     x64\ILAsm\, x86\ILAsm\
+           echo      x64\ILAsm\
+    echo.& echo gnt ~ILAsm -p:use=arm64+x64
+           echo      ILAsm\arm64\, ILAsm\x64\
+    echo.& echo gnt ~ILAsm -p:use=@x64+x86+arm64
+           echo      x64\ILAsm\, x86\ILAsm\, arm64\ILAsm\
 exit /B 0
 
 :getMajorVersion

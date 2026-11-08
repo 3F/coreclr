@@ -277,6 +277,8 @@
           "",
           "#[(\"$(pkgZipCompressionLevel)\"==\"*Undefined*\") { #[$(pkgZipCompressionLevel = 5)] }]",
           "",
+          "#[$(zipArch = 'arm64')] #[Core events.Post.item(\"NupkgILAsm\").run()]",
+          "",
           "#[$(zipArch = 'x64')] #[Core events.Post.item(\"NupkgILAsm\").run()]",
           "",
           "#[$(zipArch = 'x86')] #[Core events.Post.item(\"NupkgILAsm\").run()]",
