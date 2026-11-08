@@ -1,6 +1,11 @@
 3F's IL Assembler / coreclr - https://github.com/3F/coreclr
 - - - - - - - - - - - - - - - 
 
+[9.5.1] 2026.11.08
+
+    * CHANGED: Provide ARM64 versions of ilasm.exe and ildasm.exe.
+               Support for HOST machines. Part of https://github.com/3F/coreclr/pull/8
+
 [9.5.0] 2026.11.07
 
     * NEW: ARM64 (AArch64) support for unmanaged exports. PR #8 (Thanks @sicklittlemonkey)

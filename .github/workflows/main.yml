@@ -87,14 +87,18 @@ jobs:
           if-no-files-found: error
 
       - name: NuGet login
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true
+        if: |
+          (github.ref == 'refs/heads/release' && github.event_name == 'push') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true)
         id: login
         uses: NuGet/login@v1
         with:
           user: ${{ vars.NUGET_USER }}
 
       - name: Push package to NuGet.org
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true
+        if: |
+          (github.ref == 'refs/heads/release' && github.event_name == 'push') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_nuget == true)
         shell: pwsh
         run: |
           $pkg = Get-ChildItem -Path "artifacts/pkg/${{ vars.CONFIG_DIRNAME }}/" -Filter "*.nupkg" | Select-Object -First 1
@@ -109,7 +113,9 @@ jobs:
             -SkipDuplicate
 
       - name: Draft GitHub Release
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true
+        if: |
+          (github.ref == 'refs/heads/release' && github.event_name == 'push') ||
+          (github.event_name == 'workflow_dispatch' && inputs.publish_github_release == true)
         uses: softprops/action-gh-release@v3
         with:
           token: ${{ secrets.PUBLISH_GHR_PAT }}
